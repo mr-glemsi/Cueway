@@ -29,6 +29,7 @@ internal sealed unsafe class TrayController : IDisposable
     private string? _lastTip;
     private string? _lastThemeId;
 
+    public event Action? ShowMainWindowRequested;
     public event Action? ToggleMainWindowRequested;
     public event Action? OpenSettingsRequested;
     public event Action? ToggleManualLockRequested;
@@ -160,17 +161,19 @@ internal sealed unsafe class TrayController : IDisposable
 
     public void HandleTrayMessage(nuint wParam, nint lParam, RouterStateSnapshot snapshot)
     {
+        const uint NIN_SELECT = 0x0400;
+        const uint NIN_KEYSELECT = 0x0401;
+        const uint WM_CONTEXTMENU = 0x007B;
+
         uint evt = (uint)(lParam & 0xFFFF);
         switch (evt)
         {
-            case Win32.WM_LBUTTONUP:
-            case Win32.WM_LBUTTONDBLCLK:
-            case 0x0400: // NIN_SELECT
+            case NIN_SELECT:
+            case NIN_KEYSELECT:
                 ToggleMainWindowRequested?.Invoke();
                 break;
 
-            case Win32.WM_RBUTTONUP:
-            case 0x007B: // WM_CONTEXTMENU
+            case WM_CONTEXTMENU:
                 ShowContextMenu(snapshot);
                 break;
         }
@@ -213,7 +216,7 @@ internal sealed unsafe class TrayController : IDisposable
             switch ((uint)cmd)
             {
                 case MENU_SHOW:
-                    ToggleMainWindowRequested?.Invoke();
+                    ShowMainWindowRequested?.Invoke();
                     break;
                 case MENU_TOGGLE_LOCK:
                     ToggleManualLockRequested?.Invoke();

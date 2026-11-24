@@ -96,6 +96,7 @@ internal static unsafe class Program
                     trayWheelHook.OnSystemWakeOrUnlock();
                 });
 
+            tray.ShowMainWindowRequested += () => mainWindow.ShowAndFocus();
             tray.ToggleMainWindowRequested += () => mainWindow.ToggleVisibility();
             tray.OpenSettingsRequested += () => mainWindow.ShowAndFocus(settingsTab: true);
             tray.ToggleManualLockRequested += () => engine.ToggleManualLockOnActiveOrSelected();
