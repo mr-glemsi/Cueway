@@ -1,7 +1,7 @@
-# Privacy Policy — Cueway & Cueway Companion
+# Privacy Policy
 
 **Effective Date:** November 24, 2026  
-**Applies to:** Cueway (Windows Desktop Application) and Cueway Companion (Browser Extension for Microsoft Edge, Chromium, Firefox, and Zen Browser)
+**Applies to:** Cueway (Windows Desktop Application) and Cueway Companion (Browser Extension for Chromium and Firefox)
 
 ---
 
@@ -27,7 +27,7 @@ None of your browsing history, form inputs, passwords, or non-media pages are lo
 The Cueway desktop app stores only your local application preferences (theme, language, hotkeys, and discovered media player priority order) in `%LocalAppData%\Cueway\cueway_state.json` on your own PC.
 
 ### 5. No Remote Code
-All scripts inside Cueway Companion are 100% static and bundled inside the signed extension package. No remote JavaScript or external code is ever fetched or executed.
+All scripts in Cueway Companion are static and bundled inside the extension package. No remote JavaScript or external code is fetched or executed.
 
 ---
 
@@ -45,4 +45,4 @@ Cueway Companion yalnızca kendi bilgisayarınızdaki yerel WebSocket köprüsü
 Medya tuşlarıyla tarayıcı sekmelerini bağımsız kontrol edebilmeniz için eklenti yalnızca medya durumu, başlık/kanal bilgisi ve sorgu parametreleri temizlenmiş (`origin + pathname`, `?` ve `#` olmadan) adres bilgisini geçici olarak yerel uygulamaya iletir; hiçbir tarama geçmişi diske yazılmaz.
 
 ### 4. Uzak Kod Yoktur
-Eklenti içindeki tüm kodlar tamamen yerel ve açık kaynaklıdır; dışarıdan herhangi bir kod indirilip çalıştırılmaz.
+Eklenti içindeki tüm kodlar yerel ve açık kaynaklıdır; dışarıdan kod indirilip çalıştırılmaz.

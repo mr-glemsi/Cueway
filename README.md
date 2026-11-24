@@ -1,52 +1,44 @@
 # Cueway
 
-**Lightweight, Native AOT (.NET 10) Windows 10/11 Media Key Router & Tab Controller**
+A lightweight media key router and per-tab media controller for Windows 10 and 11.
 
-![Cueway Preview](StoreSubmission/Assets/store-screenshot-1280x800.png)
+Cueway routes hardware media keys to the highest-priority active player on your system. It works with desktop applications (including players without native Windows media session support) and individual browser tabs through a local companion extension.
 
-Cueway routes your hardware media keys (`Play/Pause`, `Next`, `Previous`, `Stop`) and timeline scrubbing directly to the highest-priority player on your PC—even across **individual tabs inside the same browser** (YouTube, YouTube Music, X, Twitch, Kick) and apps without SMTC (Stremio, VLC, Discord, mpv).
+## Features
 
----
+- Priority-based routing for hardware media keys and playback controls
+- Per-tab playback, volume, mute, and focus control through the companion browser extension
+- Automatic detection of active desktop audio sources, with or without Windows SMTC support
+- Manual target lock (`Alt+M`) and solo mode (`Alt+S`)
+- Fullscreen game detection and automatic pause/resume for lower-priority players
+- Lightweight native Windows build with a system tray interface
 
-## Key Features
+## Browser Extensions
 
-- **Native AOT & Ultra-Light:** Single ~5.5 MB executable, ~14 MB RAM, zero third-party packages, zero idle disk reads, and custom hardware-accelerated Win32/GDI+ UI.
-- **Per-Tab Browser Control (`Cueway Companion`):** Control, mute, adjust real player volume, and focus individual browser tabs over a local-only WebSocket bridge (`ws://127.0.0.1:47621`) without stealing window focus.
-- **Universal App Recognition:** Combines Windows SMTC, mpv IPC pipes, and CoreAudio WASAPI peak detection (Stremio, VLC, PotPlayer, Discord, etc.) with zero hardcoded app lists.
-- **Priority Queue & Manual Lock (`Alt+M`):** Automatically follows your custom app ranking or locks onto a specific app/tab.
-- **Solo Mode (`Alt+S`):** Mutes background audio sources except the active target.
-- **Fullscreen Game Guard & Auto-Pause/Resume:** Keeps games uninterrupted and automatically pauses secondary players when a higher-priority app starts.
-- **9 Languages & 8 Themes:** Turkish, English, Chinese, Spanish, Russian, German, French, Japanese, and Korean; Dark, Light, Nord, Emerald, Amethyst, Amber, Crimson, and Warm Sand themes.
+The companion extensions talk to the desktop app over a local loopback WebSocket (`127.0.0.1:47621`) and make no external network requests.
 
----
+- **Chromium:** `BrowserExtension/Chromium` (Manifest V3)
+- **Firefox:** `BrowserExtension/Firefox` (Manifest V2)
 
-## Companion Browser Extensions
+## Building from Source
 
-- **Firefox / Zen Browser:** `BrowserExtension/Firefox` (MV2)
-- **Microsoft Edge / Google Chrome / Brave / Opera:** `BrowserExtension/Chromium` (MV3)
-
-Ready-to-submit store archives and instructions are in [`StoreSubmission/`](StoreSubmission/SUBMISSION-GUIDE.md).
-
----
-
-## Build from Source
-
-Requires **.NET 10 SDK** (with Native AOT Desktop C++ workload) and optional **Inno Setup 7** for the installer:
+Requires the .NET 10 SDK (with the C++ desktop workload for Native AOT). Inno Setup 7 is optional for packaging the installer.
 
 ```powershell
 # Debug build
 dotnet build Cueway.csproj -c Debug
 
-# Native AOT single-file Release executable
+# Release build (Native AOT)
 dotnet publish Cueway.csproj -c Release -r win-x64
 
-# Optional Windows installer
+# Installer (optional)
 & "C:\Program Files\Inno Setup 7\ISCC.exe" Cueway.iss
 ```
 
----
+## Privacy
 
-## Privacy & License
+Cueway runs entirely locally and does not collect or send user data. See [PRIVACY.md](PRIVACY.md) for details.
 
-- **100% Local, Zero Telemetry:** See [`PRIVACY.md`](PRIVACY.md).
-- **License:** [MIT](LICENSE)
+## License
+
+[MIT](LICENSE)
