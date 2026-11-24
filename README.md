@@ -4,6 +4,10 @@ A lightweight media key router and per-tab media controller for Windows 10 and 1
 
 Cueway routes hardware media keys to the highest-priority active player on your system. It works with desktop applications (including players without native Windows media session support) and individual browser tabs through a local companion extension.
 
+## Download
+
+Download the latest Windows installer (`Cueway-Setup-x64.exe`) from the [Releases](https://github.com/mr-glemsi/Cueway/releases/latest) page.
+
 ## Features
 
 - Priority-based routing for hardware media keys and playback controls
