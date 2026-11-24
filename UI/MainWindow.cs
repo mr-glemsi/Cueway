@@ -1,0 +1,2271 @@
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using Cueway.Config;
+using Cueway.Interop;
+using Cueway.Localization;
+using Cueway.Media;
+using Cueway.Routing;
+using Cueway.Startup;
+
+namespace Cueway.UI;
+
+internal sealed unsafe class MainWindow : IDisposable
+{
+    private const string ClassName = "Cueway_MainWindow";
+    public const uint WM_APP_DISPATCH = Win32.WM_APP + 200;
+    public const uint WM_APP_SHUTDOWN_INSTANCE = Win32.WM_APP + 201;
+
+    private enum TabKind
+    {
+        Dashboard = 0,
+        Settings = 1
+    }
+
+    private sealed record HitRegion(
+        Win32.RECT Bounds,
+        string Id,
+        Action OnClick,
+        bool IsButton = true);
+
+    private sealed record SliderRegion(
+        Win32.RECT Bounds,
+        string Id,
+        string SessionId,
+        int TrackLeft,
+        int TrackWidth);
+
+    private static MainWindow? _instance;
+
+    private readonly StateStore _stateStore;
+    private readonly MediaSessionManager _sessionManager;
+    private readonly MediaRouterEngine _engine;
+    private readonly DynamicIconRenderer _iconRenderer;
+    private readonly StartupService _startupService;
+    private readonly BrowserBridgeServer _bridgeServer;
+    private ExtensionGuideWindow? _guideWindow;
+
+    private readonly object _dispatchLock = new();
+    private readonly Queue<Action> _uiQueue = new();
+
+    private nint _hwnd;
+    private nint _windowBigIcon;
+    private nint _windowSmallIcon;
+    private uint _dpi = 96;
+    private int _clientW = 860;
+    private int _clientH = 680;
+    private int _scrollY;
+    private int _contentTotalH;
+    private int _bodyClipTop;
+    private bool _trackingMouse;
+    private string? _hoverId;
+    private TabKind _activeTab = TabKind.Dashboard;
+    private string? _statusBanner;
+    private bool _statusBannerIsError;
+    private long _statusBannerUntilTick;
+    private bool _taskOpBusy;
+
+    private readonly List<HitRegion> _hitRegions = [];
+    private readonly List<SliderRegion> _sliderRegions = [];
+    private readonly Dictionary<(int PtSize, int Weight, string Face, uint Dpi), nint> _fontCache = new();
+    private string? _lastWinIconAppKey;
+    private string? _lastWinIconExePath;
+    private bool _lastWinIconPlaying;
+    private bool _lastWinIconMuted;
+    private bool _lastWinIconSolo;
+    private string? _lastWinIconThemeId;
+    private bool _windowIconInitialized;
+    private bool _windowIconDirty;
+    private string? _draggingSliderId;
+    private string? _draggingSessionId;
+    private int _dragTrackLeft;
+    private int _dragTrackWidth;
+    private float _dragPreviewVolume;
+    private long _lastSliderDispatchTick;
+    private RouterStateSnapshot _snapshot;
+    private AppSettings _settings;
+    private List<DiscoveredApp> _priorityApps;
+
+    private Func<nuint, bool>? _timerCallback;
+    private Action? _wakeOrUnlockCallback;
+    private Action? _taskbarCreatedCallback;
+    private Action<nuint, nint>? _trayMessageCallback;
+    private Action? _refreshHooksCallback;
+    private uint _wmTaskbarCreated;
+    private bool _disposed;
+
+    public nint Handle => _hwnd;
+    public event Action<bool>? VisibilityChanged;
+    public event Action? ExitRequested;
+
+    public MainWindow(
+        StateStore stateStore,
+        MediaSessionManager sessionManager,
+        MediaRouterEngine engine,
+        DynamicIconRenderer iconRenderer,
+        StartupService startupService,
+        BrowserBridgeServer bridgeServer)
+    {
+        _stateStore = stateStore;
+        _sessionManager = sessionManager;
+        _engine = engine;
+        _iconRenderer = iconRenderer;
+        _startupService = startupService;
+        _bridgeServer = bridgeServer;
+        _snapshot = _engine.GetSnapshot();
+        _settings = _stateStore.GetSettingsSnapshot();
+        _priorityApps = _stateStore.GetPriorityAppsSnapshot();
+        _instance = this;
+
+        _wmTaskbarCreated = Win32.RegisterWindowMessageW("TaskbarCreated");
+        CreateHostWindow();
+
+        _engine.StateChanged += OnEngineStateChanged;
+        _stateStore.StateChanged += OnStoreStateChanged;
+        _startupService.StatusChanged += OnStartupStatusChanged;
+        _bridgeServer.SessionsChanged += OnBridgeStatusChanged;
+    }
+
+    public void ConfigureHostHooks(
+        Func<nuint, bool> onTimer,
+        Action onWakeOrUnlock,
+        Action onTaskbarCreated,
+        Action<nuint, nint> onTrayMessage,
+        Action? onRefreshHooks = null)
+    {
+        _timerCallback = onTimer;
+        _wakeOrUnlockCallback = onWakeOrUnlock;
+        _taskbarCreatedCallback = onTaskbarCreated;
+        _trayMessageCallback = onTrayMessage;
+        _refreshHooksCallback = onRefreshHooks;
+    }
+
+    private void CreateHostWindow()
+    {
+        nint hInst = Win32.GetModuleHandleW(null);
+        fixed (char* cls = ClassName)
+        {
+            var wc = new Win32.WNDCLASSEXW
+            {
+                cbSize = (uint)sizeof(Win32.WNDCLASSEXW),
+                style = Win32.CS_HREDRAW | Win32.CS_VREDRAW | Win32.CS_DBLCLKS,
+                lpfnWndProc = &WndProc,
+                hInstance = hInst,
+                hCursor = Win32.LoadCursorW(0, Win32.IDC_ARROW),
+                lpszClassName = cls
+            };
+            Win32.RegisterClassExW(&wc);
+        }
+
+        // Initial DPI from primary monitor cursor
+        Win32.GetCursorPos(out var pt);
+        nint hMon = Win32.MonitorFromPoint(pt, Win32.MONITOR_DEFAULTTONEAREST);
+        var mi = new Win32.MONITORINFO { cbSize = (uint)sizeof(Win32.MONITORINFO) };
+        Win32.GetMonitorInfoW(hMon, &mi);
+
+        int initW = 880;
+        int initH = 700;
+        int x = mi.rcWork.Left + Math.Max(0, (mi.rcWork.Width - initW) / 2);
+        int y = mi.rcWork.Top + Math.Max(0, (mi.rcWork.Height - initH) / 2);
+
+        _hwnd = Win32.CreateWindowExW(
+            Win32.WS_EX_APPWINDOW,
+            ClassName,
+            Strings.WindowTitle,
+            Win32.WS_OVERLAPPEDWINDOW | Win32.WS_CLIPCHILDREN,
+            x, y, initW, initH,
+            0, 0, hInst, 0);
+
+        if (_hwnd != 0)
+        {
+            uint d = Win32.GetDpiForWindow(_hwnd);
+            if (d >= 96) _dpi = d;
+
+            int scaledW = Theme.Scale(880, _dpi);
+            int scaledH = Theme.Scale(700, _dpi);
+            int cx = mi.rcWork.Left + Math.Max(0, (mi.rcWork.Width - scaledW) / 2);
+            int cy = mi.rcWork.Top + Math.Max(0, (mi.rcWork.Height - scaledH) / 2);
+            Win32.SetWindowPos(_hwnd, 0, cx, cy, scaledW, scaledH, Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
+
+            ApplyDwmTheme();
+            ApplyAlwaysOnTop(_settings.AlwaysOnTop);
+            Win32.WTSRegisterSessionNotification(_hwnd, Win32.NOTIFY_FOR_THIS_SESSION);
+            UpdateWindowIcon(_snapshot);
+        }
+    }
+
+    private void ApplyAlwaysOnTop(bool topMost)
+    {
+        if (_hwnd == 0) return;
+        nint insertAfter = topMost ? Win32.HWND_TOPMOST : Win32.HWND_NOTOPMOST;
+        Win32.SetWindowPos(_hwnd, insertAfter, 0, 0, 0, 0,
+            Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOACTIVATE);
+    }
+
+    private void ShowStatusBanner(string text, bool isError = false, int durationMs = 4500)
+    {
+        _statusBanner = text;
+        _statusBannerIsError = isError;
+        _statusBannerUntilTick = Environment.TickCount64 + durationMs;
+        RequestRepaint();
+    }
+
+    private void ApplyDwmTheme()
+    {
+        if (_hwnd == 0) return;
+        int dark = Theme.IsLight ? 0 : 1;
+        Win32.DwmSetWindowAttribute(_hwnd, Win32.DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(int));
+        int corner = Win32.DWMWCP_ROUND;
+        Win32.DwmSetWindowAttribute(_hwnd, Win32.DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(int));
+        uint captionColor = Theme.ToColorRef(Theme.BgHeader);
+        Win32.DwmSetWindowAttribute(_hwnd, Win32.DWMWA_CAPTION_COLOR, &captionColor, sizeof(uint));
+        uint textColor = Theme.ToColorRef(Theme.TextPrimary);
+        Win32.DwmSetWindowAttribute(_hwnd, Win32.DWMWA_TEXT_COLOR, &textColor, sizeof(uint));
+        uint borderColor = Theme.ToColorRef(Theme.BorderSubtle);
+        Win32.DwmSetWindowAttribute(_hwnd, Win32.DWMWA_BORDER_COLOR, &borderColor, sizeof(uint));
+    }
+
+    public void BeginInvoke(Action action)
+    {
+        if (_disposed || _hwnd == 0) return;
+        lock (_dispatchLock)
+            _uiQueue.Enqueue(action);
+        Win32.PostMessageW(_hwnd, WM_APP_DISPATCH, 0, 0);
+    }
+
+    public void ShowAndFocus(bool settingsTab = false)
+    {
+        if (_hwnd == 0) return;
+        if (settingsTab)
+        {
+            _activeTab = TabKind.Settings;
+            _scrollY = 0;
+        }
+        if (Win32.IsIconic(_hwnd))
+            Win32.ShowWindow(_hwnd, Win32.SW_RESTORE);
+        else
+            Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
+
+        if (_windowIconDirty)
+            UpdateWindowIcon(_snapshot, forceVisibleCheck: false);
+
+        Win32.SetForegroundWindow(_hwnd);
+        VisibilityChanged?.Invoke(true);
+        RequestRepaint();
+    }
+
+    public void ToggleVisibility()
+    {
+        if (_hwnd == 0) return;
+        if (Win32.IsWindowVisible(_hwnd) && !Win32.IsIconic(_hwnd))
+        {
+            Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
+            VisibilityChanged?.Invoke(false);
+        }
+        else
+        {
+            ShowAndFocus();
+        }
+    }
+
+    private void OnEngineStateChanged(RouterStateSnapshot snap)
+    {
+        BeginInvoke(() =>
+        {
+            _snapshot = snap;
+            _priorityApps = _stateStore.GetPriorityAppsSnapshot();
+            _settings = _stateStore.GetSettingsSnapshot();
+            UpdateWindowIcon(snap);
+            RequestRepaint();
+        });
+    }
+
+    private void OnStoreStateChanged()
+    {
+        BeginInvoke(() =>
+        {
+            _priorityApps = _stateStore.GetPriorityAppsSnapshot();
+            var nextSettings = _stateStore.GetSettingsSnapshot();
+            bool topChanged = _settings.AlwaysOnTop != nextSettings.AlwaysOnTop;
+            bool langChanged = !string.Equals(_settings.Language, nextSettings.Language, StringComparison.OrdinalIgnoreCase);
+            bool themeChanged = !string.Equals(_settings.Theme, nextSettings.Theme, StringComparison.OrdinalIgnoreCase);
+            _settings = nextSettings;
+            if (topChanged)
+                ApplyAlwaysOnTop(_settings.AlwaysOnTop);
+            if (themeChanged)
+            {
+                ApplyDwmTheme();
+                UpdateWindowIcon(_snapshot);
+                _guideWindow?.RefreshLocalizationAndTheme();
+            }
+            if (langChanged && _hwnd != 0)
+            {
+                ClearFontCache();
+                Win32.SetWindowTextW(_hwnd, Strings.WindowTitle);
+                _guideWindow?.RefreshLocalizationAndTheme();
+                _engine.Reevaluate();
+            }
+            RequestRepaint();
+        });
+    }
+
+    private void OnStartupStatusChanged()
+    {
+        BeginInvoke(RequestRepaint);
+    }
+
+    private void OnBridgeStatusChanged()
+    {
+        BeginInvoke(RequestRepaint);
+    }
+
+    private void UpdateWindowIcon(RouterStateSnapshot snap, bool forceVisibleCheck = true)
+    {
+        if (_hwnd == 0) return;
+
+        if (forceVisibleCheck && _windowIconInitialized && !Win32.IsWindowVisible(_hwnd))
+        {
+            _windowIconDirty = true;
+            return;
+        }
+
+        var target = snap.ActiveTarget;
+        string? appKey = target?.AppKey;
+        string? exePath = target?.ExePath;
+        bool isPlaying = target?.IsPlaying ?? false;
+        bool isMuted = target?.IsMuted ?? false;
+        bool soloMode = snap.SoloModeEnabled;
+        string themeId = Theme.CurrentId;
+
+        if (_windowIconInitialized &&
+            _lastWinIconPlaying == isPlaying &&
+            _lastWinIconMuted == isMuted &&
+            _lastWinIconSolo == soloMode &&
+            string.Equals(_lastWinIconAppKey, appKey, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(_lastWinIconExePath, exePath, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(_lastWinIconThemeId, themeId, StringComparison.OrdinalIgnoreCase))
+        {
+            _windowIconDirty = false;
+            return;
+        }
+
+        nint big = _iconRenderer.CreateCompositeIcon(appKey, exePath, isPlaying, isMuted, soloMode, size: 48);
+        nint small = _iconRenderer.CreateCompositeIcon(appKey, exePath, isPlaying, isMuted, soloMode, size: 32);
+
+        if (big != 0)
+        {
+            Win32.SendMessageW(_hwnd, Win32.WM_SETICON, Win32.ICON_BIG, big);
+            if (_windowBigIcon != 0) Win32.DestroyIcon(_windowBigIcon);
+            _windowBigIcon = big;
+        }
+        if (small != 0)
+        {
+            Win32.SendMessageW(_hwnd, Win32.WM_SETICON, Win32.ICON_SMALL, small);
+            if (_windowSmallIcon != 0) Win32.DestroyIcon(_windowSmallIcon);
+            _windowSmallIcon = small;
+        }
+
+        _lastWinIconAppKey = appKey;
+        _lastWinIconExePath = exePath;
+        _lastWinIconPlaying = isPlaying;
+        _lastWinIconMuted = isMuted;
+        _lastWinIconSolo = soloMode;
+        _lastWinIconThemeId = themeId;
+        _windowIconInitialized = true;
+        _windowIconDirty = false;
+    }
+
+    private void RequestRepaint()
+    {
+        if (_hwnd != 0 && Win32.IsWindowVisible(_hwnd))
+            Win32.InvalidateRect(_hwnd, null, false);
+    }
+
+    private void DrainDispatchQueue()
+    {
+        while (true)
+        {
+            Action? next = null;
+            lock (_dispatchLock)
+            {
+                if (_uiQueue.Count > 0)
+                    next = _uiQueue.Dequeue();
+            }
+            if (next == null) break;
+            try { next(); } catch { }
+        }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
+    private static nint WndProc(nint hwnd, uint msg, nuint wParam, nint lParam)
+    {
+        var inst = _instance;
+        if (inst == null)
+            return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+
+        if (msg == inst._wmTaskbarCreated && inst._wmTaskbarCreated != 0)
+        {
+            inst._taskbarCreatedCallback?.Invoke();
+            return 0;
+        }
+
+        switch (msg)
+        {
+            case WM_APP_DISPATCH:
+                inst.DrainDispatchQueue();
+                return 0;
+
+            case WM_APP_SHUTDOWN_INSTANCE:
+                inst.ExitRequested?.Invoke();
+                return 0;
+
+            case TrayController.WM_TRAYICON:
+                inst._trayMessageCallback?.Invoke(wParam, lParam);
+                return 0;
+
+            case Win32.WM_TIMER:
+                if (inst._timerCallback != null && inst._timerCallback(wParam))
+                    return 0;
+                break;
+
+            case Win32.WM_POWERBROADCAST:
+                if (wParam == Win32.PBT_APMRESUMESUSPEND || wParam == Win32.PBT_APMRESUMEAUTOMATIC)
+                {
+                    inst._wakeOrUnlockCallback?.Invoke();
+                }
+                return 1;
+
+            case Win32.WM_WTSSESSION_CHANGE:
+                if (wParam == Win32.WTS_SESSION_UNLOCK)
+                {
+                    inst._wakeOrUnlockCallback?.Invoke();
+                }
+                return 0;
+
+            case Win32.WM_SIZE:
+                inst._clientW = (int)(lParam & 0xFFFF);
+                inst._clientH = (int)((lParam >> 16) & 0xFFFF);
+                inst.ClampScroll();
+                Win32.InvalidateRect(hwnd, null, false);
+                return 0;
+
+            case Win32.WM_DPICHANGED:
+                inst._dpi = (uint)(wParam & 0xFFFF);
+                inst.ClearFontCache();
+                var suggested = *(Win32.RECT*)lParam;
+                Win32.SetWindowPos(hwnd, 0, suggested.Left, suggested.Top, suggested.Width, suggested.Height,
+                    Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
+                Win32.InvalidateRect(hwnd, null, false);
+                return 0;
+
+            case Win32.WM_GETMINMAXINFO:
+                var mmi = (Win32.MINMAXINFO*)lParam;
+                mmi->ptMinTrackSize.X = Theme.Scale(720, inst._dpi);
+                mmi->ptMinTrackSize.Y = Theme.Scale(540, inst._dpi);
+                return 0;
+
+            case Win32.WM_ERASEBKGND:
+                return 1; // Suppress GDI background clear to prevent flicker
+
+            case Win32.WM_PAINT:
+                inst.HandlePaint(hwnd);
+                return 0;
+
+            case Win32.WM_MOUSEMOVE:
+                inst.HandleMouseMove(lParam);
+                return 0;
+
+            case Win32.WM_MOUSELEAVE:
+                inst._trackingMouse = false;
+                if (inst._hoverId != null && inst._draggingSliderId == null)
+                {
+                    inst._hoverId = null;
+                    inst.RequestRepaint();
+                }
+                return 0;
+
+            case Win32.WM_LBUTTONDOWN:
+                if (inst.HandleLeftButtonDown(lParam))
+                    return 0;
+                break;
+
+            case Win32.WM_CAPTURECHANGED:
+                if (inst._draggingSliderId != null)
+                {
+                    inst._draggingSliderId = null;
+                    inst._draggingSessionId = null;
+                    inst.RequestRepaint();
+                }
+                return 0;
+
+            case Win32.WM_LBUTTONUP:
+                inst.HandleLeftClick(lParam);
+                return 0;
+
+            case Win32.WM_MOUSEWHEEL:
+                short delta = unchecked((short)((long)wParam >> 16));
+                inst.HandleMouseWheel(delta);
+                return 0;
+
+            case Win32.WM_CLOSE:
+                if (inst._settings.MinimizeToTrayOnClose)
+                {
+                    Win32.ShowWindow(hwnd, Win32.SW_HIDE);
+                    inst.VisibilityChanged?.Invoke(false);
+                }
+                else
+                {
+                    inst.ExitRequested?.Invoke();
+                }
+                return 0;
+
+            case Win32.WM_DESTROY:
+                Win32.PostQuitMessage(0);
+                return 0;
+        }
+
+        return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    private void HandleMouseMove(nint lParam)
+    {
+        if (!_trackingMouse)
+        {
+            var tme = new Win32.TRACKMOUSEEVENT
+            {
+                cbSize = (uint)sizeof(Win32.TRACKMOUSEEVENT),
+                dwFlags = Win32.TME_LEAVE,
+                hwndTrack = _hwnd
+            };
+            Win32.TrackMouseEvent(&tme);
+            _trackingMouse = true;
+        }
+
+        int x = unchecked((short)(lParam & 0xFFFF));
+        int y = unchecked((short)((lParam >> 16) & 0xFFFF));
+
+        if (_draggingSliderId != null && _draggingSessionId != null)
+        {
+            float vol = Math.Clamp((float)(x - _dragTrackLeft) / Math.Max(1, _dragTrackWidth), 0f, 1f);
+            _dragPreviewVolume = vol;
+            Win32.SetCursor(Win32.LoadCursorW(0, Win32.IDC_HAND));
+
+            long nowTick = Environment.TickCount64;
+            if (nowTick - _lastSliderDispatchTick >= 35)
+            {
+                _lastSliderDispatchTick = nowTick;
+                _ = _engine.SetSessionVolumeAsync(_draggingSessionId, vol);
+            }
+            RequestRepaint();
+            return;
+        }
+
+        var slider = FindSliderHit(x, y);
+        if (slider != null)
+        {
+            Win32.SetCursor(Win32.LoadCursorW(0, Win32.IDC_HAND));
+            if (!string.Equals(_hoverId, slider.Id, StringComparison.Ordinal))
+            {
+                _hoverId = slider.Id;
+                RequestRepaint();
+            }
+            return;
+        }
+
+        var hit = FindHit(x, y);
+        string? nextHover = hit?.Id;
+
+        Win32.SetCursor(Win32.LoadCursorW(0, hit != null && hit.IsButton ? Win32.IDC_HAND : Win32.IDC_ARROW));
+
+        if (!string.Equals(_hoverId, nextHover, StringComparison.Ordinal))
+        {
+            _hoverId = nextHover;
+            RequestRepaint();
+        }
+    }
+
+    private bool HandleLeftButtonDown(nint lParam)
+    {
+        int x = unchecked((short)(lParam & 0xFFFF));
+        int y = unchecked((short)((lParam >> 16) & 0xFFFF));
+        var slider = FindSliderHit(x, y);
+        if (slider == null)
+            return false;
+
+        float vol = Math.Clamp((float)(x - slider.TrackLeft) / Math.Max(1, slider.TrackWidth), 0f, 1f);
+        _draggingSliderId = slider.Id;
+        _draggingSessionId = slider.SessionId;
+        _dragTrackLeft = slider.TrackLeft;
+        _dragTrackWidth = slider.TrackWidth;
+        _dragPreviewVolume = vol;
+        _lastSliderDispatchTick = Environment.TickCount64;
+
+        Win32.SetCapture(_hwnd);
+        _ = _engine.SetSessionVolumeAsync(slider.SessionId, vol);
+        RequestRepaint();
+        return true;
+    }
+
+    private void HandleLeftClick(nint lParam)
+    {
+        int x = unchecked((short)(lParam & 0xFFFF));
+        int y = unchecked((short)((lParam >> 16) & 0xFFFF));
+
+        if (_draggingSliderId != null && _draggingSessionId != null)
+        {
+            float finalVol = Math.Clamp((float)(x - _dragTrackLeft) / Math.Max(1, _dragTrackWidth), 0f, 1f);
+            string targetSession = _draggingSessionId;
+            _draggingSliderId = null;
+            _draggingSessionId = null;
+            Win32.ReleaseCapture();
+            _ = _engine.SetSessionVolumeAsync(targetSession, finalVol);
+            RequestRepaint();
+            return;
+        }
+
+        var hit = FindHit(x, y);
+        if (hit != null)
+        {
+            hit.OnClick();
+            RequestRepaint();
+        }
+    }
+
+    private void HandleMouseWheel(short delta)
+    {
+        int step = Theme.Scale(44, _dpi);
+        _scrollY -= (delta / 120) * step;
+        ClampScroll();
+        RequestRepaint();
+    }
+
+    private void ClampScroll()
+    {
+        int headerH = Theme.Scale(62, _dpi);
+        int viewH = Math.Max(1, _clientH - headerH);
+        int maxScroll = Math.Max(0, _contentTotalH - viewH);
+        _scrollY = Math.Clamp(_scrollY, 0, maxScroll);
+    }
+
+    private HitRegion? FindHit(int x, int y)
+    {
+        // Search reverse so topmost/inner buttons win over parent row containers
+        for (int i = _hitRegions.Count - 1; i >= 0; i--)
+        {
+            var r = _hitRegions[i].Bounds;
+            if (x >= r.Left && x < r.Right && y >= r.Top && y < r.Bottom)
+                return _hitRegions[i];
+        }
+        return null;
+    }
+
+    private SliderRegion? FindSliderHit(int x, int y)
+    {
+        for (int i = _sliderRegions.Count - 1; i >= 0; i--)
+        {
+            var r = _sliderRegions[i].Bounds;
+            if (x >= r.Left && x < r.Right && y >= r.Top && y < r.Bottom)
+                return _sliderRegions[i];
+        }
+        return null;
+    }
+
+    private int S(int px) => Theme.Scale(px, _dpi);
+    private float SF(float px) => Theme.ScaleF(px, _dpi);
+
+    private void HandlePaint(nint hwnd)
+    {
+        var ps = new Win32.PAINTSTRUCT();
+        nint hdc = Win32.BeginPaint(hwnd, &ps);
+        if (hdc == 0) return;
+
+        int w = Math.Max(1, _clientW);
+        int h = Math.Max(1, _clientH);
+
+        nint memDc = Win32.CreateCompatibleDC(hdc);
+        var bmi = new Win32.BITMAPINFO();
+        bmi.bmiHeader.biSize = (uint)sizeof(Win32.BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+
+        nint hBmp = Win32.CreateDIBSection(memDc, &bmi, 0, out _, 0, 0);
+        nint oldBmp = Win32.SelectObject(memDc, hBmp);
+
+        try
+        {
+            _hitRegions.Clear();
+            _sliderRegions.Clear();
+            Win32.SetBkMode(memDc, Win32.TRANSPARENT);
+
+            if (GdiPlus.GdipCreateFromHDC(memDc, out nint gfx) == 0 && gfx != 0)
+            {
+                try
+                {
+                    GdiPlus.GdipSetSmoothingMode(gfx, GdiPlus.SmoothingModeAntiAlias);
+                    GdiPlus.GdipGraphicsClear(gfx, GdiPlus.Argb(Theme.BgWindow));
+
+                    int headerH = S(62);
+                    _bodyClipTop = headerH;
+                    DrawScrollableBody(memDc, gfx, w, h, headerH);
+                    _bodyClipTop = 0;
+                    DrawHeader(memDc, gfx, w, headerH);
+                }
+                finally
+                {
+                    GdiPlus.GdipDeleteGraphics(gfx);
+                }
+            }
+
+            Win32.BitBlt(hdc, 0, 0, w, h, memDc, 0, 0, Win32.SRCCOPY);
+        }
+        finally
+        {
+            Win32.SelectObject(memDc, oldBmp);
+            if (hBmp != 0) Win32.DeleteObject(hBmp);
+            Win32.DeleteDC(memDc);
+            Win32.EndPaint(hwnd, &ps);
+        }
+    }
+
+    private void DrawHeader(nint dc, nint gfx, int w, int headerH)
+    {
+        // Solid header bar painted after body so scrolled content cleanly tucks underneath
+        GdiPlus.FillRoundedRect(gfx, 0, 0, w, headerH, 0, GdiPlus.Argb(Theme.BgHeader));
+        GdiPlus.FillRoundedRect(gfx, 0, headerH - 1, w, 1, 0, GdiPlus.Argb(Theme.BorderSubtle));
+
+        int padX = S(22);
+        // Header icon
+        var target = _snapshot.ActiveTarget;
+        nint titleIcon = _iconRenderer.GetIconForApp(target?.AppKey, target?.ExePath);
+        int iconSz = S(22);
+        int iconY = (headerH - iconSz) / 2;
+        if (titleIcon != 0)
+        {
+            Win32.DrawIconEx(dc, padX, iconY, titleIcon, iconSz, iconSz, 0, 0, Win32.DI_NORMAL);
+        }
+        else
+        {
+            GdiPlus.FillRoundedRect(gfx, padX, iconY, iconSz, iconSz, SF(6), GdiPlus.Argb(Theme.Accent));
+        }
+
+        int titleX = padX + iconSz + S(10);
+        DrawText(dc, "Cueway", titleX, 0, titleX + S(120), headerH, 16, Win32.FW_BOLD, Theme.TextPrimary);
+
+        // Right side: Segmented Tab Switcher + Exit button
+        int exitW = S(80);
+        int tabGroupW = S(264);
+        int tabH = S(34);
+        int tabY = (headerH - tabH) / 2;
+        int exitX = w - padX - exitW;
+        int tabGroupX = exitX - S(10) - tabGroupW;
+
+        // Status badges next to title (bounded so they never overlap tab switcher)
+        int badgeX = titleX + S(96);
+        int badgeMaxRight = tabGroupX - S(10);
+        if (_snapshot.SoloModeEnabled && badgeX + S(70) <= badgeMaxRight)
+        {
+            badgeX += DrawPillBadge(dc, gfx, badgeX, (headerH - S(22)) / 2, Strings.BadgeSoloActive, Theme.Amber, Theme.AmberSoft) + S(8);
+        }
+        if (_snapshot.GameGuardActive && badgeX + S(80) <= badgeMaxRight)
+        {
+            badgeX += DrawPillBadge(dc, gfx, badgeX, (headerH - S(22)) / 2, Strings.BadgeGameGuard, Theme.Green, Theme.GreenSoft) + S(8);
+        }
+
+        GdiPlus.FillAndStrokeRoundedRect(gfx, tabGroupX, tabY, tabGroupW, tabH, SF(8),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+
+        int halfW = (tabGroupW - S(6)) / 2;
+        DrawTabButton(dc, gfx, "tab_dash", Strings.TabDashboard, tabGroupX + S(3), tabY + S(3), halfW, tabH - S(6),
+            _activeTab == TabKind.Dashboard, () =>
+            {
+                _activeTab = TabKind.Dashboard;
+                _scrollY = 0;
+            });
+        DrawTabButton(dc, gfx, "tab_set", Strings.TabSettings, tabGroupX + S(3) + halfW, tabY + S(3), halfW, tabH - S(6),
+            _activeTab == TabKind.Settings, () =>
+            {
+                _activeTab = TabKind.Settings;
+                _scrollY = 0;
+            });
+
+        // Subtle Exit button
+        DrawActionButton(dc, gfx, "btn_exit", Strings.BtnExit, exitX, tabY, exitW, tabH,
+            Theme.BgCard, Theme.BgControlHover, Theme.TextSecondary, Theme.BorderSubtle,
+            () => ExitRequested?.Invoke());
+    }
+
+    private void DrawTabButton(
+        nint dc, nint gfx, string id, string label,
+        int x, int y, int w, int h, bool active, Action onClick)
+    {
+        bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+        uint bg = active ? Theme.Accent : (hovered ? Theme.BgControl : Theme.BgCard);
+        uint fg = active ? Theme.OnAccent : Theme.TextSecondary;
+        if (active || hovered)
+        {
+            GdiPlus.FillRoundedRect(gfx, x, y, w, h, SF(6), GdiPlus.Argb(bg));
+        }
+        DrawText(dc, label, x, y, x + w, y + h, 12, active ? Win32.FW_SEMIBOLD : Win32.FW_MEDIUM, fg, centered: true);
+        _hitRegions.Add(new HitRegion(new Win32.RECT { Left = x, Top = y, Right = x + w, Bottom = y + h }, id, onClick));
+    }
+
+    private void DrawScrollableBody(nint dc, nint gfx, int w, int h, int headerH)
+    {
+        int padX = S(22);
+        int contentW = w - padX * 2;
+        int y = headerH + S(18) - _scrollY;
+        int startY = y;
+
+        if (_activeTab == TabKind.Dashboard)
+        {
+            y = DrawDashboardTab(dc, gfx, padX, y, contentW, headerH);
+        }
+        else
+        {
+            y = DrawSettingsTab(dc, gfx, padX, y, contentW, headerH);
+        }
+
+        _contentTotalH = (y - startY) + S(24);
+        ClampScroll();
+
+        // Thin modern scrollbar when content overflows
+        int viewH = h - headerH;
+        if (_contentTotalH > viewH && viewH > 20)
+        {
+            float ratio = (float)viewH / _contentTotalH;
+            int thumbH = Math.Max(S(32), (int)(viewH * ratio));
+            int maxScroll = _contentTotalH - viewH;
+            int thumbY = headerH + (int)((viewH - thumbH) * ((float)_scrollY / maxScroll));
+            GdiPlus.FillRoundedRect(gfx, w - S(8), thumbY, S(4), thumbH, SF(2), GdiPlus.Argb(Theme.BorderStrong, 180));
+        }
+    }
+
+    private int DrawDashboardTab(nint dc, nint gfx, int x, int y, int w, int headerH)
+    {
+        // 1. ACTIVE TARGET CARD
+        DrawText(dc, Strings.SecActiveTarget, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+        y += S(24);
+
+        y = DrawActiveTargetCard(dc, gfx, x, y, w, headerH);
+        y += S(22);
+
+        // 2. LIVE MEDIA SESSIONS
+        int liveHeaderY = y;
+        int refW = S(92);
+        int refH = S(26);
+        int refX = x + w - refW;
+
+        var (bridgeBrowsers, bridgeTabs) = _bridgeServer.GetStatusSnapshot();
+        string bridgeBadgeText = bridgeBrowsers > 0
+            ? Strings.BadgeBridgeConnected(bridgeBrowsers, bridgeTabs)
+            : Strings.BadgeBridgeDisconnected;
+        int bridgePillW = Math.Max(S(54), MeasureTextWidth(dc, bridgeBadgeText, 10, Win32.FW_SEMIBOLD) + S(20));
+        int bridgePillX = refX - S(8) - bridgePillW;
+        int bridgePillY = liveHeaderY + S(1);
+        int titleMaxRight = bridgePillX - S(10);
+
+        DrawText(dc, $"{Strings.SecLiveSessions} ({_snapshot.Sessions.Count})", x, y, Math.Max(x + S(80), titleMaxRight), y + S(24), 11, Win32.FW_BOLD, Theme.TextMuted);
+
+        if (bridgePillX > x + S(110))
+        {
+            uint badgeFg = bridgeBrowsers > 0 ? Theme.Green : Theme.Amber;
+            uint badgeBg = bridgeBrowsers > 0 ? Theme.GreenSoft : Theme.AmberSoft;
+            DrawPillBadge(dc, gfx, bridgePillX, bridgePillY, bridgeBadgeText, badgeFg, badgeBg);
+
+            if (liveHeaderY + refH > headerH)
+            {
+                RegisterScrollableHit(
+                    new Win32.RECT { Left = bridgePillX, Top = bridgePillY, Right = bridgePillX + bridgePillW, Bottom = bridgePillY + S(22) },
+                    "dash_bridge_status",
+                    () =>
+                    {
+                        _activeTab = TabKind.Settings;
+                        _scrollY = 0;
+                    });
+            }
+        }
+
+        if (y + refH > headerH)
+        {
+            DrawActionButton(dc, gfx, "btn_refresh", Strings.BtnRefresh, refX, liveHeaderY - S(2), refW, refH,
+                Theme.BgCard, Theme.BgControlHover, Theme.TextSecondary, Theme.BorderSubtle,
+                () => _ = _sessionManager.RefreshAsync());
+        }
+        y += S(28);
+
+        if (_snapshot.Sessions.Count == 0)
+        {
+            y = DrawEmptyCard(dc, gfx, x, y, w, Strings.EmptySessionsTitle, Strings.EmptySessionsSub);
+        }
+        else
+        {
+            foreach (var session in _snapshot.Sessions)
+            {
+                y = DrawLiveSessionRow(dc, gfx, x, y, w, session, headerH);
+                y += S(8);
+            }
+        }
+
+        y += S(14);
+
+        // 3. DISCOVERED APPLICATION PRIORITY LIST
+        int clearW = S(140);
+        DrawText(dc, $"{Strings.SecPriorityList} ({_priorityApps.Count})", x, y, x + w - clearW - S(10), y + S(24), 11, Win32.FW_BOLD, Theme.TextMuted);
+
+        if (_priorityApps.Count > 0 && y + S(24) > headerH)
+        {
+            DrawActionButton(dc, gfx, "btn_clear_hist", Strings.BtnResetHistory, x + w - clearW, y - S(2), clearW, S(26),
+                Theme.BgCard, Theme.RedSoft, Theme.Red, Theme.BorderSubtle,
+                () => _stateStore.ClearPriorityHistory());
+        }
+        y += S(28);
+
+        if (_priorityApps.Count == 0)
+        {
+            y = DrawEmptyCard(dc, gfx, x, y, w, Strings.EmptyPriorityTitle, Strings.EmptyPrioritySub);
+        }
+        else
+        {
+            for (int i = 0; i < _priorityApps.Count; i++)
+            {
+                y = DrawPriorityRow(dc, gfx, x, y, w, _priorityApps[i], i, _priorityApps.Count, headerH);
+                y += S(8);
+            }
+        }
+
+        return y;
+    }
+
+    private int DrawActiveTargetCard(nint dc, nint gfx, int x, int y, int w, int headerH)
+    {
+        int cardH = S(122);
+        var target = _snapshot.ActiveTarget;
+        bool isManual = _snapshot.IsManualLock;
+        bool focusHovered = target != null && string.Equals(_hoverId, "act_focus", StringComparison.Ordinal);
+        uint borderColor = target == null
+            ? Theme.BorderSubtle
+            : (isManual ? Theme.Amber : Theme.Accent);
+
+        GdiPlus.FillAndStrokeRoundedRect(
+            gfx, x, y, w, cardH, SF(12),
+            GdiPlus.Argb(Theme.BgCardElevated),
+            GdiPlus.Argb(borderColor, target == null ? (byte)255 : (byte)190),
+            1.4f);
+
+        int pad = S(18);
+        int iconBox = S(58);
+        int iconBoxY = y + (cardH - iconBox) / 2;
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x + pad, iconBoxY, iconBox, iconBox, SF(12),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(focusHovered ? Theme.Accent : Theme.BorderSubtle));
+
+        if (target == null)
+        {
+            DrawText(dc, Strings.NoActiveTargetTitle, x + pad + iconBox + S(16), y + S(28), x + w - pad, y + S(54), 16, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+            DrawText(dc, Strings.NoActiveTargetSub,
+                x + pad + iconBox + S(16), y + S(58), x + w - pad, y + S(88), 12, Win32.FW_NORMAL, Theme.TextSecondary);
+            return y + cardH;
+        }
+
+        nint hIcon = _iconRenderer.GetIconForApp(target.AppKey, target.ExePath);
+        int icoSz = S(36);
+        if (hIcon != 0)
+        {
+            Win32.DrawIconEx(dc, x + pad + (iconBox - icoSz) / 2, iconBoxY + (iconBox - icoSz) / 2, hIcon, icoSz, icoSz, 0, 0, Win32.DI_NORMAL);
+        }
+
+        // Right controls: top row [Prev] [Play/Pause] [Next] + [Lock/Unlock]; bottom row [Mute] [Slider] [%]
+        int btnSz = S(36);
+        int lockW = S(116);
+        int ctrlRight = x + w - pad;
+        int lockX = ctrlRight - lockW;
+        int nextX = lockX - S(10) - btnSz;
+        int playX = nextX - S(6) - btnSz;
+        int prevX = playX - S(6) - btnSz;
+        int ctrlY = y + S(18);
+
+        if (y + cardH > headerH)
+        {
+            RegisterScrollableHit(
+                new Win32.RECT { Left = x, Top = y, Right = prevX - S(8), Bottom = y + cardH },
+                "act_focus",
+                () => _ = _engine.FocusSessionAsync(target.SessionId));
+
+            bool anyPlaying = target.IsPlaying || _snapshot.Sessions.Any(s => s.IsPlaying || s.IsEffectivelyPlaying);
+            DrawTransportButton(dc, gfx, "act_prev", TransportGlyph.Previous, prevX, ctrlY, btnSz,
+                () => _ = _engine.DispatchMediaActionAsync(MediaActionKind.Previous));
+            DrawTransportButton(dc, gfx, "act_play", anyPlaying ? TransportGlyph.Pause : TransportGlyph.Play, playX, ctrlY, btnSz,
+                () => _ = _engine.DispatchMediaActionAsync(MediaActionKind.PlayPause), accent: true);
+            DrawTransportButton(dc, gfx, "act_next", TransportGlyph.Next, nextX, ctrlY, btnSz,
+                () => _ = _engine.DispatchMediaActionAsync(MediaActionKind.Next));
+
+            DrawActionButton(
+                dc, gfx, "act_lock",
+                isManual ? Strings.BtnUnlock : Strings.BtnLock,
+                lockX, ctrlY, lockW, btnSz,
+                isManual ? Theme.AmberSoft : Theme.BgControl,
+                isManual ? Theme.AmberSoft : Theme.BgControlHover,
+                isManual ? Theme.Amber : Theme.TextPrimary,
+                isManual ? Theme.Amber : Theme.BorderStrong,
+                () => _engine.ToggleManualLockOnActiveOrSelected());
+
+            DrawVolumeControls(dc, gfx, "act_vol", target.SessionId, target.Volume, target.IsMuted,
+                prevX, y + S(72), ctrlRight - prevX, S(28), headerH);
+        }
+
+        // Center info (click anywhere on icon/title to focus app/tab window)
+        int textX = x + pad + iconBox + S(16);
+        int textRight = prevX - S(14);
+        int arrowSz = S(13);
+        int titleW = MeasureTextWidth(dc, target.DisplayName, 16, Win32.FW_BOLD) + S(6);
+        int nameMaxRight = Math.Min(textRight - arrowSz - S(6), textX + titleW);
+
+        DrawText(dc, target.DisplayName, textX, y + S(20), nameMaxRight, y + S(46), 16, Win32.FW_BOLD,
+            focusHovered ? Theme.Accent : Theme.TextPrimary);
+
+        DrawFocusArrowGlyph(gfx, nameMaxRight + S(2), y + S(26), arrowSz, focusHovered ? Theme.Accent : Theme.TextMuted);
+
+        int bx = nameMaxRight + arrowSz + S(10);
+        (string statusText, uint statusFg, uint statusBg) = target.IsEffectivelyPlaying
+            ? (Strings.StatusPlaying, Theme.Green, Theme.GreenSoft)
+            : (target.IsMuted || target.Volume <= 0.005f ? (Strings.StatusMuted, Theme.Red, Theme.RedSoft) : (Strings.StatusPaused, Theme.TextSecondary, Theme.BgControl));
+        int statusPillW = MeasureTextWidth(dc, statusText, 10, Win32.FW_SEMIBOLD) + S(20);
+        if (bx + statusPillW <= textRight)
+        {
+            bx += DrawPillBadge(dc, gfx, bx, y + S(22), statusText, statusFg, statusBg) + S(6);
+        }
+
+        string modeText = isManual ? Strings.ModeManualLock : Strings.ModeAuto;
+        int modePillW = MeasureTextWidth(dc, modeText, 10, Win32.FW_SEMIBOLD) + S(20);
+        if (bx + modePillW <= textRight)
+        {
+            DrawPillBadge(dc, gfx, bx, y + S(22),
+                modeText,
+                isManual ? Theme.Amber : Theme.Accent,
+                isManual ? Theme.AmberSoft : Theme.AccentSoft);
+        }
+
+        string mediaLine = target.FormattedMediaTitle;
+        DrawText(dc, mediaLine, textX, y + S(50), textRight, y + S(72), 13, Win32.FW_MEDIUM, Theme.TextSecondary);
+
+        int volPct = target.IsMuted ? 0 : (int)MathF.Round(target.Volume * 100f);
+        string volDisplay = Strings.FormatPercent(volPct);
+        string sourceLabel = target.Source switch
+        {
+            SessionSource.MpvIpc => "mpv IPC",
+            SessionSource.BrowserBridge => Strings.SourceBrowserBridge,
+            SessionSource.AudioSession => Strings.SourceAudioSession,
+            _ => "SMTC"
+        };
+        string metaLine = $"{Strings.MetaSourcePrefix}: {sourceLabel}  •  {Strings.MetaVolumePrefix}: {volDisplay}"
+                          + (target.IsVideoLikely ? $"  •  {Strings.MetaVideoScrubReady}" : "");
+        DrawText(dc, metaLine, textX, y + S(76), textRight, y + S(98), 11, Win32.FW_NORMAL, Theme.TextMuted);
+
+        return y + cardH;
+    }
+
+    private int DrawLiveSessionRow(nint dc, nint gfx, int x, int y, int w, MediaSessionInfo session, int headerH)
+    {
+        int rowH = S(64);
+        bool isTarget = _snapshot.ActiveTarget != null &&
+                        string.Equals(_snapshot.ActiveTarget.SessionId, session.SessionId, StringComparison.Ordinal);
+        bool isLocked = _snapshot.IsManualLock && isTarget;
+
+        string focusId = $"sess_focus_{session.SessionId}";
+        string lockBtnId = $"sess_lock_{session.SessionId}";
+        string volPrefix = $"sess_vol_{session.SessionId}";
+        bool focusHovered = string.Equals(_hoverId, focusId, StringComparison.Ordinal);
+        bool anyRowControlHovered = focusHovered ||
+                                    string.Equals(_hoverId, lockBtnId, StringComparison.Ordinal) ||
+                                    (_hoverId != null && _hoverId.StartsWith(volPrefix, StringComparison.Ordinal));
+
+        uint bg = isTarget ? Theme.BgCardElevated : (anyRowControlHovered ? Theme.BgCardHover : Theme.BgCard);
+        uint border = isLocked ? Theme.Amber : (focusHovered || isTarget ? Theme.Accent : Theme.BorderSubtle);
+
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(bg), GdiPlus.Argb(border, isTarget || focusHovered ? (byte)195 : (byte)255), isTarget ? 1.2f : 1f);
+
+        int pad = S(14);
+        int icoSz = S(28);
+        nint hIcon = _iconRenderer.GetIconForApp(session.AppKey, session.ExePath);
+        if (hIcon != 0)
+        {
+            Win32.DrawIconEx(dc, x + pad, y + (rowH - icoSz) / 2, hIcon, icoSz, icoSz, 0, 0, Win32.DI_NORMAL);
+        }
+        else
+        {
+            GdiPlus.FillRoundedRect(gfx, x + pad, y + (rowH - icoSz) / 2, icoSz, icoSz, SF(7), GdiPlus.Argb(Theme.BgControl));
+        }
+
+        int btnW = S(92);
+        int btnH = S(30);
+        int btnX = x + w - pad - btnW;
+        int btnY = y + (rowH - btnH) / 2;
+
+        // Status pill to the left of the lock button
+        int statusW = S(104);
+        int statusX = btnX - S(8) - statusW;
+
+        (string stText, uint stFg, uint stBg) = session.IsEffectivelyPlaying
+            ? (Strings.StatusPlaying, Theme.Green, Theme.GreenSoft)
+            : (session.IsMuted || session.Volume <= 0.005f ? (Strings.StatusMuted, Theme.Red, Theme.RedSoft) : (Strings.StatusPaused, Theme.TextSecondary, Theme.BgControl));
+
+        DrawPillBadgeFixed(dc, gfx, statusX, y + (rowH - S(22)) / 2, statusW, stText, stFg, stBg);
+
+        // Inline interactive volume control: [Mute] [Slider] [%]
+        int volGroupW = S(154);
+        int volGroupX = statusX - S(10) - volGroupW;
+        int volGroupY = y + (rowH - S(28)) / 2;
+
+        int textX = x + pad + icoSz + S(12);
+        int textRight = volGroupX - S(10);
+        string tag = session.IsVideoLikely ? $" • {Strings.TagVideo}" : "";
+        string headerText = session.DisplayName + tag;
+
+        int arrowSz = S(11);
+        int titleMeasured = MeasureTextWidth(dc, headerText, 13, Win32.FW_SEMIBOLD) + S(4);
+        int titleDrawRight = Math.Min(textRight - arrowSz - S(4), textX + titleMeasured);
+
+        DrawText(dc, headerText, textX, y + S(11), textRight - arrowSz - S(4), y + S(31), 13, Win32.FW_SEMIBOLD,
+            focusHovered ? Theme.Accent : Theme.TextPrimary);
+        if (titleDrawRight + arrowSz + S(2) <= textRight)
+        {
+            DrawFocusArrowGlyph(gfx, titleDrawRight + S(2), y + S(16), arrowSz, focusHovered ? Theme.Accent : Theme.TextMuted);
+        }
+
+        DrawText(dc, session.FormattedMediaTitle, textX, y + S(33), textRight, y + S(53), 12, Win32.FW_NORMAL, Theme.TextSecondary);
+
+        if (y + rowH > headerH)
+        {
+            RegisterScrollableHit(
+                new Win32.RECT { Left = x, Top = y, Right = volGroupX - S(4), Bottom = y + rowH },
+                focusId,
+                () => _ = _engine.FocusSessionAsync(session.SessionId));
+
+            DrawVolumeControls(dc, gfx, volPrefix, session.SessionId, session.Volume, session.IsMuted,
+                volGroupX, volGroupY, volGroupW, S(28), headerH);
+
+            DrawActionButton(
+                dc, gfx, lockBtnId,
+                isLocked ? Strings.BtnLocked : Strings.BtnLock,
+                btnX, btnY, btnW, btnH,
+                isLocked ? Theme.AmberSoft : Theme.BgControl,
+                isLocked ? Theme.AmberSoft : Theme.BgControlHover,
+                isLocked ? Theme.Amber : Theme.TextPrimary,
+                isLocked ? Theme.Amber : Theme.BorderStrong,
+                () => _engine.ToggleManualLockOnActiveOrSelected(session.SessionId));
+        }
+
+        return y + rowH;
+    }
+
+    private void DrawVolumeControls(
+        nint dc, nint gfx, string idPrefix, string sessionId,
+        float volume, bool isMuted, int x, int y, int w, int h, int headerH)
+    {
+        int muteSz = S(26);
+        int muteX = x;
+        int muteY = y + (h - muteSz) / 2;
+        string muteId = $"{idPrefix}_mute";
+        bool muteHovered = string.Equals(_hoverId, muteId, StringComparison.Ordinal);
+
+        uint muteBg = isMuted
+            ? Theme.RedSoft
+            : (muteHovered ? Theme.BgControlHover : Theme.BgControl);
+        uint muteBorder = isMuted ? Theme.Red : Theme.BorderSubtle;
+        uint muteFg = isMuted ? Theme.Red : Theme.TextPrimary;
+
+        GdiPlus.FillAndStrokeRoundedRect(gfx, muteX, muteY, muteSz, muteSz, SF(6),
+            GdiPlus.Argb(muteBg), GdiPlus.Argb(muteBorder));
+        DrawSpeakerGlyph(gfx, muteX, muteY, muteSz, isMuted, muteFg);
+
+        if (y + h > headerH)
+        {
+            RegisterScrollableHit(
+                new Win32.RECT { Left = muteX, Top = muteY, Right = muteX + muteSz, Bottom = muteY + muteSz },
+                muteId,
+                () => _ = _engine.ToggleSessionMuteAsync(sessionId));
+        }
+
+        int pctW = S(38);
+        int pctX = x + w - pctW;
+        int trackX = muteX + muteSz + S(7);
+        int trackRight = pctX - S(5);
+        int trackW = Math.Max(S(36), trackRight - trackX);
+        int trackH = S(6);
+        int trackY = y + (h - trackH) / 2;
+
+        string sliderId = $"{idPrefix}_slider";
+        bool isDraggingThis = string.Equals(_draggingSliderId, sliderId, StringComparison.Ordinal);
+        bool sliderHovered = isDraggingThis || string.Equals(_hoverId, sliderId, StringComparison.Ordinal);
+
+        float dispVol = isDraggingThis
+            ? _dragPreviewVolume
+            : (isMuted ? 0f : Math.Clamp(volume, 0f, 1f));
+
+        // Track background
+        GdiPlus.FillRoundedRect(gfx, trackX, trackY, trackW, trackH, trackH / 2f, GdiPlus.Argb(Theme.BgControl));
+
+        // Active fill bar
+        float fillW = trackW * dispVol;
+        if (fillW > 1f)
+        {
+            uint fillColor = (isMuted && !isDraggingThis) ? Theme.Red : Theme.Accent;
+            GdiPlus.FillRoundedRect(gfx, trackX, trackY, MathF.Max(trackH, fillW), trackH, trackH / 2f, GdiPlus.Argb(fillColor));
+        }
+
+        // Slider thumb
+        float thumbD = sliderHovered ? S(13) : S(11);
+        float cx = trackX + trackW * dispVol;
+        float cy = y + h / 2f;
+        FillCircleArgb(gfx, GdiPlus.Argb(Theme.SwitchKnob), cx - thumbD / 2f, cy - thumbD / 2f, thumbD);
+        StrokeCircleArgb(gfx, GdiPlus.Argb(isDraggingThis ? Theme.Accent : Theme.BorderStrong), MathF.Max(1.2f, SF(1.2f)),
+            cx - thumbD / 2f, cy - thumbD / 2f, thumbD);
+
+        if (y + h > headerH)
+        {
+            int hitTop = Math.Max(_bodyClipTop, y);
+            if (y + h > hitTop)
+            {
+                _sliderRegions.Add(new SliderRegion(
+                    new Win32.RECT { Left = trackX - S(4), Top = hitTop, Right = trackX + trackW + S(4), Bottom = y + h },
+                    sliderId,
+                    sessionId,
+                    trackX,
+                    trackW));
+            }
+        }
+
+        int dispPct = (int)MathF.Round(dispVol * 100f);
+        DrawText(dc, Strings.FormatPercent(dispPct), pctX, y, pctX + pctW, y + h, 11, Win32.FW_SEMIBOLD,
+            isMuted && !isDraggingThis ? Theme.Red : Theme.TextSecondary, centered: true);
+    }
+
+    private void DrawSpeakerGlyph(nint gfx, int x, int y, int sz, bool isMuted, uint colorRgb)
+    {
+        float cx = x + sz / 2f;
+        float cy = y + sz / 2f;
+        float u = sz * 0.22f;
+
+        if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(colorRgb), out nint brush) == 0 && brush != 0)
+        {
+            try
+            {
+                if (GdiPlus.GdipCreatePath(GdiPlus.FillModeAlternate, out nint path) == 0 && path != 0)
+                {
+                    try
+                    {
+                        float x0 = cx - u * 1.15f;
+                        float x1 = cx - u * 0.55f;
+                        float x2 = cx + u * 0.12f;
+                        GdiPlus.GdipAddPathLine(path, x0, cy - u * 0.42f, x1, cy - u * 0.42f);
+                        GdiPlus.GdipAddPathLine(path, x1, cy - u * 0.42f, x2, cy - u * 0.95f);
+                        GdiPlus.GdipAddPathLine(path, x2, cy - u * 0.95f, x2, cy + u * 0.95f);
+                        GdiPlus.GdipAddPathLine(path, x2, cy + u * 0.95f, x1, cy + u * 0.42f);
+                        GdiPlus.GdipAddPathLine(path, x1, cy + u * 0.42f, x0, cy + u * 0.42f);
+                        GdiPlus.GdipClosePathFigure(path);
+                        GdiPlus.GdipFillPath(gfx, brush, path);
+                    }
+                    finally
+                    {
+                        GdiPlus.GdipDeletePath(path);
+                    }
+                }
+            }
+            finally
+            {
+                GdiPlus.GdipDeleteBrush(brush);
+            }
+        }
+
+        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.3f, SF(1.3f)), GdiPlus.UnitPixel, out nint pen) == 0 && pen != 0)
+        {
+            try
+            {
+                GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
+                GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
+
+                if (isMuted)
+                {
+                    float mx1 = cx + u * 0.48f;
+                    float mx2 = cx + u * 1.15f;
+                    GdiPlus.GdipDrawLine(gfx, pen, mx1, cy - u * 0.42f, mx2, cy + u * 0.42f);
+                    GdiPlus.GdipDrawLine(gfx, pen, mx2, cy - u * 0.42f, mx1, cy + u * 0.42f);
+                }
+                else
+                {
+                    GdiPlus.GdipDrawArc(gfx, pen, cx - u * 0.25f, cy - u * 0.55f, u * 0.95f, u * 1.1f, -50f, 100f);
+                    GdiPlus.GdipDrawArc(gfx, pen, cx - u * 0.45f, cy - u * 0.9f, u * 1.6f, u * 1.8f, -50f, 100f);
+                }
+            }
+            finally
+            {
+                GdiPlus.GdipDeletePen(pen);
+            }
+        }
+    }
+
+    private void DrawFocusArrowGlyph(nint gfx, int x, int y, int sz, uint colorRgb)
+    {
+        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.25f, SF(1.25f)), GdiPlus.UnitPixel, out nint pen) != 0 || pen == 0)
+            return;
+
+        try
+        {
+            GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
+            GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
+
+            float pad = sz * 0.16f;
+            float left = x + pad;
+            float top = y + pad;
+            float right = x + sz - pad;
+            float bottom = y + sz - pad;
+            float midX = left + (right - left) * 0.52f;
+            float midY = top + (bottom - top) * 0.48f;
+
+            // Open box corner + diagonal arrow pointing up-right
+            GdiPlus.GdipDrawLine(gfx, pen, midX, top + (bottom - top) * 0.15f, left, top + (bottom - top) * 0.15f);
+            GdiPlus.GdipDrawLine(gfx, pen, left, top + (bottom - top) * 0.15f, left, bottom);
+            GdiPlus.GdipDrawLine(gfx, pen, left, bottom, right - (right - left) * 0.15f, bottom);
+            GdiPlus.GdipDrawLine(gfx, pen, right - (right - left) * 0.15f, bottom, right - (right - left) * 0.15f, midY);
+
+            GdiPlus.GdipDrawLine(gfx, pen, midX - (right - left) * 0.08f, midY + (bottom - top) * 0.08f, right, top);
+            GdiPlus.GdipDrawLine(gfx, pen, right, top, right - (right - left) * 0.36f, top);
+            GdiPlus.GdipDrawLine(gfx, pen, right, top, right, top + (bottom - top) * 0.36f);
+        }
+        finally
+        {
+            GdiPlus.GdipDeletePen(pen);
+        }
+    }
+
+    private int DrawPriorityRow(nint dc, nint gfx, int x, int y, int w, DiscoveredApp app, int index, int total, int headerH)
+    {
+        int rowH = S(54);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+
+        int pad = S(14);
+        int rankW = S(30);
+        int rankH = S(24);
+        int rankY = y + (rowH - rankH) / 2;
+        GdiPlus.FillRoundedRect(gfx, x + pad, rankY, rankW, rankH, SF(6), GdiPlus.Argb(index == 0 ? Theme.AccentSoft : Theme.BgControl));
+        DrawText(dc, $"#{index + 1}", x + pad, rankY, x + pad + rankW, rankY + rankH, 11, Win32.FW_BOLD,
+            index == 0 ? Theme.Accent : Theme.TextSecondary, centered: true);
+
+        int icoX = x + pad + rankW + S(10);
+        int icoSz = S(24);
+        nint hIcon = _iconRenderer.GetIconForApp(app.AppKey, app.ExePath);
+        if (hIcon != 0)
+        {
+            Win32.DrawIconEx(dc, icoX, y + (rowH - icoSz) / 2, hIcon, icoSz, icoSz, 0, 0, Win32.DI_NORMAL);
+        }
+        else
+        {
+            GdiPlus.FillRoundedRect(gfx, icoX, y + (rowH - icoSz) / 2, icoSz, icoSz, SF(6), GdiPlus.Argb(Theme.BgControl));
+        }
+
+        int btnSz = S(28);
+        int btnY = y + (rowH - btnSz) / 2;
+        int delX = x + w - pad - btnSz;
+        int downX = delX - S(6) - btnSz;
+        int upX = downX - S(6) - btnSz;
+
+        int textX = icoX + icoSz + S(12);
+        int textRight = upX - S(12);
+        DrawText(dc, app.DisplayName, textX, y + S(8), textRight, y + S(28), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        string? browserKey = BrowserSiteScanner.ExtractBrowserKeyFromAppKey(app.AppKey);
+        string exeSub = string.IsNullOrWhiteSpace(app.ExePath) ? app.AppKey : app.ExePath;
+        if (!string.IsNullOrEmpty(browserKey))
+            exeSub = $"{ProcessResolver.FormatDisplayName(browserKey, app.ExePath)} • {exeSub}";
+        DrawText(dc, exeSub, textX, y + S(27), textRight, y + S(46), 11, Win32.FW_NORMAL, Theme.TextMuted);
+
+        if (y + rowH > headerH)
+        {
+            DrawIconButton(dc, gfx, $"prio_up_{app.AppKey}", SmallButtonGlyph.Up, upX, btnY, btnSz, index > 0,
+                () => _stateStore.MovePriorityApp(app.AppKey, -1));
+            DrawIconButton(dc, gfx, $"prio_dn_{app.AppKey}", SmallButtonGlyph.Down, downX, btnY, btnSz, index < total - 1,
+                () => _stateStore.MovePriorityApp(app.AppKey, 1));
+            DrawIconButton(dc, gfx, $"prio_rm_{app.AppKey}", SmallButtonGlyph.Close, delX, btnY, btnSz, true,
+                () => _stateStore.RemovePriorityApp(app.AppKey), danger: true);
+        }
+
+        return y + rowH;
+    }
+
+    private int DrawSettingsTab(nint dc, nint gfx, int x, int y, int w, int headerH)
+    {
+        if (!string.IsNullOrEmpty(_statusBanner) && Environment.TickCount64 <= _statusBannerUntilTick)
+        {
+            int bannerH = S(38);
+            uint bFg = _statusBannerIsError ? Theme.Red : Theme.Green;
+            uint bBg = _statusBannerIsError ? Theme.RedSoft : Theme.GreenSoft;
+            GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, bannerH, SF(8),
+                GdiPlus.Argb(bBg), GdiPlus.Argb(bFg, 160));
+            DrawText(dc, _statusBanner, x + S(14), y, x + w - S(14), y + bannerH, 12, Win32.FW_SEMIBOLD, bFg);
+            y += bannerH + S(14);
+        }
+
+        // 0. LANGUAGE SELECTOR
+        DrawText(dc, Strings.SecLanguage, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+        y += S(24);
+
+        y = DrawLanguageSelectorCard(dc, gfx, x, y, w, headerH);
+        y += S(22);
+
+        // 0.5 APPEARANCE & THEME SELECTOR
+        DrawText(dc, Strings.SecAppearance, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+        y += S(24);
+
+        y = DrawThemeSelectorCard(dc, gfx, x, y, w, headerH);
+        y += S(22);
+
+        // 1. SYSTEM & STARTUP
+        DrawText(dc, Strings.SecSystemStartup, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+        y += S(24);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_startup",
+            Strings.SetStartupTitle,
+            Strings.SetStartupSub,
+            _startupService.IsStartupEnabled,
+            () =>
+            {
+                bool next = !_startupService.IsStartupEnabled;
+                bool ok = _startupService.SetBasicStartup(next, _settings.StartMinimized);
+                ShowStatusBanner(
+                    ok ? (next ? Strings.MsgStartupOn : Strings.MsgStartupOff)
+                       : Strings.MsgStartupFail,
+                    !ok);
+            });
+        y += S(8);
+
+        y = DrawElevationTaskCard(dc, gfx, x, y, w, headerH);
+        y += S(8);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_start_min",
+            Strings.SetStartMinTitle,
+            Strings.SetStartMinSub,
+            _settings.StartMinimized,
+            () =>
+            {
+                bool nextVal = false;
+                _stateStore.UpdateSettings(s =>
+                {
+                    s.StartMinimized = !s.StartMinimized;
+                    nextVal = s.StartMinimized;
+                });
+                _startupService.SyncStartupArgumentsIfEnabled(nextVal);
+            });
+        y += S(8);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_min_close",
+            Strings.SetMinCloseTitle,
+            Strings.SetMinCloseSub,
+            _settings.MinimizeToTrayOnClose,
+            () => _stateStore.UpdateSettings(s => s.MinimizeToTrayOnClose = !s.MinimizeToTrayOnClose));
+        y += S(8);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_topmost",
+            Strings.SetTopmostTitle,
+            Strings.SetTopmostSub,
+            _settings.AlwaysOnTop,
+            () => _stateStore.UpdateSettings(s => s.AlwaysOnTop = !s.AlwaysOnTop));
+
+        // 1.5 COMPANION BROWSER EXTENSION BRIDGE
+        y += S(22);
+        DrawText(dc, Strings.SecBrowserBridge, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+        y += S(24);
+
+        y = DrawBrowserBridgeCard(dc, gfx, x, y, w, headerH);
+
+        // 2. MEDIA & AUDIO CONTROL
+        y += S(22);
+        DrawText(dc, Strings.SecMediaAudio, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+        y += S(24);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_hook_enabled",
+            Strings.SetHookEnabledTitle,
+            Strings.SetHookEnabledSub,
+            _settings.MediaHookEnabled,
+            () => _stateStore.UpdateSettings(s => s.MediaHookEnabled = !s.MediaHookEnabled));
+        y += S(8);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_tray_wheel",
+            Strings.SetTrayWheelTitle,
+            Strings.SetTrayWheelSub,
+            _settings.TrayWheelVolumeEnabled,
+            () => _stateStore.UpdateSettings(s => s.TrayWheelVolumeEnabled = !s.TrayWheelVolumeEnabled));
+        y += S(8);
+
+        y = DrawStepperSettingRow(dc, gfx, x, y, w, headerH, "set_vol_step",
+            Strings.SetVolStepTitle,
+            Strings.SetVolStepSub,
+            Strings.FormatPercent(_settings.VolumeStepPercent),
+            () => _stateStore.UpdateSettings(s => s.VolumeStepPercent = Math.Max(1, s.VolumeStepPercent - 1)),
+            () => _stateStore.UpdateSettings(s => s.VolumeStepPercent = Math.Min(20, s.VolumeStepPercent + 1)));
+        y += S(8);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_osd",
+            Strings.SetOsdTitle,
+            Strings.SetOsdSub,
+            _settings.OsdEnabled,
+            () => _stateStore.UpdateSettings(s => s.OsdEnabled = !s.OsdEnabled));
+        y += S(8);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_autopause",
+            Strings.SetAutoPauseTitle,
+            Strings.SetAutoPauseSub,
+            _settings.AutoPauseEnabled,
+            () => _stateStore.UpdateSettings(s => s.AutoPauseEnabled = !s.AutoPauseEnabled));
+        y += S(8);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_headphone",
+            Strings.SetHeadphoneTitle,
+            Strings.SetHeadphoneSub,
+            _settings.HeadphoneGuardEnabled,
+            () => _stateStore.UpdateSettings(s => s.HeadphoneGuardEnabled = !s.HeadphoneGuardEnabled));
+        y += S(8);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_solo",
+            Strings.SetSoloTitle,
+            Strings.SetSoloSub,
+            _settings.SoloModeEnabled,
+            () => _engine.ToggleSoloMode());
+        y += S(8);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_game",
+            Strings.SetGameGuardTitle,
+            Strings.SetGameGuardSub,
+            _settings.GameFullscreenGuardEnabled,
+            () => _stateStore.UpdateSettings(s => s.GameFullscreenGuardEnabled = !s.GameFullscreenGuardEnabled));
+
+        // 3. TIMELINE SCRUBBING
+        y += S(22);
+        DrawText(dc, Strings.SecScrubbing, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+        y += S(24);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_scrub_enabled",
+            Strings.SetScrubEnabledTitle,
+            Strings.SetScrubEnabledSub,
+            _settings.TimelineScrubbingEnabled,
+            () => _stateStore.UpdateSettings(s => s.TimelineScrubbingEnabled = !s.TimelineScrubbingEnabled));
+        y += S(8);
+
+        y = DrawStepperSettingRow(dc, gfx, x, y, w, headerH, "set_seek",
+            Strings.SetSeekSecondsTitle,
+            Strings.SetSeekSecondsSub,
+            $"{_settings.SeekSeconds} {Strings.UnitSeconds}",
+            () => _stateStore.UpdateSettings(s => s.SeekSeconds = Math.Max(1, s.SeekSeconds - 5)),
+            () => _stateStore.UpdateSettings(s => s.SeekSeconds = Math.Min(120, s.SeekSeconds + 5)));
+        y += S(8);
+
+        y = DrawStepperSettingRow(dc, gfx, x, y, w, headerH, "set_hold",
+            Strings.SetLongPressTitle,
+            Strings.SetLongPressSub,
+            $"{_settings.LongPressThresholdMs} ms",
+            () => _stateStore.UpdateSettings(s => s.LongPressThresholdMs = Math.Max(150, s.LongPressThresholdMs - 50)),
+            () => _stateStore.UpdateSettings(s => s.LongPressThresholdMs = Math.Min(1500, s.LongPressThresholdMs + 50)));
+
+        // 4. TOOLS & SHORTCUTS
+        y += S(22);
+        DrawText(dc, Strings.SecToolsShortcuts, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+        y += S(24);
+
+        y = DrawUtilityActionsRow(dc, gfx, x, y, w, headerH);
+        y += S(10);
+
+        int infoH = S(132);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, infoH, SF(10),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+
+        int ix = x + S(16);
+        int ir = x + w - S(16);
+        DrawText(dc, Strings.ShortcutSecondary, ix, y + S(12), ir, y + S(32), 12, Win32.FW_NORMAL, Theme.TextSecondary);
+        DrawText(dc, Strings.ShortcutToggles, ix, y + S(36), ir, y + S(56), 12, Win32.FW_NORMAL, Theme.TextSecondary);
+        DrawText(dc, Strings.ShortcutTrayWheel, ix, y + S(60), ir, y + S(80), 12, Win32.FW_NORMAL, Theme.TextSecondary);
+        DrawText(dc, $"{Strings.StateFileLabel}: {_stateStore.FilePath}",
+            ix, y + S(92), ir, y + S(116), 11, Win32.FW_NORMAL, Theme.TextMuted);
+
+        return y + infoH;
+    }
+
+    private int DrawLanguageSelectorCard(nint dc, nint gfx, int x, int y, int w, int headerH)
+    {
+        var langs = Strings.Languages;
+        const int cols = 3;
+        int rows = (langs.Length + cols - 1) / cols;
+        int pad = S(16);
+        int gap = S(8);
+        int rowGap = S(8);
+        int pillH = S(32);
+        int startY = y + S(58);
+        int rowH = S(58) + rows * pillH + Math.Max(0, rows - 1) * rowGap + S(14);
+
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+
+        DrawText(dc, Strings.LanguageTitle, x + pad, y + S(10), x + w - pad, y + S(32), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        DrawText(dc, Strings.LanguageSub, x + pad, y + S(31), x + w - pad, y + S(50), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+
+        int totalInnerW = w - pad * 2;
+        int pillW = (totalInnerW - gap * (cols - 1)) / cols;
+
+        for (int i = 0; i < langs.Length; i++)
+        {
+            var lang = langs[i];
+            int col = i % cols;
+            int row = i / cols;
+            int px = x + pad + col * (pillW + gap);
+            int py = startY + row * (pillH + rowGap);
+            bool selected = Strings.Current == lang.Language;
+            string id = $"set_lang_{lang.Code}";
+            bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+
+            uint bg = selected ? Theme.Accent : (hovered ? Theme.BgControlHover : Theme.BgControl);
+            uint fg = selected ? Theme.OnAccent : Theme.TextPrimary;
+            uint border = selected ? Theme.Accent : Theme.BorderStrong;
+
+            GdiPlus.FillAndStrokeRoundedRect(gfx, px, py, pillW, pillH, SF(7),
+                GdiPlus.Argb(bg), GdiPlus.Argb(border));
+            DrawText(dc, lang.NativeName, px, py, px + pillW, py + pillH, 12,
+                selected ? Win32.FW_SEMIBOLD : Win32.FW_MEDIUM, fg, centered: true);
+
+            if (y + rowH > headerH)
+            {
+                string code = lang.Code;
+                RegisterScrollableHit(
+                    new Win32.RECT { Left = px, Top = py, Right = px + pillW, Bottom = py + pillH },
+                    id,
+                    () => _stateStore.UpdateSettings(s => s.Language = code));
+            }
+        }
+
+        return y + rowH;
+    }
+
+    private int DrawThemeSelectorCard(nint dc, nint gfx, int x, int y, int w, int headerH)
+    {
+        int rowH = S(152);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+
+        int pad = S(16);
+        DrawText(dc, Strings.ThemeTitle, x + pad, y + S(10), x + w - pad, y + S(32), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        DrawText(dc, Strings.ThemeSub, x + pad, y + S(31), x + w - pad, y + S(50), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+
+        var presets = Theme.Presets;
+        const int cols = 4;
+        int gap = S(8);
+        int rowGap = S(8);
+        int totalInnerW = w - pad * 2;
+        int pillW = (totalInnerW - gap * (cols - 1)) / cols;
+        int pillH = S(36);
+        int startY = y + S(58);
+
+        for (int i = 0; i < presets.Length; i++)
+        {
+            var preset = presets[i];
+            int col = i % cols;
+            int row = i / cols;
+            int px = x + pad + col * (pillW + gap);
+            int py = startY + row * (pillH + rowGap);
+
+            bool selected = string.Equals(Theme.CurrentId, preset.Id, StringComparison.OrdinalIgnoreCase);
+            string id = $"set_theme_{preset.Id}";
+            bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+
+            uint bg = selected ? Theme.Accent : (hovered ? Theme.BgControlHover : Theme.BgControl);
+            uint fg = selected ? Theme.OnAccent : Theme.TextPrimary;
+            uint border = selected ? Theme.Accent : Theme.BorderStrong;
+
+            GdiPlus.FillAndStrokeRoundedRect(gfx, px, py, pillW, pillH, SF(7),
+                GdiPlus.Argb(bg), GdiPlus.Argb(border));
+
+            // 2-tone circular preview swatch (background + accent dot)
+            int swSz = S(18);
+            int swX = px + S(12);
+            int swY = py + (pillH - swSz) / 2;
+            FillCircleArgb(gfx, GdiPlus.Argb(preset.SwatchBg), swX, swY, swSz);
+            StrokeCircleArgb(gfx, GdiPlus.Argb(selected ? Theme.OnAccent : Theme.BorderStrong), MathF.Max(1.2f, SF(1.2f)), swX, swY, swSz);
+
+            int dotSz = S(8);
+            FillCircleArgb(gfx, GdiPlus.Argb(preset.SwatchAccent),
+                swX + (swSz - dotSz) / 2f, swY + (swSz - dotSz) / 2f, dotSz);
+
+            DrawText(dc, Strings.ThemeName(preset.Id), swX + swSz + S(8), py, px + pillW - S(8), py + pillH,
+                12, selected ? Win32.FW_SEMIBOLD : Win32.FW_MEDIUM, fg);
+
+            if (y + rowH > headerH)
+            {
+                string themeId = preset.Id;
+                RegisterScrollableHit(
+                    new Win32.RECT { Left = px, Top = py, Right = px + pillW, Bottom = py + pillH },
+                    id,
+                    () => _stateStore.UpdateSettings(s => s.Theme = themeId));
+            }
+        }
+
+        return y + rowH;
+    }
+
+    private static void FillCircleArgb(nint gfx, uint argb, float x, float y, float d)
+    {
+        if (GdiPlus.GdipCreateSolidFill(argb, out nint br) == 0 && br != 0)
+        {
+            try { GdiPlus.GdipFillEllipse(gfx, br, x, y, d, d); }
+            finally { GdiPlus.GdipDeleteBrush(br); }
+        }
+    }
+
+    private static void StrokeCircleArgb(nint gfx, uint argb, float width, float x, float y, float d)
+    {
+        if (GdiPlus.GdipCreatePen1(argb, width, GdiPlus.UnitPixel, out nint pen) == 0 && pen != 0)
+        {
+            try { GdiPlus.GdipDrawEllipse(gfx, pen, x, y, d, d); }
+            finally { GdiPlus.GdipDeletePen(pen); }
+        }
+    }
+
+    private int DrawElevationTaskCard(nint dc, nint gfx, int x, int y, int w, int headerH)
+    {
+        int rowH = S(74);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+
+        int pad = S(16);
+        bool isElev = _startupService.IsElevated;
+        bool hasTask = _startupService.IsScheduledTaskInstalled;
+
+        int btnH = S(32);
+        int btnY = y + (rowH - btnH) / 2;
+        int taskBtnW = S(138);
+        int taskBtnX = x + w - pad - taskBtnW;
+        int rightLimit = taskBtnX - S(12);
+
+        if (!isElev)
+        {
+            int elevBtnW = S(138);
+            int elevBtnX = taskBtnX - S(8) - elevBtnW;
+            rightLimit = elevBtnX - S(12);
+
+            if (y + rowH > headerH)
+            {
+                DrawActionButton(dc, gfx, "set_restart_admin", Strings.BtnRestartAdmin, elevBtnX, btnY, elevBtnW, btnH,
+                    Theme.AmberSoft, Theme.AmberSoft, Theme.Amber, Theme.Amber,
+                    () =>
+                    {
+                        if (_startupService.RestartAsAdministrator())
+                            ExitRequested?.Invoke();
+                        else
+                            ShowStatusBanner(Strings.MsgRestartAdminCancelled, isError: true);
+                    });
+            }
+        }
+
+        if (y + rowH > headerH)
+        {
+            bool taskHovered = string.Equals(_hoverId, "set_sched_task", StringComparison.Ordinal);
+            DrawActionButton(dc, gfx, "set_sched_task",
+                _taskOpBusy ? Strings.BtnTaskBusy : (hasTask ? Strings.BtnTaskRemove : Strings.BtnTaskInstall),
+                taskBtnX, btnY, taskBtnW, btnH,
+                hasTask ? Theme.RedSoft : Theme.AccentSoft,
+                hasTask ? Theme.RedSoft : Theme.Accent,
+                hasTask ? Theme.Red : (taskHovered ? Theme.OnAccent : Theme.TextPrimary),
+                hasTask ? Theme.Red : Theme.Accent,
+                () =>
+                {
+                    if (_taskOpBusy) return;
+                    _taskOpBusy = true;
+                    _startupService.ToggleScheduledTask(
+                        hasTask,
+                        _settings.StartMinimized,
+                        (success, message) => BeginInvoke(() =>
+                        {
+                            _taskOpBusy = false;
+                            ShowStatusBanner(message, !success);
+                        }));
+                });
+        }
+
+        string titleText = Strings.ElevCardTitle;
+        int titleW = MeasureTextWidth(dc, titleText, 13, Win32.FW_SEMIBOLD) + S(8);
+        int titleRight = Math.Min(rightLimit, x + pad + titleW);
+        DrawText(dc, titleText, x + pad, y + S(12), titleRight, y + S(34), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+
+        int bx = titleRight + S(6);
+        string adminText = isElev ? Strings.BadgeAdmin : Strings.BadgeStandard;
+        int adminPillW = MeasureTextWidth(dc, adminText, 10, Win32.FW_SEMIBOLD) + S(20);
+        if (bx + adminPillW <= rightLimit)
+        {
+            bx += DrawPillBadge(dc, gfx, bx, y + S(12),
+                adminText,
+                isElev ? Theme.Green : Theme.Amber,
+                isElev ? Theme.GreenSoft : Theme.AmberSoft) + S(6);
+        }
+
+        string taskText = hasTask ? Strings.BadgeTaskInstalled : Strings.BadgeTaskMissing;
+        int taskPillW = MeasureTextWidth(dc, taskText, 10, Win32.FW_SEMIBOLD) + S(20);
+        if (bx + taskPillW <= rightLimit)
+        {
+            DrawPillBadge(dc, gfx, bx, y + S(12),
+                taskText,
+                hasTask ? Theme.Green : Theme.TextSecondary,
+                hasTask ? Theme.GreenSoft : Theme.BgControl);
+        }
+
+        DrawText(dc, Strings.ElevCardSub,
+            x + pad, y + S(38), rightLimit, y + S(60), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+
+        return y + rowH;
+    }
+
+    private int DrawBrowserBridgeCard(nint dc, nint gfx, int x, int y, int w, int headerH)
+    {
+        int rowH = S(104);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+
+        int pad = S(16);
+        var (browsers, tabs) = _bridgeServer.GetStatusSnapshot();
+        bool isConnected = browsers > 0;
+
+        string statusText = isConnected ? Strings.BadgeBridgeConnected(browsers, tabs) : Strings.BadgeBridgeDisconnected;
+        int pillW = Math.Max(S(54), MeasureTextWidth(dc, statusText, 10, Win32.FW_SEMIBOLD) + S(20));
+        int titleW = MeasureTextWidth(dc, Strings.BridgeCardTitle, 13, Win32.FW_SEMIBOLD) + S(8);
+        int maxTitleRight = x + w - pad - pillW - S(8);
+        int titleRight = Math.Min(Math.Max(x + pad + S(100), maxTitleRight), x + pad + titleW);
+        DrawText(dc, Strings.BridgeCardTitle, x + pad, y + S(12), titleRight, y + S(34), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+
+        int pillX = titleRight + S(6);
+        if (pillX + pillW <= x + w - pad)
+        {
+            DrawPillBadge(dc, gfx, pillX, y + S(12),
+                statusText,
+                isConnected ? Theme.Green : Theme.TextSecondary,
+                isConnected ? Theme.GreenSoft : Theme.BgControl);
+        }
+
+        DrawText(dc, Strings.BridgeCardSub, x + pad, y + S(36), x + w - pad, y + S(56), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+
+        int gap = S(10);
+        int btnY = y + S(60);
+        int btnH = S(32);
+        int folderW = S(116);
+        int remW = w - pad * 2 - folderW - gap * 2;
+        int mainBtnW = Math.Max(S(130), remW / 2);
+
+        if (y + rowH > headerH)
+        {
+            bool chromiumHovered = string.Equals(_hoverId, "btn_ext_chromium", StringComparison.Ordinal);
+            DrawActionButton(dc, gfx, "btn_ext_chromium", Strings.BtnInstallChromium,
+                x + pad, btnY, mainBtnW, btnH,
+                Theme.AccentSoft, Theme.Accent, chromiumHovered ? Theme.OnAccent : Theme.TextPrimary, Theme.Accent,
+                () =>
+                {
+                    _guideWindow ??= new ExtensionGuideWindow(_hwnd, _bridgeServer);
+                    _guideWindow.ShowFor(ExtensionGuideMode.Chromium);
+                });
+
+            DrawActionButton(dc, gfx, "btn_ext_firefox", Strings.BtnInstallFirefox,
+                x + pad + mainBtnW + gap, btnY, mainBtnW, btnH,
+                Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong,
+                () =>
+                {
+                    _guideWindow ??= new ExtensionGuideWindow(_hwnd, _bridgeServer);
+                    _guideWindow.ShowFor(ExtensionGuideMode.Firefox);
+                });
+
+            DrawActionButton(dc, gfx, "btn_ext_folder", Strings.BtnOpenExtFolder,
+                x + pad + mainBtnW * 2 + gap * 2, btnY, folderW, btnH,
+                Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong,
+                () =>
+                {
+                    if (!ExtensionSetupService.OpenExtensionFolder())
+                        ShowStatusBanner(Strings.MsgBridgeFolderMissing, isError: true);
+                });
+        }
+
+        return y + rowH;
+    }
+
+    private int DrawUtilityActionsRow(nint dc, nint gfx, int x, int y, int w, int headerH)
+    {
+        int rowH = S(56);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+
+        int pad = S(14);
+        int gap = S(10);
+        int btnW = (w - pad * 2 - gap * 2) / 3;
+        int btnH = S(34);
+        int btnY = y + (rowH - btnH) / 2;
+
+        if (y + rowH > headerH)
+        {
+            DrawActionButton(dc, gfx, "util_rehook", Strings.BtnRehook, x + pad, btnY, btnW, btnH,
+                Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong,
+                () =>
+                {
+                    _refreshHooksCallback?.Invoke();
+                    ShowStatusBanner(Strings.MsgHooksRefreshed);
+                });
+
+            DrawActionButton(dc, gfx, "util_open_cfg", Strings.BtnOpenConfigFolder, x + pad + btnW + gap, btnY, btnW, btnH,
+                Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong,
+                () => StartupService.OpenConfigFolder(_stateStore.FilePath));
+
+            DrawActionButton(dc, gfx, "util_reset_set", Strings.BtnResetDefaults, x + pad + (btnW + gap) * 2, btnY, btnW, btnH,
+                Theme.BgControl, Theme.RedSoft, Theme.Red, Theme.BorderStrong,
+                () =>
+                {
+                    _stateStore.ResetSettingsToDefaults();
+                    ShowStatusBanner(Strings.MsgSettingsReset);
+                });
+        }
+
+        return y + rowH;
+    }
+
+    private int DrawToggleSettingRow(
+        nint dc, nint gfx, int x, int y, int w, int headerH, string id,
+        string title, string subtitle, bool value, Action onToggle)
+    {
+        int rowH = S(62);
+        bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(hovered ? Theme.BgCardHover : Theme.BgCard),
+            GdiPlus.Argb(Theme.BorderSubtle));
+
+        int pad = S(16);
+        int swW = S(46);
+        int swH = S(24);
+        int swX = x + w - pad - swW;
+        int swY = y + (rowH - swH) / 2;
+
+        int textRight = swX - S(16);
+        DrawText(dc, title, x + pad, y + S(10), textRight, y + S(31), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        DrawText(dc, subtitle, x + pad, y + S(32), textRight, y + S(52), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+
+        // Toggle switch pill
+        uint trackColor = value ? Theme.Accent : Theme.SwitchOffTrack;
+        GdiPlus.FillRoundedRect(gfx, swX, swY, swW, swH, swH / 2f, GdiPlus.Argb(trackColor));
+
+        int knobD = swH - S(6);
+        int knobX = value ? swX + swW - knobD - S(3) : swX + S(3);
+        int knobY = swY + S(3);
+        if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(Theme.SwitchKnob), out nint knobBrush) == 0 && knobBrush != 0)
+        {
+            try { GdiPlus.GdipFillEllipse(gfx, knobBrush, knobX, knobY, knobD, knobD); }
+            finally { GdiPlus.GdipDeleteBrush(knobBrush); }
+        }
+
+        if (y + rowH > headerH)
+        {
+            RegisterScrollableHit(
+                new Win32.RECT { Left = x, Top = y, Right = x + w, Bottom = y + rowH },
+                id,
+                onToggle);
+        }
+
+        return y + rowH;
+    }
+
+    private int DrawStepperSettingRow(
+        nint dc, nint gfx, int x, int y, int w, int headerH, string id,
+        string title, string subtitle, string valueText, Action onDec, Action onInc)
+    {
+        int rowH = S(62);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+
+        int pad = S(16);
+        int btnSz = S(28);
+        int valW = S(66);
+        int btnY = y + (rowH - btnSz) / 2;
+        int incX = x + w - pad - btnSz;
+        int valX = incX - S(6) - valW;
+        int decX = valX - S(6) - btnSz;
+
+        int textRight = decX - S(16);
+        DrawText(dc, title, x + pad, y + S(10), textRight, y + S(31), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        DrawText(dc, subtitle, x + pad, y + S(32), textRight, y + S(52), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+
+        DrawText(dc, valueText, valX, y, valX + valW, y + rowH, 13, Win32.FW_SEMIBOLD, Theme.TextPrimary, centered: true);
+
+        if (y + rowH > headerH)
+        {
+            DrawActionButton(dc, gfx, $"{id}_dec", "−", decX, btnY, btnSz, btnSz,
+                Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong, onDec);
+            DrawActionButton(dc, gfx, $"{id}_inc", "+", incX, btnY, btnSz, btnSz,
+                Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong, onInc);
+        }
+
+        return y + rowH;
+    }
+
+    private int DrawEmptyCard(nint dc, nint gfx, int x, int y, int w, string heading, string detail)
+    {
+        int h = S(76);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, h, SF(10),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+        DrawText(dc, heading, x + S(16), y + S(14), x + w - S(16), y + S(36), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        DrawText(dc, detail, x + S(16), y + S(38), x + w - S(16), y + S(64), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+        return y + h;
+    }
+
+    private enum TransportGlyph { Previous, Play, Pause, Next }
+
+    private void DrawTransportButton(nint dc, nint gfx, string id, TransportGlyph glyph, int x, int y, int sz, Action onClick, bool accent = false)
+    {
+        bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+        uint bg = accent
+            ? (hovered ? Theme.AccentHover : Theme.Accent)
+            : (hovered ? Theme.BgControlHover : Theme.BgControl);
+        uint border = accent ? Theme.Accent : Theme.BorderStrong;
+        uint fg = accent ? Theme.OnAccent : Theme.TextPrimary;
+
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, sz, sz, SF(8), GdiPlus.Argb(bg), GdiPlus.Argb(border));
+
+        if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(fg), out nint brush) == 0 && brush != 0)
+        {
+            try
+            {
+                float cx = x + sz / 2f;
+                float cy = y + sz / 2f;
+                float r = sz * 0.18f;
+
+                switch (glyph)
+                {
+                    case TransportGlyph.Play:
+                        DrawTriangle(gfx, brush, cx - r * 0.6f, cy - r, cx - r * 0.6f, cy + r, cx + r * 1.1f, cy);
+                        break;
+
+                    case TransportGlyph.Pause:
+                        float bw = MathF.Max(2.2f, sz * 0.08f);
+                        float bh = r * 1.9f;
+                        GdiPlus.GdipFillRectangle(gfx, brush, cx - bw * 1.4f, cy - bh / 2f, bw, bh);
+                        GdiPlus.GdipFillRectangle(gfx, brush, cx + bw * 0.4f, cy - bh / 2f, bw, bh);
+                        break;
+
+                    case TransportGlyph.Next:
+                        DrawTriangle(gfx, brush, cx - r * 0.9f, cy - r * 0.85f, cx - r * 0.9f, cy + r * 0.85f, cx + r * 0.45f, cy);
+                        GdiPlus.GdipFillRectangle(gfx, brush, cx + r * 0.55f, cy - r * 0.85f, MathF.Max(2f, sz * 0.07f), r * 1.7f);
+                        break;
+
+                    case TransportGlyph.Previous:
+                        float barW = MathF.Max(2f, sz * 0.07f);
+                        GdiPlus.GdipFillRectangle(gfx, brush, cx - r * 0.85f, cy - r * 0.85f, barW, r * 1.7f);
+                        DrawTriangle(gfx, brush, cx + r * 0.9f, cy - r * 0.85f, cx + r * 0.9f, cy + r * 0.85f, cx - r * 0.45f, cy);
+                        break;
+                }
+            }
+            finally
+            {
+                GdiPlus.GdipDeleteBrush(brush);
+            }
+        }
+
+        RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + sz, Bottom = y + sz }, id, onClick);
+    }
+
+    private static void DrawTriangle(nint gfx, nint brush, float x1, float y1, float x2, float y2, float x3, float y3)
+    {
+        if (GdiPlus.GdipCreatePath(GdiPlus.FillModeAlternate, out nint path) != 0 || path == 0) return;
+        try
+        {
+            GdiPlus.GdipAddPathLine(path, x1, y1, x2, y2);
+            GdiPlus.GdipAddPathLine(path, x2, y2, x3, y3);
+            GdiPlus.GdipClosePathFigure(path);
+            GdiPlus.GdipFillPath(gfx, brush, path);
+        }
+        finally
+        {
+            GdiPlus.GdipDeletePath(path);
+        }
+    }
+
+    private enum SmallButtonGlyph { Up, Down, Close }
+
+    private void DrawIconButton(nint dc, nint gfx, string id, SmallButtonGlyph glyph, int x, int y, int sz, bool enabled, Action onClick, bool danger = false)
+    {
+        bool hovered = enabled && string.Equals(_hoverId, id, StringComparison.Ordinal);
+        uint bg = !enabled ? Theme.BgCard : (hovered ? (danger ? Theme.RedSoft : Theme.BgControlHover) : Theme.BgControl);
+        uint fg = !enabled ? Theme.TextMuted : (danger && hovered ? Theme.Red : Theme.TextPrimary);
+
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, sz, sz, SF(6), GdiPlus.Argb(bg), GdiPlus.Argb(Theme.BorderSubtle));
+
+        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(fg), MathF.Max(1.4f, SF(1.6f)), GdiPlus.UnitPixel, out nint pen) == 0 && pen != 0)
+        {
+            try
+            {
+                GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
+                GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
+                float cx = x + sz / 2f;
+                float cy = y + sz / 2f;
+                float d = sz * 0.16f;
+
+                switch (glyph)
+                {
+                    case SmallButtonGlyph.Up:
+                        GdiPlus.GdipDrawLine(gfx, pen, cx - d, cy + d * 0.45f, cx, cy - d * 0.55f);
+                        GdiPlus.GdipDrawLine(gfx, pen, cx, cy - d * 0.55f, cx + d, cy + d * 0.45f);
+                        break;
+                    case SmallButtonGlyph.Down:
+                        GdiPlus.GdipDrawLine(gfx, pen, cx - d, cy - d * 0.45f, cx, cy + d * 0.55f);
+                        GdiPlus.GdipDrawLine(gfx, pen, cx, cy + d * 0.55f, cx + d, cy - d * 0.45f);
+                        break;
+                    case SmallButtonGlyph.Close:
+                        GdiPlus.GdipDrawLine(gfx, pen, cx - d, cy - d, cx + d, cy + d);
+                        GdiPlus.GdipDrawLine(gfx, pen, cx + d, cy - d, cx - d, cy + d);
+                        break;
+                }
+            }
+            finally
+            {
+                GdiPlus.GdipDeletePen(pen);
+            }
+        }
+
+        if (enabled)
+        {
+            RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + sz, Bottom = y + sz }, id, onClick);
+        }
+    }
+
+    private void RegisterScrollableHit(Win32.RECT bounds, string id, Action onClick)
+    {
+        if (_bodyClipTop > 0 && bounds.Top < _bodyClipTop)
+            bounds.Top = _bodyClipTop;
+        if (bounds.Bottom > bounds.Top && bounds.Right > bounds.Left)
+            _hitRegions.Add(new HitRegion(bounds, id, onClick));
+    }
+
+    private void DrawActionButton(
+        nint dc, nint gfx, string id, string text,
+        int x, int y, int w, int h,
+        uint bgNormal, uint bgHover, uint fg, uint border, Action onClick)
+    {
+        bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, h, SF(7),
+            GdiPlus.Argb(hovered ? bgHover : bgNormal),
+            GdiPlus.Argb(border));
+        DrawText(dc, text, x, y, x + w, y + h, 12, Win32.FW_SEMIBOLD, fg, centered: true);
+        RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + w, Bottom = y + h }, id, onClick);
+    }
+
+    private int DrawPillBadge(nint dc, nint gfx, int x, int y, string text, uint fg, uint bg)
+    {
+        int pillW = Math.Max(S(54), MeasureTextWidth(dc, text, 10, Win32.FW_SEMIBOLD) + S(20));
+        int pillH = S(22);
+        GdiPlus.FillRoundedRect(gfx, x, y, pillW, pillH, pillH / 2f, GdiPlus.Argb(bg));
+        DrawText(dc, text, x, y, x + pillW, y + pillH, 10, Win32.FW_SEMIBOLD, fg, centered: true);
+        return pillW;
+    }
+
+    private void DrawPillBadgeFixed(nint dc, nint gfx, int x, int y, int pillW, string text, uint fg, uint bg)
+    {
+        int pillH = S(22);
+        GdiPlus.FillRoundedRect(gfx, x, y, pillW, pillH, pillH / 2f, GdiPlus.Argb(bg));
+        DrawText(dc, text, x, y, x + pillW, y + pillH, 10, Win32.FW_SEMIBOLD, fg, centered: true);
+    }
+
+    private nint GetOrCreateFont(int ptSize, int weight)
+    {
+        string face = Strings.PreferredFontName;
+        var key = (ptSize, weight, face, _dpi);
+        if (_fontCache.TryGetValue(key, out nint cached) && cached != 0)
+            return cached;
+
+        if (_fontCache.Count >= 64)
+            ClearFontCache();
+
+        nint created = Win32.CreateFontW(
+            -S(ptSize), 0, 0, 0, weight, 0, 0, 0,
+            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, face);
+        if (created != 0)
+            _fontCache[key] = created;
+        return created;
+    }
+
+    private void ClearFontCache()
+    {
+        foreach (nint font in _fontCache.Values)
+        {
+            if (font != 0) Win32.DeleteObject(font);
+        }
+        _fontCache.Clear();
+    }
+
+    private int MeasureTextWidth(nint dc, string text, int ptSize, int weight)
+    {
+        if (string.IsNullOrEmpty(text)) return 0;
+        nint font = GetOrCreateFont(ptSize, weight);
+        if (font == 0)
+            return (int)MathF.Ceiling(text.Length * S(ptSize) * 0.6f);
+
+        nint old = Win32.SelectObject(dc, font);
+        try
+        {
+            var rc = new Win32.RECT { Left = 0, Top = 0, Right = 2000, Bottom = S(40) };
+            Win32.DrawTextW(dc, text, -1, &rc, Win32.DT_CALCRECT | Win32.DT_SINGLELINE | Win32.DT_NOPREFIX);
+            return Math.Max(0, rc.Right - rc.Left);
+        }
+        finally
+        {
+            Win32.SelectObject(dc, old);
+        }
+    }
+
+    private void DrawText(nint dc, string text, int left, int top, int right, int bottom, int ptSize, int weight, uint rgb, bool centered = false)
+    {
+        if (right <= left || bottom <= top) return;
+        nint font = GetOrCreateFont(ptSize, weight);
+        if (font == 0) return;
+
+        nint old = Win32.SelectObject(dc, font);
+        try
+        {
+            Win32.SetTextColor(dc, Theme.ToColorRef(rgb));
+            var rc = new Win32.RECT { Left = left, Top = top, Right = right, Bottom = bottom };
+            uint fmt = (centered ? Win32.DT_CENTER : Win32.DT_LEFT)
+                       | Win32.DT_VCENTER | Win32.DT_SINGLELINE | Win32.DT_END_ELLIPSIS | Win32.DT_NOPREFIX;
+            Win32.DrawTextW(dc, text, -1, &rc, fmt);
+        }
+        finally
+        {
+            Win32.SelectObject(dc, old);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _engine.StateChanged -= OnEngineStateChanged;
+        _stateStore.StateChanged -= OnStoreStateChanged;
+        _startupService.StatusChanged -= OnStartupStatusChanged;
+        _bridgeServer.SessionsChanged -= OnBridgeStatusChanged;
+        _guideWindow?.Dispose();
+        _guideWindow = null;
+
+        if (_hwnd != 0)
+        {
+            Win32.WTSUnRegisterSessionNotification(_hwnd);
+            Win32.DestroyWindow(_hwnd);
+            _hwnd = 0;
+        }
+        ClearFontCache();
+        if (_windowBigIcon != 0)
+        {
+            Win32.DestroyIcon(_windowBigIcon);
+            _windowBigIcon = 0;
+        }
+        if (_windowSmallIcon != 0)
+        {
+            Win32.DestroyIcon(_windowSmallIcon);
+            _windowSmallIcon = 0;
+        }
+        if (ReferenceEquals(_instance, this))
+            _instance = null;
+    }
+}

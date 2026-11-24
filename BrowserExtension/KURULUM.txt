@@ -1,0 +1,23 @@
+Cueway Tarayıcı Köprüsü Kurulumu / Companion Extension Setup
+=======================================================================
+
+Aynı tarayıcı penceresindeki normal sekmeleri (YouTube, YouTube Music, X, Twitch, Kick vb.)
+odak çalmadan bağımsız kontrol etmek için tarayıcınıza Cueway Companion eklentisini ekleyin.
+
+1) Microsoft Edge / Google Chrome / Brave / Opera (Chromium)
+------------------------------------------------------------
+  1. Tarayıcıda uzantılar sayfasını açın:
+     - Edge  : edge://extensions
+     - Chrome: chrome://extensions
+  2. "Geliştirici modu" (Developer mode) anahtarını açın.
+  3. "Paketlenmemiş öğe yükle" (Load unpacked) butonuna tıklayın ve
+     "Chromium" alt klasörünü seçin.
+     (Not: Ayarlar > "Edge / Chrome Kur" butonu klasör yolunu panoya kopyalayıp ilgili ekranı otomatik açar.)
+
+2) Zen Browser / Mozilla Firefox
+--------------------------------
+  1. Adres çubuğuna  about:debugging#/runtime/this-firefox  yazıp açın.
+  2. "Geçici Eklenti Yükle..." (Load Temporary Add-on...) butonuna tıklayın.
+  3. "Firefox" alt klasöründeki "manifest.json" dosyasını seçin.
+     (Kalıcı XPI kurulumu için tarayıcının imza politikasına bağlı olarak Developer/Unbranded sürümde
+      xpinstall.signatures.required = false kullanılabilir.)
