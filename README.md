@@ -21,7 +21,8 @@ Download the latest Windows installer (`Cueway-Setup-x64.exe`) from the [Release
 
 The companion extensions talk to the desktop app over a local loopback WebSocket (`127.0.0.1:47621`) and make no external network requests.
 
-- **Chromium:** `BrowserExtension/Chromium` (Manifest V3)
+- **Microsoft Edge:** [Cueway Companion on Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/cueway-companion/cebckhofejojabmcfeinkdclglibafmk)
+- **Chromium (Chrome, Brave, Opera):** `BrowserExtension/Chromium` (Manifest V3)
 - **Firefox:** `BrowserExtension/Firefox` (Manifest V2)
 
 ## Building from Source

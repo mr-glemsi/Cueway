@@ -7,6 +7,8 @@ namespace Cueway.Startup;
 
 internal static class ExtensionSetupService
 {
+    public const string EdgeStoreUrl = "https://microsoftedge.microsoft.com/addons/detail/cueway-companion/cebckhofejojabmcfeinkdclglibafmk";
+
     public static string GetExtensionRootDir()
     {
         return Path.Combine(AppContext.BaseDirectory, "BrowserExtension");
@@ -67,6 +69,26 @@ internal static class ExtensionSetupService
             : (false, Strings.MsgBridgeFolderMissing);
     }
 
+    public static (bool Success, string Message) LaunchEdgeStoreInstall()
+    {
+        string? edgeExe = FindEdgeBrowser();
+        if (!string.IsNullOrEmpty(edgeExe))
+        {
+            TryLaunchBrowserUrl(edgeExe, EdgeStoreUrl);
+            return (true, Strings.MsgBridgeEdgeStoreOpened);
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(EdgeStoreUrl) { UseShellExecute = true });
+            return (true, Strings.MsgBridgeEdgeStoreOpened);
+        }
+        catch
+        {
+            return (false, Strings.MsgBridgeEdgeStoreFailed);
+        }
+    }
+
     public static (bool Success, string Message) LaunchChromiumGuidedInstall()
     {
         string extDir = GetChromiumExtensionDir();
@@ -124,6 +146,23 @@ internal static class ExtensionSetupService
         return (true, Strings.MsgBridgeFirefoxOpened);
     }
 
+    private static string? FindEdgeBrowser()
+    {
+        var procs = ProcessResolver.TakeSnapshot();
+        string? runningEdge = FindRunningExe(procs, "msedge");
+        if (!string.IsNullOrEmpty(runningEdge))
+            return runningEdge;
+
+        string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        string pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+
+        return FirstExistingFile(
+            Path.Combine(pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
+            Path.Combine(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+            Path.Combine(localApp, "Microsoft", "Edge", "Application", "msedge.exe"));
+    }
+
     private static (string Name, string? ExePath, string ExtUrl) FindPreferredChromiumBrowser()
     {
         string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -131,25 +170,13 @@ internal static class ExtensionSetupService
         string pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
 
         var procs = ProcessResolver.TakeSnapshot();
-        string? runningEdge = FindRunningExe(procs, "msedge");
         string? runningChrome = FindRunningExe(procs, "chrome");
-        string? runningBrave = FindRunningExe(procs, "brave");
-
-        if (!string.IsNullOrEmpty(runningChrome) && string.IsNullOrEmpty(runningEdge))
+        if (!string.IsNullOrEmpty(runningChrome))
             return ("Google Chrome", runningChrome, "chrome://extensions");
 
-        if (!string.IsNullOrEmpty(runningBrave) && string.IsNullOrEmpty(runningEdge))
+        string? runningBrave = FindRunningExe(procs, "brave");
+        if (!string.IsNullOrEmpty(runningBrave))
             return ("Brave", runningBrave, "brave://extensions");
-
-        if (!string.IsNullOrEmpty(runningEdge))
-            return ("Microsoft Edge", runningEdge, "edge://extensions");
-
-        string? edgePath = FirstExistingFile(
-            Path.Combine(pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
-            Path.Combine(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
-            Path.Combine(localApp, "Microsoft", "Edge", "Application", "msedge.exe"));
-        if (edgePath != null)
-            return ("Microsoft Edge", edgePath, "edge://extensions");
 
         string? chromePath = FirstExistingFile(
             Path.Combine(pf, "Google", "Chrome", "Application", "chrome.exe"),
@@ -164,7 +191,11 @@ internal static class ExtensionSetupService
         if (bravePath != null)
             return ("Brave", bravePath, "brave://extensions");
 
-        return ("Edge / Chrome", null, string.Empty);
+        string? edgePath = FindEdgeBrowser();
+        if (edgePath != null)
+            return ("Microsoft Edge", edgePath, "edge://extensions");
+
+        return ("Chrome / Chromium", null, string.Empty);
     }
 
     private static string? FindPreferredGeckoBrowser()

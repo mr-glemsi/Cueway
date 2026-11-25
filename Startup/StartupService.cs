@@ -328,7 +328,7 @@ internal sealed class StartupService
         }).ConfigureAwait(false);
     }
 
-    public bool RestartAsAdministrator()
+    public bool RestartAsAdministrator(bool openSettings = true)
     {
         try
         {
@@ -339,7 +339,8 @@ internal sealed class StartupService
             var psi = new ProcessStartInfo(exe)
             {
                 UseShellExecute = true,
-                Verb = "runas"
+                Verb = "runas",
+                Arguments = openSettings ? "--show-settings" : "--show"
             };
             Process.Start(psi);
             return true;

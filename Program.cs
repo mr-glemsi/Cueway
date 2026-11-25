@@ -24,6 +24,12 @@ internal static unsafe class Program
         bool startMinimized = args.Any(a =>
             a.Equals("--minimized", StringComparison.OrdinalIgnoreCase) ||
             a.Equals("-minimized", StringComparison.OrdinalIgnoreCase));
+        bool forceShowSettings = args.Any(a =>
+            a.Equals("--show-settings", StringComparison.OrdinalIgnoreCase) ||
+            a.Equals("-show-settings", StringComparison.OrdinalIgnoreCase));
+        bool forceShow = forceShowSettings || args.Any(a =>
+            a.Equals("--show", StringComparison.OrdinalIgnoreCase) ||
+            a.Equals("-show", StringComparison.OrdinalIgnoreCase));
 
         EnsureSingleInstanceCleanly();
         using var instanceMutex = new Mutex(true, @"Local\Cueway_SingleInstance_Mutex", out _);
@@ -113,7 +119,7 @@ internal static unsafe class Program
             keyboardHook.Start();
             trayWheelHook.Start();
 
-            bool showAtStart = !startMinimized && !stateStore.GetSettingsSnapshot().StartMinimized;
+            bool showAtStart = forceShow || (!startMinimized && !stateStore.GetSettingsSnapshot().StartMinimized);
             Win32.SetTimer(
                 mainWindow.Handle,
                 TIMER_REFRESH_POLL,
@@ -124,7 +130,7 @@ internal static unsafe class Program
 
             if (showAtStart)
             {
-                mainWindow.ShowAndFocus();
+                mainWindow.ShowAndFocus(settingsTab: forceShowSettings);
             }
 
             // Win32 STA message loop

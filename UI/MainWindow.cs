@@ -21,6 +21,13 @@ internal sealed unsafe class MainWindow : IDisposable
         Settings = 1
     }
 
+    private enum DropdownKind
+    {
+        None = 0,
+        Language = 1,
+        Theme = 2
+    }
+
     private sealed record HitRegion(
         Win32.RECT Bounds,
         string Id,
@@ -59,6 +66,8 @@ internal sealed unsafe class MainWindow : IDisposable
     private bool _trackingMouse;
     private string? _hoverId;
     private TabKind _activeTab = TabKind.Dashboard;
+    private DropdownKind _openDropdown = DropdownKind.None;
+    private Win32.RECT _openDropdownAnchor;
     private string? _statusBanner;
     private bool _statusBannerIsError;
     private long _statusBannerUntilTick;
@@ -235,6 +244,7 @@ internal sealed unsafe class MainWindow : IDisposable
     public void ShowAndFocus(bool settingsTab = false)
     {
         if (_hwnd == 0) return;
+        _openDropdown = DropdownKind.None;
         if (settingsTab)
         {
             _activeTab = TabKind.Settings;
@@ -258,6 +268,7 @@ internal sealed unsafe class MainWindow : IDisposable
         if (_hwnd == 0) return;
         if (Win32.IsWindowVisible(_hwnd) && !Win32.IsIconic(_hwnd))
         {
+            _openDropdown = DropdownKind.None;
             Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
             VisibilityChanged?.Invoke(false);
         }
@@ -506,7 +517,17 @@ internal sealed unsafe class MainWindow : IDisposable
                 inst.HandleMouseWheel(delta);
                 return 0;
 
+            case 0x0100: // WM_KEYDOWN
+                if (wParam == 0x1B && inst._openDropdown != DropdownKind.None) // VK_ESCAPE
+                {
+                    inst._openDropdown = DropdownKind.None;
+                    inst.RequestRepaint();
+                    return 0;
+                }
+                break;
+
             case Win32.WM_CLOSE:
+                inst._openDropdown = DropdownKind.None;
                 if (inst._settings.MinimizeToTrayOnClose)
                 {
                     Win32.ShowWindow(hwnd, Win32.SW_HIDE);
@@ -559,7 +580,7 @@ internal sealed unsafe class MainWindow : IDisposable
             return;
         }
 
-        var slider = FindSliderHit(x, y);
+        var slider = _openDropdown == DropdownKind.None ? FindSliderHit(x, y) : null;
         if (slider != null)
         {
             Win32.SetCursor(Win32.LoadCursorW(0, Win32.IDC_HAND));
@@ -587,7 +608,7 @@ internal sealed unsafe class MainWindow : IDisposable
     {
         int x = unchecked((short)(lParam & 0xFFFF));
         int y = unchecked((short)((lParam >> 16) & 0xFFFF));
-        var slider = FindSliderHit(x, y);
+        var slider = _openDropdown == DropdownKind.None ? FindSliderHit(x, y) : null;
         if (slider == null)
             return false;
 
@@ -632,6 +653,12 @@ internal sealed unsafe class MainWindow : IDisposable
 
     private void HandleMouseWheel(short delta)
     {
+        if (_openDropdown != DropdownKind.None)
+        {
+            _openDropdown = DropdownKind.None;
+            RequestRepaint();
+            return;
+        }
         int step = Theme.Scale(44, _dpi);
         _scrollY -= (delta / 120) * step;
         ClampScroll();
@@ -710,6 +737,8 @@ internal sealed unsafe class MainWindow : IDisposable
                     DrawScrollableBody(memDc, gfx, w, h, headerH);
                     _bodyClipTop = 0;
                     DrawHeader(memDc, gfx, w, headerH);
+                    if (_activeTab == TabKind.Settings && _openDropdown != DropdownKind.None)
+                        DrawOpenDropdownOverlay(memDc, gfx, w, h, headerH);
                 }
                 finally
                 {
@@ -779,12 +808,14 @@ internal sealed unsafe class MainWindow : IDisposable
         DrawTabButton(dc, gfx, "tab_dash", Strings.TabDashboard, tabGroupX + S(3), tabY + S(3), halfW, tabH - S(6),
             _activeTab == TabKind.Dashboard, () =>
             {
+                _openDropdown = DropdownKind.None;
                 _activeTab = TabKind.Dashboard;
                 _scrollY = 0;
             });
         DrawTabButton(dc, gfx, "tab_set", Strings.TabSettings, tabGroupX + S(3) + halfW, tabY + S(3), halfW, tabH - S(6),
             _activeTab == TabKind.Settings, () =>
             {
+                _openDropdown = DropdownKind.None;
                 _activeTab = TabKind.Settings;
                 _scrollY = 0;
             });
@@ -1406,18 +1437,14 @@ internal sealed unsafe class MainWindow : IDisposable
             y += bannerH + S(14);
         }
 
-        // 0. LANGUAGE SELECTOR
-        DrawText(dc, Strings.SecLanguage, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
-        y += S(24);
-
-        y = DrawLanguageSelectorCard(dc, gfx, x, y, w, headerH);
-        y += S(22);
-
-        // 0.5 APPEARANCE & THEME SELECTOR
+        // 0. APPEARANCE & LANGUAGE
         DrawText(dc, Strings.SecAppearance, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
         y += S(24);
 
-        y = DrawThemeSelectorCard(dc, gfx, x, y, w, headerH);
+        y = DrawLanguageDropdownRow(dc, gfx, x, y, w, headerH);
+        y += S(8);
+
+        y = DrawThemeDropdownRow(dc, gfx, x, y, w, headerH);
         y += S(22);
 
         // 1. SYSTEM & STARTUP
@@ -1589,123 +1616,275 @@ internal sealed unsafe class MainWindow : IDisposable
         return y + infoH;
     }
 
-    private int DrawLanguageSelectorCard(nint dc, nint gfx, int x, int y, int w, int headerH)
+    private int DrawLanguageDropdownRow(nint dc, nint gfx, int x, int y, int w, int headerH)
     {
-        var langs = Strings.Languages;
-        const int cols = 3;
-        int rows = (langs.Length + cols - 1) / cols;
-        int pad = S(16);
-        int gap = S(8);
-        int rowGap = S(8);
-        int pillH = S(32);
-        int startY = y + S(58);
-        int rowH = S(58) + rows * pillH + Math.Max(0, rows - 1) * rowGap + S(14);
-
+        int rowH = S(62);
         GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
             GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
 
-        DrawText(dc, Strings.LanguageTitle, x + pad, y + S(10), x + w - pad, y + S(32), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
-        DrawText(dc, Strings.LanguageSub, x + pad, y + S(31), x + w - pad, y + S(50), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+        int pad = S(16);
+        int comboW = S(210);
+        int comboH = S(34);
+        int comboX = x + w - pad - comboW;
+        int comboY = y + (rowH - comboH) / 2;
 
-        int totalInnerW = w - pad * 2;
-        int pillW = (totalInnerW - gap * (cols - 1)) / cols;
+        int textRight = comboX - S(16);
+        DrawText(dc, Strings.LanguageTitle, x + pad, y + S(10), textRight, y + S(31), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        DrawText(dc, Strings.LanguageSub, x + pad, y + S(32), textRight, y + S(52), 11, Win32.FW_NORMAL, Theme.TextSecondary);
 
-        for (int i = 0; i < langs.Length; i++)
+        var active = Strings.Languages[0];
+        foreach (var lang in Strings.Languages)
         {
-            var lang = langs[i];
-            int col = i % cols;
-            int row = i / cols;
-            int px = x + pad + col * (pillW + gap);
-            int py = startY + row * (pillH + rowGap);
-            bool selected = Strings.Current == lang.Language;
-            string id = $"set_lang_{lang.Code}";
-            bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
-
-            uint bg = selected ? Theme.Accent : (hovered ? Theme.BgControlHover : Theme.BgControl);
-            uint fg = selected ? Theme.OnAccent : Theme.TextPrimary;
-            uint border = selected ? Theme.Accent : Theme.BorderStrong;
-
-            GdiPlus.FillAndStrokeRoundedRect(gfx, px, py, pillW, pillH, SF(7),
-                GdiPlus.Argb(bg), GdiPlus.Argb(border));
-            DrawText(dc, lang.NativeName, px, py, px + pillW, py + pillH, 12,
-                selected ? Win32.FW_SEMIBOLD : Win32.FW_MEDIUM, fg, centered: true);
-
-            if (y + rowH > headerH)
+            if (Strings.Current == lang.Language)
             {
-                string code = lang.Code;
-                RegisterScrollableHit(
-                    new Win32.RECT { Left = px, Top = py, Right = px + pillW, Bottom = py + pillH },
-                    id,
-                    () => _stateStore.UpdateSettings(s => s.Language = code));
+                active = lang;
+                break;
             }
+        }
+
+        const string triggerId = "dd_trigger_lang";
+        bool isOpen = _openDropdown == DropdownKind.Language;
+        bool hovered = string.Equals(_hoverId, triggerId, StringComparison.Ordinal);
+
+        uint bg = isOpen || hovered ? Theme.BgControlHover : Theme.BgControl;
+        uint border = isOpen ? Theme.Accent : Theme.BorderStrong;
+        GdiPlus.FillAndStrokeRoundedRect(gfx, comboX, comboY, comboW, comboH, SF(7),
+            GdiPlus.Argb(bg), GdiPlus.Argb(border));
+
+        DrawText(dc, active.NativeName, comboX + S(12), comboY, comboX + comboW - S(28), comboY + comboH,
+            12, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        DrawDropdownChevron(gfx, comboX + comboW - S(16), comboY + comboH / 2, isOpen,
+            isOpen ? Theme.Accent : Theme.TextSecondary);
+
+        if (isOpen)
+        {
+            _openDropdownAnchor = new Win32.RECT { Left = comboX, Top = comboY, Right = comboX + comboW, Bottom = comboY + comboH };
+        }
+
+        if (y + rowH > headerH)
+        {
+            RegisterScrollableHit(
+                new Win32.RECT { Left = comboX, Top = comboY, Right = comboX + comboW, Bottom = comboY + comboH },
+                triggerId,
+                () => _openDropdown = _openDropdown == DropdownKind.Language ? DropdownKind.None : DropdownKind.Language);
         }
 
         return y + rowH;
     }
 
-    private int DrawThemeSelectorCard(nint dc, nint gfx, int x, int y, int w, int headerH)
+    private int DrawThemeDropdownRow(nint dc, nint gfx, int x, int y, int w, int headerH)
     {
-        int rowH = S(152);
+        int rowH = S(62);
         GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
             GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
 
         int pad = S(16);
-        DrawText(dc, Strings.ThemeTitle, x + pad, y + S(10), x + w - pad, y + S(32), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
-        DrawText(dc, Strings.ThemeSub, x + pad, y + S(31), x + w - pad, y + S(50), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+        int comboW = S(210);
+        int comboH = S(34);
+        int comboX = x + w - pad - comboW;
+        int comboY = y + (rowH - comboH) / 2;
 
-        var presets = Theme.Presets;
-        const int cols = 4;
-        int gap = S(8);
-        int rowGap = S(8);
-        int totalInnerW = w - pad * 2;
-        int pillW = (totalInnerW - gap * (cols - 1)) / cols;
-        int pillH = S(36);
-        int startY = y + S(58);
+        int textRight = comboX - S(16);
+        DrawText(dc, Strings.ThemeTitle, x + pad, y + S(10), textRight, y + S(31), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        DrawText(dc, Strings.ThemeSub, x + pad, y + S(32), textRight, y + S(52), 11, Win32.FW_NORMAL, Theme.TextSecondary);
 
-        for (int i = 0; i < presets.Length; i++)
+        var active = Theme.Presets[0];
+        foreach (var preset in Theme.Presets)
         {
-            var preset = presets[i];
-            int col = i % cols;
-            int row = i / cols;
-            int px = x + pad + col * (pillW + gap);
-            int py = startY + row * (pillH + rowGap);
-
-            bool selected = string.Equals(Theme.CurrentId, preset.Id, StringComparison.OrdinalIgnoreCase);
-            string id = $"set_theme_{preset.Id}";
-            bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
-
-            uint bg = selected ? Theme.Accent : (hovered ? Theme.BgControlHover : Theme.BgControl);
-            uint fg = selected ? Theme.OnAccent : Theme.TextPrimary;
-            uint border = selected ? Theme.Accent : Theme.BorderStrong;
-
-            GdiPlus.FillAndStrokeRoundedRect(gfx, px, py, pillW, pillH, SF(7),
-                GdiPlus.Argb(bg), GdiPlus.Argb(border));
-
-            // 2-tone circular preview swatch (background + accent dot)
-            int swSz = S(18);
-            int swX = px + S(12);
-            int swY = py + (pillH - swSz) / 2;
-            FillCircleArgb(gfx, GdiPlus.Argb(preset.SwatchBg), swX, swY, swSz);
-            StrokeCircleArgb(gfx, GdiPlus.Argb(selected ? Theme.OnAccent : Theme.BorderStrong), MathF.Max(1.2f, SF(1.2f)), swX, swY, swSz);
-
-            int dotSz = S(8);
-            FillCircleArgb(gfx, GdiPlus.Argb(preset.SwatchAccent),
-                swX + (swSz - dotSz) / 2f, swY + (swSz - dotSz) / 2f, dotSz);
-
-            DrawText(dc, Strings.ThemeName(preset.Id), swX + swSz + S(8), py, px + pillW - S(8), py + pillH,
-                12, selected ? Win32.FW_SEMIBOLD : Win32.FW_MEDIUM, fg);
-
-            if (y + rowH > headerH)
+            if (string.Equals(Theme.CurrentId, preset.Id, StringComparison.OrdinalIgnoreCase))
             {
-                string themeId = preset.Id;
-                RegisterScrollableHit(
-                    new Win32.RECT { Left = px, Top = py, Right = px + pillW, Bottom = py + pillH },
-                    id,
-                    () => _stateStore.UpdateSettings(s => s.Theme = themeId));
+                active = preset;
+                break;
             }
         }
 
+        const string triggerId = "dd_trigger_theme";
+        bool isOpen = _openDropdown == DropdownKind.Theme;
+        bool hovered = string.Equals(_hoverId, triggerId, StringComparison.Ordinal);
+
+        uint bg = isOpen || hovered ? Theme.BgControlHover : Theme.BgControl;
+        uint border = isOpen ? Theme.Accent : Theme.BorderStrong;
+        GdiPlus.FillAndStrokeRoundedRect(gfx, comboX, comboY, comboW, comboH, SF(7),
+            GdiPlus.Argb(bg), GdiPlus.Argb(border));
+
+        int swSz = S(16);
+        int swX = comboX + S(12);
+        int swY = comboY + (comboH - swSz) / 2;
+        FillCircleArgb(gfx, GdiPlus.Argb(active.SwatchBg), swX, swY, swSz);
+        StrokeCircleArgb(gfx, GdiPlus.Argb(Theme.BorderStrong), MathF.Max(1.2f, SF(1.2f)), swX, swY, swSz);
+        int dotSz = S(7);
+        FillCircleArgb(gfx, GdiPlus.Argb(active.SwatchAccent),
+            swX + (swSz - dotSz) / 2f, swY + (swSz - dotSz) / 2f, dotSz);
+
+        DrawText(dc, Strings.ThemeName(active.Id), swX + swSz + S(8), comboY, comboX + comboW - S(28), comboY + comboH,
+            12, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        DrawDropdownChevron(gfx, comboX + comboW - S(16), comboY + comboH / 2, isOpen,
+            isOpen ? Theme.Accent : Theme.TextSecondary);
+
+        if (isOpen)
+        {
+            _openDropdownAnchor = new Win32.RECT { Left = comboX, Top = comboY, Right = comboX + comboW, Bottom = comboY + comboH };
+        }
+
+        if (y + rowH > headerH)
+        {
+            RegisterScrollableHit(
+                new Win32.RECT { Left = comboX, Top = comboY, Right = comboX + comboW, Bottom = comboY + comboH },
+                triggerId,
+                () => _openDropdown = _openDropdown == DropdownKind.Theme ? DropdownKind.None : DropdownKind.Theme);
+        }
+
         return y + rowH;
+    }
+
+    private void DrawDropdownChevron(nint gfx, int cx, int cy, bool pointingUp, uint color)
+    {
+        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(color), MathF.Max(1.5f, SF(1.5f)), GdiPlus.UnitPixel, out nint pen) != 0 || pen == 0)
+            return;
+
+        try
+        {
+            GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
+            GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
+            float d = SF(4.2f);
+            float dy = pointingUp ? -d * 0.55f : d * 0.55f;
+            float baseY = pointingUp ? d * 0.45f : -d * 0.45f;
+            GdiPlus.GdipDrawLine(gfx, pen, cx - d, cy + baseY, cx, cy + dy);
+            GdiPlus.GdipDrawLine(gfx, pen, cx, cy + dy, cx + d, cy + baseY);
+        }
+        finally
+        {
+            GdiPlus.GdipDeletePen(pen);
+        }
+    }
+
+    private void DrawOpenDropdownOverlay(nint dc, nint gfx, int w, int h, int headerH)
+    {
+        if (_openDropdownAnchor.Bottom <= headerH)
+        {
+            _openDropdown = DropdownKind.None;
+            return;
+        }
+
+        // Click anywhere outside closes the open dropdown
+        _hitRegions.Add(new HitRegion(
+            new Win32.RECT { Left = 0, Top = 0, Right = w, Bottom = h },
+            "dropdown_backdrop",
+            () => _openDropdown = DropdownKind.None,
+            IsButton: false));
+
+        int menuW = Math.Max(S(216), _openDropdownAnchor.Right - _openDropdownAnchor.Left);
+        int menuX = Math.Clamp(_openDropdownAnchor.Right - menuW, S(12), Math.Max(S(12), w - menuW - S(12)));
+        int itemH = S(32);
+        int padV = S(6);
+        int itemCount = _openDropdown == DropdownKind.Language ? Strings.Languages.Length : Theme.Presets.Length;
+        int menuH = itemCount * itemH + padV * 2;
+
+        int menuY = _openDropdownAnchor.Bottom + S(6);
+        if (menuY + menuH > h - S(12))
+            menuY = _openDropdownAnchor.Top - S(6) - menuH;
+        menuY = Math.Clamp(menuY, headerH + S(6), Math.Max(headerH + S(6), h - S(12) - menuH));
+
+        // 2-layer subtle elevation shadow
+        GdiPlus.FillRoundedRect(gfx, menuX - S(2), menuY + S(4), menuW + S(4), menuH + S(6), SF(12), GdiPlus.Argb(0x000000, 48));
+        GdiPlus.FillRoundedRect(gfx, menuX, menuY + S(2), menuW, menuH + S(2), SF(10), GdiPlus.Argb(0x000000, 22));
+
+        GdiPlus.FillAndStrokeRoundedRect(gfx, menuX, menuY, menuW, menuH, SF(10),
+            GdiPlus.Argb(Theme.BgCardElevated), GdiPlus.Argb(Theme.BorderStrong));
+
+        _hitRegions.Add(new HitRegion(
+            new Win32.RECT { Left = menuX, Top = menuY, Right = menuX + menuW, Bottom = menuY + menuH },
+            "dropdown_panel",
+            () => { },
+            IsButton: false));
+
+        int itemPadX = S(6);
+        int ix = menuX + itemPadX;
+        int iw = menuW - itemPadX * 2;
+
+        if (_openDropdown == DropdownKind.Language)
+        {
+            var langs = Strings.Languages;
+            for (int i = 0; i < langs.Length; i++)
+            {
+                var lang = langs[i];
+                int iy = menuY + padV + i * itemH;
+                bool selected = Strings.Current == lang.Language;
+                string itemId = $"dd_item_lang_{lang.Code}";
+                bool hovered = string.Equals(_hoverId, itemId, StringComparison.Ordinal);
+
+                if (selected || hovered)
+                {
+                    uint bg = selected ? Theme.AccentSoft : Theme.BgControlHover;
+                    GdiPlus.FillRoundedRect(gfx, ix, iy + S(1), iw, itemH - S(2), SF(7), GdiPlus.Argb(bg));
+                }
+
+                DrawText(dc, lang.NativeName, ix + S(10), iy, ix + iw - S(22), iy + itemH,
+                    12, selected ? Win32.FW_SEMIBOLD : Win32.FW_MEDIUM, selected ? Theme.Accent : Theme.TextPrimary);
+
+                if (selected)
+                {
+                    int dotSz = S(6);
+                    FillCircleArgb(gfx, GdiPlus.Argb(Theme.Accent), ix + iw - S(14), iy + (itemH - dotSz) / 2f, dotSz);
+                }
+
+                string code = lang.Code;
+                _hitRegions.Add(new HitRegion(
+                    new Win32.RECT { Left = ix, Top = iy, Right = ix + iw, Bottom = iy + itemH },
+                    itemId,
+                    () =>
+                    {
+                        _openDropdown = DropdownKind.None;
+                        _stateStore.UpdateSettings(s => s.Language = code);
+                    }));
+            }
+        }
+        else
+        {
+            var presets = Theme.Presets;
+            for (int i = 0; i < presets.Length; i++)
+            {
+                var preset = presets[i];
+                int iy = menuY + padV + i * itemH;
+                bool selected = string.Equals(Theme.CurrentId, preset.Id, StringComparison.OrdinalIgnoreCase);
+                string itemId = $"dd_item_theme_{preset.Id}";
+                bool hovered = string.Equals(_hoverId, itemId, StringComparison.Ordinal);
+
+                if (selected || hovered)
+                {
+                    uint bg = selected ? Theme.AccentSoft : Theme.BgControlHover;
+                    GdiPlus.FillRoundedRect(gfx, ix, iy + S(1), iw, itemH - S(2), SF(7), GdiPlus.Argb(bg));
+                }
+
+                int swSz = S(16);
+                int swX = ix + S(10);
+                int swY = iy + (itemH - swSz) / 2;
+                FillCircleArgb(gfx, GdiPlus.Argb(preset.SwatchBg), swX, swY, swSz);
+                StrokeCircleArgb(gfx, GdiPlus.Argb(selected ? Theme.Accent : Theme.BorderStrong), MathF.Max(1.2f, SF(1.2f)), swX, swY, swSz);
+                int dotSz = S(7);
+                FillCircleArgb(gfx, GdiPlus.Argb(preset.SwatchAccent),
+                    swX + (swSz - dotSz) / 2f, swY + (swSz - dotSz) / 2f, dotSz);
+
+                DrawText(dc, Strings.ThemeName(preset.Id), swX + swSz + S(8), iy, ix + iw - S(22), iy + itemH,
+                    12, selected ? Win32.FW_SEMIBOLD : Win32.FW_MEDIUM, selected ? Theme.Accent : Theme.TextPrimary);
+
+                if (selected)
+                {
+                    int checkDot = S(6);
+                    FillCircleArgb(gfx, GdiPlus.Argb(Theme.Accent), ix + iw - S(14), iy + (itemH - checkDot) / 2f, checkDot);
+                }
+
+                string themeId = preset.Id;
+                _hitRegions.Add(new HitRegion(
+                    new Win32.RECT { Left = ix, Top = iy, Right = ix + iw, Bottom = iy + itemH },
+                    itemId,
+                    () =>
+                    {
+                        _openDropdown = DropdownKind.None;
+                        _stateStore.UpdateSettings(s => s.Theme = themeId);
+                    }));
+            }
+        }
     }
 
     private static void FillCircleArgb(nint gfx, uint argb, float x, float y, float d)
@@ -1847,19 +2026,30 @@ internal sealed unsafe class MainWindow : IDisposable
 
         DrawText(dc, Strings.BridgeCardSub, x + pad, y + S(36), x + w - pad, y + S(56), 11, Win32.FW_NORMAL, Theme.TextSecondary);
 
-        int gap = S(10);
+        int gap = S(8);
         int btnY = y + S(60);
         int btnH = S(32);
-        int folderW = S(116);
-        int remW = w - pad * 2 - folderW - gap * 2;
-        int mainBtnW = Math.Max(S(130), remW / 2);
+        int folderW = S(104);
+        int remW = w - pad * 2 - folderW - gap * 3;
+        int mainBtnW = Math.Max(S(110), remW / 3);
+        int folderX = x + pad + (mainBtnW + gap) * 3;
+        int actualFolderW = Math.Max(folderW, (x + w - pad) - folderX);
 
         if (y + rowH > headerH)
         {
-            bool chromiumHovered = string.Equals(_hoverId, "btn_ext_chromium", StringComparison.Ordinal);
-            DrawActionButton(dc, gfx, "btn_ext_chromium", Strings.BtnInstallChromium,
+            bool edgeHovered = string.Equals(_hoverId, "btn_ext_edge", StringComparison.Ordinal);
+            DrawActionButton(dc, gfx, "btn_ext_edge", Strings.BtnInstallEdge,
                 x + pad, btnY, mainBtnW, btnH,
-                Theme.AccentSoft, Theme.Accent, chromiumHovered ? Theme.OnAccent : Theme.TextPrimary, Theme.Accent,
+                Theme.AccentSoft, Theme.Accent, edgeHovered ? Theme.OnAccent : Theme.TextPrimary, Theme.Accent,
+                () =>
+                {
+                    var (ok, msg) = ExtensionSetupService.LaunchEdgeStoreInstall();
+                    ShowStatusBanner(msg, isError: !ok);
+                });
+
+            DrawActionButton(dc, gfx, "btn_ext_chromium", Strings.BtnInstallChromium,
+                x + pad + mainBtnW + gap, btnY, mainBtnW, btnH,
+                Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong,
                 () =>
                 {
                     _guideWindow ??= new ExtensionGuideWindow(_hwnd, _bridgeServer);
@@ -1867,7 +2057,7 @@ internal sealed unsafe class MainWindow : IDisposable
                 });
 
             DrawActionButton(dc, gfx, "btn_ext_firefox", Strings.BtnInstallFirefox,
-                x + pad + mainBtnW + gap, btnY, mainBtnW, btnH,
+                x + pad + (mainBtnW + gap) * 2, btnY, mainBtnW, btnH,
                 Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong,
                 () =>
                 {
@@ -1876,7 +2066,7 @@ internal sealed unsafe class MainWindow : IDisposable
                 });
 
             DrawActionButton(dc, gfx, "btn_ext_folder", Strings.BtnOpenExtFolder,
-                x + pad + mainBtnW * 2 + gap * 2, btnY, folderW, btnH,
+                folderX, btnY, actualFolderW, btnH,
                 Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong,
                 () =>
                 {

@@ -218,8 +218,8 @@ internal static class Strings
         "画面、システムトレイ、通知の言語を即座に切り替えます",
         "인터페이스, 시스템 트레이 및 알림 언어를 즉시 전환합니다");
 
-    // Appearance & Themes
-    public static string SecAppearance => T("GÖRÜNÜM VE TEMA", "APPEARANCE & THEME", "外观与主题", "APARIENCIA Y TEMA", "ОФОРМЛЕНИЕ И ТЕМА", "ERSCHEINUNGSBILD & DESIGN", "APPARENCE ET THÈME", "外観とテーマ", "모양 및 테마");
+    // Appearance & Language
+    public static string SecAppearance => T("GÖRÜNÜM VE DİL", "APPEARANCE & LANGUAGE", "外观与语言", "APARIENCIA E IDIOMA", "ОФОРМЛЕНИЕ И ЯЗЫК", "ERSCHEINUNGSBILD & SPRACHE", "APPARENCE ET LANGUE", "外観と言語", "모양 및 언어");
     public static string ThemeTitle => T("Renk Teması", "Color Theme", "色彩主题", "Tema de color", "Цветовая тема", "Farbthema", "Thème de couleur", "カラーテーマ", "색상 테마");
     public static string ThemeSub => T(
         "Uygulama arayüzü, başlık çubuğu ve ekran bildirimleri için tercih ettiğiniz renk paletini seçin",
@@ -559,9 +559,30 @@ internal static class Strings
         _ => $"Bağlı ({browsers} tarayıcı • {tabs} sekme)"
     };
     public static string BadgeBridgeDisconnected => T("Bağlı Değil", "Not Connected", "未连接", "Desconectado", "Не подключено", "Nicht verbunden", "Non connecté", "未接続", "연결 안 됨");
-    public static string BtnInstallChromium => T("Edge / Chrome Kur", "Install Edge / Chrome", "安装 Edge / Chrome", "Instalar Edge / Chrome", "Уст. Edge / Chrome", "Edge / Chrome", "Installer Edge / Chrome", "Edge / Chrome 導入", "Edge / Chrome 설치");
-    public static string BtnInstallFirefox => T("Firefox / Zen Kur", "Install Firefox / Zen", "安装 Firefox / Zen", "Instalar Firefox / Zen", "Уст. Firefox / Zen", "Firefox / Zen", "Installer Firefox / Zen", "Firefox / Zen 導入", "Firefox / Zen 설치");
+    public static string BtnInstallEdge => T("Edge (Mağaza)", "Edge Add-ons", "Edge 商店", "Edge Add-ons", "Edge Add-ons", "Edge Add-ons", "Edge Add-ons", "Edge アドオン", "Edge 추가 기능");
+    public static string BtnInstallChromium => T("Chrome Kur", "Install Chrome", "安装 Chrome", "Instalar Chrome", "Уст. Chrome", "Chrome", "Installer Chrome", "Chrome 導入", "Chrome 설치");
+    public static string BtnInstallFirefox => T("Firefox Kur", "Install Firefox", "安装 Firefox", "Instalar Firefox", "Уст. Firefox", "Firefox", "Installer Firefox", "Firefox 導入", "Firefox 설치");
     public static string BtnOpenExtFolder => T("Klasörü Aç", "Open Folder", "打开目录", "Abrir carpeta", "Папка", "Ordner öffnen", "Ouvrir dossier", "フォルダを開く", "폴더 열기");
+    public static string MsgBridgeEdgeStoreOpened => T(
+        "Microsoft Edge Add-ons sayfası açıldı — \"Al\" butonuna tıklayıp eklentiyi kurun.",
+        "Microsoft Edge Add-ons page opened — click \"Get\" to install the extension.",
+        "已打开 Microsoft Edge 加载项页面 — 点击“获取”即可安装扩展。",
+        "Se abrió Microsoft Edge Add-ons — haz clic en \"Obtener\" para instalar.",
+        "Открыта страница Microsoft Edge Add-ons — нажмите «Получить» для установки.",
+        "Microsoft Edge Add-ons geöffnet — klicken Sie auf „Abrufen“ zum Installieren.",
+        "Page Microsoft Edge Add-ons ouverte — cliquez sur « Obtenir » pour installer.",
+        "Microsoft Edge アドオンページを開きました —「入手」をクリックしてインストールしてください。",
+        "Microsoft Edge 추가 기능 페이지가 열렸습니다 — '받기'를 클릭해 설치하세요.");
+    public static string MsgBridgeEdgeStoreFailed => T(
+        "Edge mağaza sayfası açılamadı.",
+        "Failed to open the Edge Add-ons page.",
+        "无法打开 Edge 商店页面。",
+        "No se pudo abrir la página de Edge Add-ons.",
+        "Не удалось открыть страницу Edge Add-ons.",
+        "Edge Add-ons-Seite konnte nicht geöffnet werden.",
+        "Impossible d'ouvrir la page Edge Add-ons.",
+        "Edge アドオンページを開けませんでした。",
+        "Edge 추가 기능 페이지를 열지 못했습니다.");
     public static string MsgBridgeChromiumOpened(string browserName) => Current switch
     {
         AppLanguage.En => $"Extension path copied to clipboard & {browserName} opened: enable Developer mode → Load unpacked → Ctrl+V.",
@@ -597,27 +618,27 @@ internal static class Strings
 
     // Animated Extension Tutorial Dialog
     public static string GuideTitleChromium => T(
-        "Edge / Chrome Eklenti Kurulum Rehberi",
-        "Edge / Chrome Extension Setup Guide",
-        "Edge / Chrome 扩展安装指南",
-        "Guía de extensión para Edge / Chrome",
-        "Установка расширения для Edge / Chrome",
-        "Edge / Chrome-Erweiterung einrichten",
-        "Guide d'installation Edge / Chrome",
-        "Edge / Chrome 拡張機能セットアップガイド",
-        "Edge / Chrome 확장 프로그램 설치 가이드");
+        "Chrome / Chromium Eklenti Kurulum Rehberi",
+        "Chrome / Chromium Extension Setup Guide",
+        "Chrome / Chromium 扩展安装指南",
+        "Guía de extensión para Chrome / Chromium",
+        "Установка расширения для Chrome / Chromium",
+        "Chrome / Chromium-Erweiterung einrichten",
+        "Guide d'installation Chrome / Chromium",
+        "Chrome / Chromium 拡張機能セットアップガイド",
+        "Chrome / Chromium 확장 프로그램 설치 가이드");
     public static string GuideTitleFirefox => T(
-        "Firefox / Zen Eklenti Kurulum Rehberi",
-        "Firefox / Zen Extension Setup Guide",
-        "Firefox / Zen 扩展安装指南",
-        "Guía de extensión para Firefox / Zen",
-        "Установка расширения для Firefox / Zen",
-        "Firefox / Zen-Erweiterung einrichten",
-        "Guide d'installation Firefox / Zen",
-        "Firefox / Zen 拡張機能セットアップガイド",
-        "Firefox / Zen 확장 프로그램 설치 가이드");
+        "Firefox Eklenti Kurulum Rehberi",
+        "Firefox Extension Setup Guide",
+        "Firefox 扩展安装指南",
+        "Guía de extensión para Firefox",
+        "Установка расширения для Firefox",
+        "Firefox-Erweiterung einrichten",
+        "Guide d'installation Firefox",
+        "Firefox 拡張機能セットアップガイド",
+        "Firefox 확장 프로그램 설치 가이드");
     public static string GuideBadgeChromium => T("Video Rehber • Chromium", "Video Guide • Chromium", "视频指南 • Chromium", "Guía visual • Chromium", "Видеогид • Chromium", "Video-Anleitung • Chromium", "Guide animé • Chromium", "動画ガイド • Chromium", "영상 가이드 • Chromium");
-    public static string GuideBadgeFirefox => T("Video Rehber • Firefox / Zen", "Video Guide • Firefox / Zen", "视频指南 • Firefox / Zen", "Guía visual • Firefox / Zen", "Видеогид • Firefox / Zen", "Video-Anleitung • Firefox / Zen", "Guide animé • Firefox / Zen", "動画ガイド • Firefox / Zen", "영상 가이드 • Firefox / Zen");
+    public static string GuideBadgeFirefox => T("Video Rehber • Firefox", "Video Guide • Firefox", "视频指南 • Firefox", "Guía visual • Firefox", "Видеогид • Firefox", "Video-Anleitung • Firefox", "Guide animé • Firefox", "動画ガイド • Firefox", "영상 가이드 • Firefox");
     public static string GuideConnectedNow => T(
         "Harika! Eklenti bağlandı — pencereyi kapatabilirsiniz",
         "Connected! Extension is live — you can close this guide",
