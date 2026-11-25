@@ -5,9 +5,134 @@ using Cueway.Media;
 
 namespace Cueway.Startup;
 
+internal enum DetectedBrowserKind
+{
+    None = 0,
+    Edge = 1,
+    Chromium = 2,
+    Firefox = 3
+}
+
 internal static class ExtensionSetupService
 {
     public const string EdgeStoreUrl = "https://microsoftedge.microsoft.com/addons/detail/cueway-companion/cebckhofejojabmcfeinkdclglibafmk";
+
+    private static DetectedBrowserKind _cachedPrimaryBrowser;
+    private static long _cachedPrimaryBrowserTick;
+
+    public static DetectedBrowserKind GetPrimaryInstalledBrowserKind()
+    {
+        long now = Environment.TickCount64;
+        if (_cachedPrimaryBrowserTick != 0 && now - _cachedPrimaryBrowserTick < 30_000)
+            return _cachedPrimaryBrowser;
+
+        DetectedBrowserKind detected = DetectPrimaryInstalledBrowserKind();
+        _cachedPrimaryBrowser = detected;
+        _cachedPrimaryBrowserTick = now == 0 ? 1 : now;
+        return detected;
+    }
+
+    private static DetectedBrowserKind DetectPrimaryInstalledBrowserKind()
+    {
+        string? progId = TryReadDefaultHttpBrowserProgId();
+        if (!string.IsNullOrEmpty(progId))
+        {
+            if (progId.Contains("MSEdge", StringComparison.OrdinalIgnoreCase))
+                return DetectedBrowserKind.Edge;
+
+            if (progId.Contains("Firefox", StringComparison.OrdinalIgnoreCase) ||
+                progId.Contains("Zen", StringComparison.OrdinalIgnoreCase) ||
+                progId.Contains("Floorp", StringComparison.OrdinalIgnoreCase) ||
+                progId.Contains("LibreWolf", StringComparison.OrdinalIgnoreCase) ||
+                progId.Contains("Waterfox", StringComparison.OrdinalIgnoreCase))
+            {
+                return DetectedBrowserKind.Firefox;
+            }
+
+            if (progId.Contains("Chrome", StringComparison.OrdinalIgnoreCase) ||
+                progId.Contains("Brave", StringComparison.OrdinalIgnoreCase) ||
+                progId.Contains("Opera", StringComparison.OrdinalIgnoreCase) ||
+                progId.Contains("Vivaldi", StringComparison.OrdinalIgnoreCase) ||
+                progId.Contains("Chromium", StringComparison.OrdinalIgnoreCase) ||
+                progId.Contains("Arc", StringComparison.OrdinalIgnoreCase) ||
+                progId.Contains("Yandex", StringComparison.OrdinalIgnoreCase))
+            {
+                return DetectedBrowserKind.Chromium;
+            }
+        }
+
+        string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        string pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+
+        if (FirstExistingFile(
+                Path.Combine(pf, "Zen Browser", "zen.exe"),
+                Path.Combine(localApp, "Zen Browser", "zen.exe"),
+                Path.Combine(pf, "Mozilla Firefox", "firefox.exe"),
+                Path.Combine(pf86, "Mozilla Firefox", "firefox.exe"),
+                Path.Combine(localApp, "Mozilla Firefox", "firefox.exe")) != null)
+        {
+            return DetectedBrowserKind.Firefox;
+        }
+
+        if (FirstExistingFile(
+                Path.Combine(pf, "Google", "Chrome", "Application", "chrome.exe"),
+                Path.Combine(pf86, "Google", "Chrome", "Application", "chrome.exe"),
+                Path.Combine(localApp, "Google", "Chrome", "Application", "chrome.exe"),
+                Path.Combine(pf, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+                Path.Combine(localApp, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+                Path.Combine(localApp, "Programs", "Opera", "opera.exe"),
+                Path.Combine(localApp, "Programs", "Opera GX", "opera.exe"),
+                Path.Combine(localApp, "Vivaldi", "Application", "vivaldi.exe")) != null)
+        {
+            return DetectedBrowserKind.Chromium;
+        }
+
+        if (FirstExistingFile(
+                Path.Combine(pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
+                Path.Combine(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+                Path.Combine(localApp, "Microsoft", "Edge", "Application", "msedge.exe")) != null)
+        {
+            return DetectedBrowserKind.Edge;
+        }
+
+        return DetectedBrowserKind.None;
+    }
+
+    private static unsafe string? TryReadDefaultHttpBrowserProgId()
+    {
+        nint hKey = 0;
+        try
+        {
+            const string subKey = @"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice";
+            if (Win32.RegOpenKeyExW(Win32.HKEY_CURRENT_USER, subKey, 0, Win32.KEY_READ, out hKey) != 0 || hKey == 0)
+                return null;
+
+            uint size = 0;
+            if (Win32.RegQueryValueExW(hKey, "ProgId", 0, out uint type, null, ref size) != 0 ||
+                type != Win32.REG_SZ || size < 4 || size > 512)
+            {
+                return null;
+            }
+
+            byte[] buf = new byte[size];
+            fixed (byte* pBuf = buf)
+            {
+                if (Win32.RegQueryValueExW(hKey, "ProgId", 0, out _, pBuf, ref size) != 0)
+                    return null;
+            }
+
+            return System.Text.Encoding.Unicode.GetString(buf, 0, (int)size).TrimEnd('\0');
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (hKey != 0) Win32.RegCloseKey(hKey);
+        }
+    }
 
     public static string GetExtensionRootDir()
     {

@@ -2037,28 +2037,37 @@ internal sealed unsafe class MainWindow : IDisposable
 
         if (y + rowH > headerH)
         {
-            bool edgeHovered = string.Equals(_hoverId, "btn_ext_edge", StringComparison.Ordinal);
-            DrawActionButton(dc, gfx, "btn_ext_edge", Strings.BtnInstallEdge,
-                x + pad, btnY, mainBtnW, btnH,
-                Theme.AccentSoft, Theme.Accent, edgeHovered ? Theme.OnAccent : Theme.TextPrimary, Theme.Accent,
+            var primaryBrowser = ExtensionSetupService.GetPrimaryInstalledBrowserKind();
+
+            void DrawBridgeBrowserButton(string id, string label, int bx, int bw, bool isPrimary, Action onClick)
+            {
+                bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+                DrawActionButton(dc, gfx, id, label, bx, btnY, bw, btnH,
+                    isPrimary ? Theme.AccentSoft : Theme.BgControl,
+                    isPrimary ? Theme.Accent : Theme.BgControlHover,
+                    isPrimary && hovered ? Theme.OnAccent : Theme.TextPrimary,
+                    isPrimary ? Theme.Accent : Theme.BorderStrong,
+                    onClick);
+            }
+
+            DrawBridgeBrowserButton("btn_ext_edge", Strings.BtnInstallEdge, x + pad, mainBtnW,
+                primaryBrowser == DetectedBrowserKind.Edge,
                 () =>
                 {
                     var (ok, msg) = ExtensionSetupService.LaunchEdgeStoreInstall();
                     ShowStatusBanner(msg, isError: !ok);
                 });
 
-            DrawActionButton(dc, gfx, "btn_ext_chromium", Strings.BtnInstallChromium,
-                x + pad + mainBtnW + gap, btnY, mainBtnW, btnH,
-                Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong,
+            DrawBridgeBrowserButton("btn_ext_chromium", Strings.BtnInstallChromium, x + pad + mainBtnW + gap, mainBtnW,
+                primaryBrowser == DetectedBrowserKind.Chromium,
                 () =>
                 {
                     _guideWindow ??= new ExtensionGuideWindow(_hwnd, _bridgeServer);
                     _guideWindow.ShowFor(ExtensionGuideMode.Chromium);
                 });
 
-            DrawActionButton(dc, gfx, "btn_ext_firefox", Strings.BtnInstallFirefox,
-                x + pad + (mainBtnW + gap) * 2, btnY, mainBtnW, btnH,
-                Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong,
+            DrawBridgeBrowserButton("btn_ext_firefox", Strings.BtnInstallFirefox, x + pad + (mainBtnW + gap) * 2, mainBtnW,
+                primaryBrowser == DetectedBrowserKind.Firefox,
                 () =>
                 {
                     _guideWindow ??= new ExtensionGuideWindow(_hwnd, _bridgeServer);

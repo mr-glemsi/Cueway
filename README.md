@@ -1,6 +1,29 @@
+<div align="center">
+
+<img src="Assets/logo.png" alt="Cueway Logo" width="88" height="88" />
+
 # Cueway
 
-A lightweight media key router and per-tab media controller for Windows 10 and 11.
+Lightweight media key router and per-tab media controller for Windows 10 and 11.
+
+<p>
+  <a href="https://github.com/mr-glemsi/Cueway/releases/latest">
+    <img src="https://img.shields.io/github/v/release/mr-glemsi/Cueway?style=flat-square&label=Download&color=2563EB" alt="Latest Release" />
+  </a>
+  <a href="https://microsoftedge.microsoft.com/addons/detail/cueway-companion/cebckhofejojabmcfeinkdclglibafmk">
+    <img src="https://img.shields.io/badge/Edge%20Add--ons-Available-0078D7?style=flat-square" alt="Edge Add-ons" />
+  </a>
+  <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-111827?style=flat-square" alt="Windows 10/11" />
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-374151?style=flat-square" alt="MIT License" />
+  </a>
+</p>
+
+<br />
+
+<img src="Assets/preview.png" alt="Cueway Dashboard" width="820" />
+
+</div>
 
 Cueway routes hardware media keys to the highest-priority active player on your system. It works with desktop applications (including players without native Windows media session support) and individual browser tabs through a local companion extension.
 
@@ -16,6 +39,12 @@ Download the latest Windows installer (`Cueway-Setup-x64.exe`) from the [Release
 - Manual target lock (`Alt+M`) and solo mode (`Alt+S`)
 - Fullscreen game detection and automatic pause/resume for lower-priority players
 - Lightweight native Windows build with a system tray interface
+
+## Settings & Customization
+
+<div align="center">
+  <img src="Assets/preview-settings.png" alt="Cueway Settings and Themes" width="820" />
+</div>
 
 ## Browser Extensions
 
