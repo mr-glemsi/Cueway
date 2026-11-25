@@ -121,11 +121,8 @@ internal sealed class CoreAudioService : IDisposable
             return null;
 
         float? updatedLevel = null;
-        ForEachAudioSession((pid, _, volPtr, _) =>
+        ForEachAudioSession((_, _, volPtr, _) =>
         {
-            if (!pidSet.Contains(pid))
-                return;
-
             if (CoreAudio.SimpleAudioVolume_GetMasterVolume(volPtr, out float current) != 0)
                 return;
 
@@ -138,7 +135,7 @@ internal sealed class CoreAudioService : IDisposable
                 }
                 updatedLevel ??= next;
             }
-        });
+        }, filterPids: pidSet);
 
         return updatedLevel.HasValue ? (int)MathF.Round(updatedLevel.Value * 100f) : null;
     }
@@ -158,11 +155,8 @@ internal sealed class CoreAudioService : IDisposable
 
         float clamped = Math.Clamp(level, 0f, 1f);
         bool anyUpdated = false;
-        ForEachAudioSession((pid, _, volPtr, _) =>
+        ForEachAudioSession((_, _, volPtr, _) =>
         {
-            if (!pidSet.Contains(pid))
-                return;
-
             if (CoreAudio.SimpleAudioVolume_SetMasterVolume(volPtr, clamped) == 0)
             {
                 if (clamped > 0.005f && CoreAudio.SimpleAudioVolume_GetMute(volPtr, out bool muted) == 0 && muted)
@@ -171,7 +165,7 @@ internal sealed class CoreAudioService : IDisposable
                 }
                 anyUpdated = true;
             }
-        });
+        }, filterPids: pidSet);
 
         return anyUpdated ? (int)MathF.Round(clamped * 100f) : null;
     }
@@ -189,43 +183,52 @@ internal sealed class CoreAudioService : IDisposable
         if (pidSet.Count == 0)
             return null;
 
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        bool mustUninit = coHr == 0 || coHr == 1;
+        var matchedVolumes = new List<nint>(4);
         bool found = false;
         bool allMuted = true;
-        ForEachAudioSession((pid, _, volPtr, _) =>
-        {
-            if (!pidSet.Contains(pid))
-                return;
-
-            if (CoreAudio.SimpleAudioVolume_GetMute(volPtr, out bool muted) == 0)
-            {
-                found = true;
-                if (!muted) allMuted = false;
-            }
-        });
-
-        if (!found)
-            return null;
-
-        bool nextMuted = !allMuted;
         bool anySet = false;
-        ForEachAudioSession((pid, _, volPtr, _) =>
-        {
-            if (!pidSet.Contains(pid))
-                return;
 
-            if (CoreAudio.SimpleAudioVolume_SetMute(volPtr, nextMuted) == 0)
+        try
+        {
+            ForEachAudioSession((_, _, volPtr, _) =>
             {
-                anySet = true;
-                if (!nextMuted &&
-                    CoreAudio.SimpleAudioVolume_GetMasterVolume(volPtr, out float vol) == 0 &&
-                    vol <= 0.005f)
+                if (CoreAudio.SimpleAudioVolume_GetMute(volPtr, out bool muted) == 0)
                 {
-                    CoreAudio.SimpleAudioVolume_SetMasterVolume(volPtr, 0.5f);
+                    found = true;
+                    if (!muted) allMuted = false;
+                    CoreAudio.AddRef(volPtr);
+                    matchedVolumes.Add(volPtr);
+                }
+            }, filterPids: pidSet);
+
+            if (!found)
+                return null;
+
+            bool nextMuted = !allMuted;
+            foreach (nint volPtr in matchedVolumes)
+            {
+                if (CoreAudio.SimpleAudioVolume_SetMute(volPtr, nextMuted) == 0)
+                {
+                    anySet = true;
+                    if (!nextMuted &&
+                        CoreAudio.SimpleAudioVolume_GetMasterVolume(volPtr, out float vol) == 0 &&
+                        vol <= 0.005f)
+                    {
+                        CoreAudio.SimpleAudioVolume_SetMasterVolume(volPtr, 0.5f);
+                    }
                 }
             }
-        });
 
-        return anySet ? nextMuted : null;
+            return anySet ? nextMuted : null;
+        }
+        finally
+        {
+            foreach (nint volPtr in matchedVolumes)
+                CoreAudio.Release(volPtr);
+            if (mustUninit) Win32.CoUninitialize();
+        }
     }
 
     public void ApplySoloMode(bool enabled, IReadOnlySet<int> allowedPids)
@@ -237,13 +240,10 @@ internal sealed class CoreAudioService : IDisposable
                 if (_soloMutedPids.Count == 0)
                     return;
 
-                ForEachAudioSession((pid, _, volPtr, _) =>
+                ForEachAudioSession((_, _, volPtr, _) =>
                 {
-                    if (_soloMutedPids.Contains(pid))
-                    {
-                        CoreAudio.SimpleAudioVolume_SetMute(volPtr, false);
-                    }
-                });
+                    CoreAudio.SimpleAudioVolume_SetMute(volPtr, false);
+                }, filterPids: _soloMutedPids);
                 _soloMutedPids.Clear();
                 return;
             }
@@ -286,7 +286,10 @@ internal sealed class CoreAudioService : IDisposable
         }
     }
 
-    private static void ForEachAudioSession(Action<uint, bool, nint, float> callback, bool includePeak = false)
+    private static void ForEachAudioSession(
+        Action<uint, bool, nint, float> callback,
+        bool includePeak = false,
+        HashSet<uint>? filterPids = null)
     {
         int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
         bool mustUninit = coHr == 0 || coHr == 1;
@@ -312,7 +315,7 @@ internal sealed class CoreAudioService : IDisposable
                     {
                         if (CoreAudio.DeviceCollection_Item(collection, d, out device) == 0 && device != 0)
                         {
-                            EnumerateDeviceSessions(device, callback, includePeak);
+                            EnumerateDeviceSessions(device, callback, includePeak, filterPids);
                         }
                     }
                     finally
@@ -329,7 +332,7 @@ internal sealed class CoreAudioService : IDisposable
                     if (CoreAudio.Enumerator_GetDefaultAudioEndpoint(enumerator, CoreAudio.eRender, CoreAudio.eMultimedia, out device) == 0 &&
                         device != 0)
                     {
-                        EnumerateDeviceSessions(device, callback, includePeak);
+                        EnumerateDeviceSessions(device, callback, includePeak, filterPids);
                     }
                 }
                 finally
@@ -350,7 +353,11 @@ internal sealed class CoreAudioService : IDisposable
         }
     }
 
-    private static void EnumerateDeviceSessions(nint device, Action<uint, bool, nint, float> callback, bool includePeak)
+    private static void EnumerateDeviceSessions(
+        nint device,
+        Action<uint, bool, nint, float> callback,
+        bool includePeak,
+        HashSet<uint>? filterPids)
     {
         nint mgr = 0;
         nint sessionEnum = 0;
@@ -389,6 +396,9 @@ internal sealed class CoreAudioService : IDisposable
                         continue;
 
                     if (CoreAudio.SessionControl2_GetProcessId(ctrl2, out uint pid) != 0 || pid == 0)
+                        continue;
+
+                    if (filterPids != null && !filterPids.Contains(pid))
                         continue;
 
                     if (CoreAudio.QueryInterface(ctrl, in CoreAudio.IID_ISimpleAudioVolume, out vol) != 0 || vol == 0)

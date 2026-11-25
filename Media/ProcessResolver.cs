@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Cueway.Interop;
 
 namespace Cueway.Media;
@@ -17,7 +16,7 @@ internal readonly record struct ResolvedAppInfo(
     int[] ProcessIds,
     bool IsBrowser);
 
-internal static class ProcessResolver
+internal static unsafe class ProcessResolver
 {
     private static readonly HashSet<string> BrowserExeNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -112,7 +111,16 @@ internal static class ProcessResolver
         "steelseriessonar",
         "voicemeeter",
         "voicemeeterpro",
-        "voicemeeter8"
+        "voicemeeter8",
+        "discord",
+        "discordptb",
+        "discordcanary",
+        "teams",
+        "ms-teams",
+        "zoom",
+        "ts3client_win64",
+        "teamspeak",
+        "mumble"
     };
 
     private static readonly HashSet<string> KnownMediaAudioProcesses = new(StringComparer.OrdinalIgnoreCase)
@@ -124,12 +132,13 @@ internal static class ProcessResolver
         "foobar2000", "musicbee", "aimp", "winamp", "itunes",
         "tidal", "deezer", "qobuz", "amazon music", "spotify", "applemusic",
         "mpv", "mpvnet", "audacious", "clementine", "strawberry",
-        "gom", "gom64", "smplayer", "bsplayer", "wmplayer", "microsoft.media.player",
-        "discord", "discordptb", "discordcanary", "telegram", "whatsapp"
+        "gom", "gom64", "smplayer", "bsplayer", "wmplayer", "microsoft.media.player"
     };
 
     private static readonly object _pidCacheLock = new();
-    private static Dictionary<int, (string Name, string ExePath)> _pidExeCache = new();
+    private static readonly Dictionary<int, (string Name, string ExePath, int Gen)> _pidCache = new(256);
+    private static readonly List<int> _stalePids = new(64);
+    private static int _pidCacheGen;
 
     public static List<RunningProcessInfo> TakeSnapshot()
         => TakeSnapshotWithWindows().Processes;
@@ -139,63 +148,125 @@ internal static class ProcessResolver
         var visibleWindows = Win32.SnapshotVisibleWindows();
         var bestTitleByPid = BuildBestTitleMap(visibleWindows);
 
-        var list = new List<RunningProcessInfo>(128);
-        Process[] procs;
-        try
-        {
-            procs = Process.GetProcesses();
-        }
-        catch
-        {
+        var list = new List<RunningProcessInfo>(256);
+        nint snap = Win32.CreateToolhelp32Snapshot(Win32.TH32CS_SNAPPROCESS, 0);
+        if (snap == 0 || snap == Win32.INVALID_HANDLE_VALUE)
             return (list, visibleWindows);
-        }
 
-        Dictionary<int, (string Name, string ExePath)> prevCache;
+        List<(int Pid, string Name)>? newPids = null;
+        int gen;
         lock (_pidCacheLock)
         {
-            prevCache = _pidExeCache;
-        }
-        var nextCache = new Dictionary<int, (string Name, string ExePath)>(procs.Length);
-
-        foreach (var proc in procs)
-        {
+            gen = ++_pidCacheGen;
             try
             {
-                int pid = proc.Id;
-                if (pid <= 4) continue;
-                string name = proc.ProcessName;
-
-                string exePath;
-                if (prevCache.TryGetValue(pid, out var cached) &&
-                    string.Equals(cached.Name, name, StringComparison.OrdinalIgnoreCase))
+                var entry = new Win32.PROCESSENTRY32W
                 {
-                    exePath = cached.ExePath;
-                }
-                else
-                {
-                    exePath = Win32.TryGetProcessImagePath((uint)pid) ?? string.Empty;
-                }
-                nextCache[pid] = (name, exePath);
+                    dwSize = (uint)sizeof(Win32.PROCESSENTRY32W)
+                };
 
-                string title = bestTitleByPid.TryGetValue(pid, out var bt) ? bt.Title : string.Empty;
-                list.Add(new RunningProcessInfo(pid, name, exePath, title));
-            }
-            catch
-            {
-                // Process exited mid-enumeration
+                if (Win32.Process32FirstW(snap, &entry))
+                {
+                    do
+                    {
+                        int pid = unchecked((int)entry.th32ProcessID);
+                        if (pid <= 4)
+                            continue;
+
+                        ReadOnlySpan<char> rawSpan = new(entry.szExeFile, 260);
+                        int nullIdx = rawSpan.IndexOf('\0');
+                        ReadOnlySpan<char> nameSpan = nullIdx >= 0 ? rawSpan[..nullIdx] : rawSpan;
+                        if (nameSpan.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                            nameSpan = nameSpan[..^4];
+                        if (nameSpan.IsEmpty)
+                            continue;
+
+                        if (_pidCache.TryGetValue(pid, out var cached) &&
+                            nameSpan.Equals(cached.Name.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                        {
+                            _pidCache[pid] = (cached.Name, cached.ExePath, gen);
+                            string title = bestTitleByPid.TryGetValue(pid, out var bt) ? bt.Title : string.Empty;
+                            list.Add(new RunningProcessInfo(pid, cached.Name, cached.ExePath, title));
+                        }
+                        else
+                        {
+                            (newPids ??= new List<(int, string)>(16)).Add((pid, nameSpan.ToString()));
+                        }
+                    }
+                    while (Win32.Process32NextW(snap, &entry));
+                }
             }
             finally
             {
-                proc.Dispose();
+                Win32.CloseHandle(snap);
+            }
+
+            if (newPids == null || newPids.Count == 0)
+            {
+                PruneStalePidsLocked(gen);
             }
         }
 
-        lock (_pidCacheLock)
+        if (newPids != null && newPids.Count > 0)
         {
-            _pidExeCache = nextCache;
+            var resolvedNew = new List<(int Pid, string Name, string ExePath)>(newPids.Count);
+            foreach (var (pid, name) in newPids)
+            {
+                string exePath = Win32.TryGetProcessImagePath((uint)pid) ?? string.Empty;
+                resolvedNew.Add((pid, name, exePath));
+                string title = bestTitleByPid.TryGetValue(pid, out var bt) ? bt.Title : string.Empty;
+                list.Add(new RunningProcessInfo(pid, name, exePath, title));
+            }
+
+            lock (_pidCacheLock)
+            {
+                foreach (var item in resolvedNew)
+                {
+                    _pidCache[item.Pid] = (item.Name, item.ExePath, gen);
+                }
+                PruneStalePidsLocked(gen);
+            }
         }
 
         return (list, visibleWindows);
+    }
+
+    private static void PruneStalePidsLocked(int activeGen)
+    {
+        _stalePids.Clear();
+        foreach (var kv in _pidCache)
+        {
+            if (kv.Value.Gen != activeGen)
+                _stalePids.Add(kv.Key);
+        }
+        foreach (int stalePid in _stalePids)
+            _pidCache.Remove(stalePid);
+    }
+
+    public static string? TryGetCachedProcessName(int pid)
+    {
+        if (pid <= 4) return null;
+        lock (_pidCacheLock)
+        {
+            return _pidCache.TryGetValue(pid, out var cached) ? cached.Name : null;
+        }
+    }
+
+    public static Dictionary<string, List<RunningProcessInfo>> BuildNameIndex(IReadOnlyList<RunningProcessInfo> processes)
+    {
+        var index = new Dictionary<string, List<RunningProcessInfo>>(64, StringComparer.OrdinalIgnoreCase);
+        foreach (var p in processes)
+        {
+            if (string.IsNullOrEmpty(p.Name))
+                continue;
+            if (!index.TryGetValue(p.Name, out var list))
+            {
+                list = new List<RunningProcessInfo>(2);
+                index[p.Name] = list;
+            }
+            list.Add(p);
+        }
+        return index;
     }
 
     private static Dictionary<int, (int Score, string Title)> BuildBestTitleMap(IReadOnlyList<Win32.VisibleWindowInfo> windows)

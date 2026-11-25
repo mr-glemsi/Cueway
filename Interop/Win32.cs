@@ -151,6 +151,7 @@ internal static unsafe partial class Win32
     public const int VK_OEM_5 = 0xDC;
     public const int VK_OEM_6 = 0xDD;
     public const int VK_OEM_7 = 0xDE;
+    public const int VK_OEM_8 = 0xDF;
     public const int VK_OEM_102 = 0xE2;
 
     public const uint LLKHF_INJECTED = 0x00000010;
@@ -242,6 +243,8 @@ internal static unsafe partial class Win32
 
     // Process & Monitor
     public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    public const uint TH32CS_SNAPPROCESS = 0x00000002;
+    public static readonly nint INVALID_HANDLE_VALUE = new(-1);
     public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
     public const uint TME_LEAVE = 0x00000002;
     public const uint COINIT_APARTMENTTHREADED = 0x2;
@@ -437,7 +440,37 @@ internal static unsafe partial class Win32
         public byte AlphaFormat;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROCESSENTRY32W
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public nuint th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        public fixed char szExeFile[260];
+    }
+
     // Kernel32
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    public static partial nint CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool Process32FirstW(nint hSnapshot, PROCESSENTRY32W* lppe);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool Process32NextW(nint hSnapshot, PROCESSENTRY32W* lppe);
+
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool SetProcessWorkingSetSize(nint hProcess, nint dwMinimumWorkingSetSize, nint dwMaximumWorkingSetSize);
+
     [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16)]
     public static partial nint GetModuleHandleW(string? lpModuleName);
 
@@ -910,11 +943,44 @@ internal static unsafe partial class Win32
         return len > 0 ? new string(buf, 0, len) : string.Empty;
     }
 
+    public static void TrimWorkingSet()
+    {
+        try
+        {
+            SetProcessWorkingSetSize(GetCurrentProcess(), new nint(-1), new nint(-1));
+        }
+        catch
+        {
+            // Best-effort working set trim
+        }
+    }
+
     public static string GetWindowClassName(nint hWnd)
     {
         char* buf = stackalloc char[256];
         int len = GetClassNameW(hWnd, buf, 256);
         return len > 0 ? new string(buf, 0, len) : string.Empty;
+    }
+
+    public static bool IsWindowClass(nint hWnd, ReadOnlySpan<char> expectedClass)
+    {
+        char* buf = stackalloc char[64];
+        int len = GetClassNameW(hWnd, buf, 64);
+        return len == expectedClass.Length &&
+               new ReadOnlySpan<char>(buf, len).SequenceEqual(expectedClass);
+    }
+
+    public static bool IsDesktopShellWindowClass(nint hWnd)
+    {
+        char* buf = stackalloc char[64];
+        int len = GetClassNameW(hWnd, buf, 64);
+        if (len <= 0) return false;
+        var cls = new ReadOnlySpan<char>(buf, len);
+        return cls.SequenceEqual("Progman") ||
+               cls.SequenceEqual("WorkerW") ||
+               cls.SequenceEqual("Shell_TrayWnd") ||
+               cls.SequenceEqual("Shell_SecondaryTrayWnd") ||
+               cls.SequenceEqual("NotifyIconOverflowWindow");
     }
 
     public readonly record struct VisibleWindowInfo(
@@ -962,8 +1028,7 @@ internal static unsafe partial class Win32
 
         GetWindowThreadProcessId(hwnd, out uint pid);
         uint corePid = 0;
-        string cls = GetWindowClassName(hwnd);
-        if (string.Equals(cls, "ApplicationFrameWindow", StringComparison.Ordinal))
+        if (IsWindowClass(hwnd, "ApplicationFrameWindow"))
         {
             nint coreHwnd = FindWindowExW(hwnd, 0, "Windows.UI.Core.CoreWindow", null);
             if (coreHwnd != 0)
@@ -1098,8 +1163,7 @@ internal static unsafe partial class Win32
 
         if (!matches)
         {
-            string cls = GetWindowClassName(hwnd);
-            if (string.Equals(cls, "ApplicationFrameWindow", StringComparison.Ordinal))
+            if (IsWindowClass(hwnd, "ApplicationFrameWindow"))
             {
                 nint coreHwnd = FindWindowExW(hwnd, 0, "Windows.UI.Core.CoreWindow", null);
                 if (coreHwnd != 0)

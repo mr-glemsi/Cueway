@@ -37,7 +37,9 @@ internal sealed class MediaRouterEngine : IDisposable
 
     private string? _lockedSessionId;
     private string? _lockedAppKey;
+    private string? _explicitPromoteAppKey;
     private bool _gameGuardActive;
+    private bool _soloWasActive;
 
     // Auto-pause / Auto-resume tracking
     private readonly Dictionary<string, bool> _prevEffectivePlaying = new(StringComparer.Ordinal);
@@ -209,22 +211,50 @@ internal sealed class MediaRouterEngine : IDisposable
         if (sessions.Count == 0)
             return null;
 
-        IEnumerable<MediaSessionInfo> pool = sessions;
+        bool filterNonBrowser = false;
         if (gameGuardActive)
         {
-            var nonBrowsers = sessions.Where(s => !s.IsBrowser).ToList();
-            if (nonBrowsers.Count > 0)
-                pool = nonBrowsers;
+            for (int i = 0; i < sessions.Count; i++)
+            {
+                if (!sessions[i].IsBrowser)
+                {
+                    filterNonBrowser = true;
+                    break;
+                }
+            }
+
+            if (filterNonBrowser && !string.IsNullOrEmpty(_explicitPromoteAppKey))
+            {
+                for (int i = 0; i < sessions.Count; i++)
+                {
+                    var s = sessions[i];
+                    if (!s.IsPassiveTab &&
+                        string.Equals(s.AppKey, _explicitPromoteAppKey, StringComparison.OrdinalIgnoreCase) &&
+                        _stateStore.GetPriorityIndex(s.AppKey) == 0)
+                    {
+                        filterNonBrowser = false;
+                        break;
+                    }
+                }
+            }
         }
 
-        return pool
-            .OrderBy(s => s.IsPassiveTab)
-            .ThenBy(s => s.IsMuted || s.Volume <= 0.005f)
-            .ThenBy(s => _stateStore.GetPriorityIndex(s.AppKey))
-            .ThenByDescending(s => s.IsEffectivelyPlaying)
-            .ThenByDescending(s => s.IsPlaying)
-            .ThenBy(s => s.IsBrowser)
-            .FirstOrDefault();
+        MediaSessionInfo? best = null;
+        int bestPrio = int.MaxValue;
+        for (int i = 0; i < sessions.Count; i++)
+        {
+            var s = sessions[i];
+            if (filterNonBrowser && s.IsBrowser)
+                continue;
+
+            int prio = _stateStore.GetPriorityIndex(s.AppKey);
+            if (best == null || IsBetterTarget(s, prio, best, bestPrio, preferNonBrowser: true))
+            {
+                best = s;
+                bestPrio = prio;
+            }
+        }
+        return best;
     }
 
     private MediaSessionInfo? SelectSecondaryTarget(List<MediaSessionInfo> sessions, MediaSessionInfo? primary)
@@ -232,14 +262,55 @@ internal sealed class MediaRouterEngine : IDisposable
         if (sessions.Count < 2)
             return null;
 
-        return sessions
-            .Where(s => primary == null || !string.Equals(s.SessionId, primary.SessionId, StringComparison.Ordinal))
-            .OrderBy(s => s.IsPassiveTab)
-            .ThenBy(s => s.IsMuted || s.Volume <= 0.005f)
-            .ThenBy(s => _stateStore.GetPriorityIndex(s.AppKey))
-            .ThenByDescending(s => s.IsEffectivelyPlaying)
-            .ThenByDescending(s => s.IsPlaying)
-            .FirstOrDefault();
+        MediaSessionInfo? best = null;
+        int bestPrio = int.MaxValue;
+        for (int i = 0; i < sessions.Count; i++)
+        {
+            var s = sessions[i];
+            if (primary != null && string.Equals(s.SessionId, primary.SessionId, StringComparison.Ordinal))
+                continue;
+
+            int prio = _stateStore.GetPriorityIndex(s.AppKey);
+            if (best == null || IsBetterTarget(s, prio, best, bestPrio, preferNonBrowser: false))
+            {
+                best = s;
+                bestPrio = prio;
+            }
+        }
+        return best;
+    }
+
+    private static bool IsBetterTarget(
+        MediaSessionInfo cand,
+        int candPrio,
+        MediaSessionInfo curr,
+        int currPrio,
+        bool preferNonBrowser)
+    {
+        int c = cand.IsPassiveTab.CompareTo(curr.IsPassiveTab);
+        if (c != 0) return c < 0;
+
+        bool candSilent = cand.IsMuted || cand.Volume <= 0.005f;
+        bool currSilent = curr.IsMuted || curr.Volume <= 0.005f;
+        c = candSilent.CompareTo(currSilent);
+        if (c != 0) return c < 0;
+
+        if (candPrio != currPrio)
+            return candPrio < currPrio;
+
+        c = cand.IsEffectivelyPlaying.CompareTo(curr.IsEffectivelyPlaying);
+        if (c != 0) return c > 0;
+
+        c = cand.IsPlaying.CompareTo(curr.IsPlaying);
+        if (c != 0) return c > 0;
+
+        if (preferNonBrowser)
+        {
+            c = cand.IsBrowser.CompareTo(curr.IsBrowser);
+            if (c != 0) return c < 0;
+        }
+
+        return false;
     }
 
     private void EvaluateAutoPauseLocked(
@@ -250,6 +321,9 @@ internal sealed class MediaRouterEngine : IDisposable
         out string? triggerId)
     {
         triggerId = null;
+
+        if (sessions.Count <= 1 && _autoPausedBy.Count == 0)
+            return;
 
         var sessionMap = new Dictionary<string, MediaSessionInfo>(StringComparer.Ordinal);
         foreach (var s in sessions)
@@ -346,10 +420,15 @@ internal sealed class MediaRouterEngine : IDisposable
     {
         if (!soloEnabled || activeTarget == null)
         {
-            _audioService.ApplySoloMode(false, EmptyPidSet);
+            if (_soloWasActive)
+            {
+                _audioService.ApplySoloMode(false, EmptyPidSet);
+                _soloWasActive = false;
+            }
             return;
         }
 
+        _soloWasActive = true;
         var allowed = new HashSet<int>(activeTarget.ProcessIds);
         _audioService.ApplySoloMode(true, allowed);
     }
@@ -394,6 +473,7 @@ internal sealed class MediaRouterEngine : IDisposable
                     {
                         _lockedSessionId = target.SessionId;
                         _lockedAppKey = target.AppKey;
+                        _explicitPromoteAppKey = null;
                         _stateStore.RecordDiscoveredApp(target.AppKey, target.DisplayName, target.ExePath);
                     }
                 }
@@ -409,6 +489,7 @@ internal sealed class MediaRouterEngine : IDisposable
                 {
                     _lockedSessionId = _snapshot.ActiveTarget.SessionId;
                     _lockedAppKey = _snapshot.ActiveTarget.AppKey;
+                    _explicitPromoteAppKey = null;
                 }
             }
         }
@@ -435,10 +516,13 @@ internal sealed class MediaRouterEngine : IDisposable
                 _lockedSessionId = null;
                 _lockedAppKey = null;
             }
+            _explicitPromoteAppKey = appKey;
         }
 
-        _stateStore.MovePriorityAppToTop(appKey);
-        Evaluate(forceNotify: true);
+        bool moved = _stateStore.MovePriorityAppToTop(appKey);
+        if (!moved)
+            Evaluate(forceNotify: true);
+        _ = _sessionManager.RefreshAsync();
 
         var snap = GetSnapshot();
         var matchingSession = snap.Sessions.Find(s =>
@@ -526,6 +610,8 @@ internal sealed class MediaRouterEngine : IDisposable
                         {
                             if (string.Equals(s.SessionId, target.SessionId, StringComparison.Ordinal))
                                 return false;
+                            if (s.Source == SessionSource.AudioSession && !ProcessResolver.IsKnownMediaAudioProcess(s.AppKey))
+                                return false;
                             if (s.IsMuted || s.Volume <= 0.005f)
                                 return false;
                             bool? live = _sessionManager.TryGetLiveIsPlaying(s.SessionId);
@@ -553,8 +639,8 @@ internal sealed class MediaRouterEngine : IDisposable
                             {
                                 var pausedNames = string.Join(", ", otherPlaying.Select(s => s.DisplayName).Distinct());
                                 NotifyOsd(pausedNames, Strings.OsdActionPaused, otherPlaying[0].ExePath, appKey: otherPlaying[0].AppKey);
+                                return;
                             }
-                            return;
                         }
 
                         ok = await _sessionManager.PlayAsync(target.SessionId);

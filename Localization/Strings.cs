@@ -511,15 +511,15 @@ internal static class Strings
         "활성 대상 외의 모든 실행 중 앱 소리를 끄거나 켭니다");
     public static string SetHkPlayPauseTitle => T("Oynat / Duraklat Kısayolu", "Play / Pause Shortcut", "播放 / 暂停快捷键", "Atajo Reproducir / Pausar", "Воспр. / Пауза", "Wiedergabe / Pause-Kürzel", "Raccourci Lecture / Pause", "再生 / 一時停止ショートカット", "재생 / 일시정지 단축키");
     public static string SetHkPlayPauseSub => T(
-        "Fiziksel medya tuşu olmayan klavyeler için isteğe bağlı Oynat/Duraklat tuşu",
-        "Optional Play/Pause shortcut for keyboards without dedicated media keys",
-        "为没有独立媒体键的键盘提供可选播放/暂停快捷键",
-        "Atajo opcional de Reproducir/Pausar para teclados sin teclas multimedia",
-        "Дополнительная клавиша Воспр./Пауза для клавиатур без медиа-кнопок",
-        "Optionales Kürzel für Tastaturen ohne eigene Medientasten",
-        "Raccourci optionnel Lecture/Pause pour claviers sans touches média",
-        "メディアキー非搭載キーボード用の再生/一時停止ショートカット",
-        "미디어 키가 없는 키보드용 선택적 재생/일시정지 단축키");
+        "Medya tuşu olmayan klavyeler için tek tuş (ör. End, F8, P) veya kombinasyon atayın",
+        "Assign any single key (e.g. End, F8, P) or combo for keyboards without media keys",
+        "为没有媒体键的键盘分配单个按键（如 End、F8、P）或组合键",
+        "Asigna cualquier tecla (ej. End, F8, P) o combinación sin teclas multimedia",
+        "Назначьте любую клавишу (напр. End, F8, P) или сочетание для клавиатур без медиа-кнопок",
+        "Beliebige Einzeltaste (z. B. Ende, F8, P) oder Kombination zuweisen",
+        "Attribuez une touche unique (ex. Fin, F8, P) ou une combinaison",
+        "メディアキーがないキーボード向けに単一キー（End、F8、Pなど）または組み合わせを設定",
+        "미디어 키가 없는 키보드용 단일 키(예: End, F8, P) 또는 조합 지정");
     public static string HotkeyAssignShort => T("+ Kısayol", "+ Hotkey", "+ 快捷键", "+ Atajo", "+ Клавиша", "+ Kürzel", "+ Raccourci", "+ キー設定", "+ 단축키");
     public static string HotkeyUnassigned => T("Atanmadı", "Not set", "未设置", "Sin asignar", "Не задано", "Nicht belegt", "Non défini", "未設定", "미지정");
     public static string HotkeyListening => T("Tuşa basın...", "Press keys...", "请按键...", "Pulsa teclas...", "Нажмите...", "Taste drücken...", "Appuyez...", "キー入力待ち...", "키를 누르세요...");

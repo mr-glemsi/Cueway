@@ -72,8 +72,8 @@ internal sealed class AppUpdateService : IDisposable
     private readonly string _allowedDownloadPrefix;
     private readonly int _minDownloadBytes;
     private readonly string _updatesDir;
-    private readonly HttpClient _http;
     private readonly object _syncLock = new();
+    private HttpClient? _http;
 
     private UpdateSnapshot _snapshot;
     private string? _downloadUrl;
@@ -105,20 +105,13 @@ internal sealed class AppUpdateService : IDisposable
         int minDownloadBytes,
         string? updatesDir = null)
     {
-        _currentVersion = NormalizeVersionString(currentVersion) is { Length: > 0 } norm ? norm : "1.0.4";
+        _currentVersion = NormalizeVersionString(currentVersion) is { Length: > 0 } norm ? norm : "1.0.5";
         _apiUrl = apiUrl;
         _allowedDownloadPrefix = allowedDownloadPrefix;
         _minDownloadBytes = Math.Max(2, minDownloadBytes);
         _updatesDir = string.IsNullOrWhiteSpace(updatesDir)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Cueway", "Updates")
             : updatesDir;
-
-        _http = new HttpClient
-        {
-            Timeout = Timeout.InfiniteTimeSpan
-        };
-        _http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("Cueway", _currentVersion));
-        _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
 
         _snapshot = new UpdateSnapshot(
             UpdatePhase.Idle,
@@ -129,6 +122,30 @@ internal sealed class AppUpdateService : IDisposable
             null,
             null,
             false);
+    }
+
+    private HttpClient GetOrCreateHttpClient()
+    {
+        lock (_syncLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_http != null)
+                return _http;
+
+            var handler = new SocketsHttpHandler
+            {
+                PooledConnectionIdleTimeout = TimeSpan.FromSeconds(15),
+                MaxConnectionsPerServer = 2
+            };
+            var client = new HttpClient(handler, disposeHandler: true)
+            {
+                Timeout = Timeout.InfiniteTimeSpan
+            };
+            client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("Cueway", _currentVersion));
+            client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+            _http = client;
+            return client;
+        }
     }
 
     public UpdateSnapshot GetSnapshot()
@@ -215,7 +232,7 @@ internal sealed class AppUpdateService : IDisposable
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             using var req = new HttpRequestMessage(HttpMethod.Get, _apiUrl);
-            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseContentRead, cts.Token).ConfigureAwait(false);
+            using var resp = await GetOrCreateHttpClient().SendAsync(req, HttpCompletionOption.ResponseContentRead, cts.Token).ConfigureAwait(false);
             resp.EnsureSuccessStatusCode();
 
             string json = await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
@@ -447,7 +464,7 @@ internal sealed class AppUpdateService : IDisposable
         try
         {
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
+            using var resp = await GetOrCreateHttpClient().SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
             resp.EnsureSuccessStatusCode();
 
             long totalBytes = resp.Content.Headers.ContentLength ?? expectedAssetSize;
@@ -608,10 +625,10 @@ internal sealed class AppUpdateService : IDisposable
         {
             _snapshot = mode.ToLowerInvariant() switch
             {
-                "available" => new UpdateSnapshot(UpdatePhase.Available, _currentVersion, "1.0.4", 0, 4_299_161, null, null, false),
-                "downloading" => new UpdateSnapshot(UpdatePhase.Downloading, _currentVersion, "1.0.4", 2_665_479, 4_299_161, null, null, false),
-                "ready" => new UpdateSnapshot(UpdatePhase.ReadyToInstall, _currentVersion, "1.0.4", 4_299_161, 4_299_161, null, null, false),
-                "failed" => new UpdateSnapshot(UpdatePhase.Failed, _currentVersion, "1.0.4", 0, 4_299_161, null, Strings.UpdateFailedBanner, false),
+                "available" => new UpdateSnapshot(UpdatePhase.Available, _currentVersion, "1.0.5", 0, 4_299_161, null, null, false),
+                "downloading" => new UpdateSnapshot(UpdatePhase.Downloading, _currentVersion, "1.0.5", 2_665_479, 4_299_161, null, null, false),
+                "ready" => new UpdateSnapshot(UpdatePhase.ReadyToInstall, _currentVersion, "1.0.5", 4_299_161, 4_299_161, null, null, false),
+                "failed" => new UpdateSnapshot(UpdatePhase.Failed, _currentVersion, "1.0.5", 0, 4_299_161, null, Strings.UpdateFailedBanner, false),
                 _ => _snapshot
             };
         }
@@ -670,7 +687,7 @@ internal sealed class AppUpdateService : IDisposable
     {
         var v = typeof(AppUpdateService).Assembly.GetName().Version;
         if (v == null || v.Major < 0)
-            return "1.0.4";
+            return "1.0.5";
         return $"{v.Major}.{Math.Max(0, v.Minor)}.{Math.Max(0, v.Build)}";
     }
 
@@ -771,15 +788,18 @@ internal sealed class AppUpdateService : IDisposable
     public void Dispose()
     {
         CancellationTokenSource? cts;
+        HttpClient? http;
         lock (_syncLock)
         {
             if (_disposed) return;
             _disposed = true;
             cts = _downloadCts;
             _downloadCts = null;
+            http = _http;
+            _http = null;
         }
         try { cts?.Cancel(); } catch { }
         try { cts?.Dispose(); } catch { }
-        try { _http.Dispose(); } catch { }
+        try { http?.Dispose(); } catch { }
     }
 }

@@ -131,6 +131,7 @@ internal sealed class MediaSessionManager : IDisposable
 
             var settings = _stateStore.GetSettingsSnapshot();
             var (procSnapshot, visibleWindows) = ProcessResolver.TakeSnapshotWithWindows();
+            var procsByName = ProcessResolver.BuildNameIndex(procSnapshot);
             var audioByPid = _audioService.GetAudioStatesByPid();
 
             var collected = new List<MediaSessionInfo>();
@@ -143,8 +144,8 @@ internal sealed class MediaSessionManager : IDisposable
             var bridgeTabs = _bridgeServer.GetAllTabsSnapshot();
             if (bridgeTabs.Count > 0)
             {
-                bool hasFirefoxProc = procSnapshot.Any(p => p.Name.Equals("firefox", StringComparison.OrdinalIgnoreCase));
-                bool hasZenProc = procSnapshot.Any(p => p.Name.Equals("zen", StringComparison.OrdinalIgnoreCase));
+                bool hasFirefoxProc = procsByName.ContainsKey("firefox");
+                bool hasZenProc = procsByName.ContainsKey("zen");
                 var seenBridgeIds = new Dictionary<string, int>(StringComparer.Ordinal);
 
                 foreach (var rec in bridgeTabs)
@@ -156,22 +157,22 @@ internal sealed class MediaSessionManager : IDisposable
                     if (browserKey == "firefox" && !hasFirefoxProc && hasZenProc)
                         browserKey = "zen";
 
-                    var browserProcs = procSnapshot
-                        .Where(p => p.Name.Equals(browserKey, StringComparison.OrdinalIgnoreCase))
-                        .ToList();
-                    if (browserProcs.Count == 0 && browserKey == "opera")
+                    if (!procsByName.TryGetValue(browserKey, out var browserProcs) || browserProcs.Count == 0)
                     {
-                        browserProcs = procSnapshot
-                            .Where(p => p.Name.Equals("opera_gx", StringComparison.OrdinalIgnoreCase))
-                            .ToList();
-                        if (browserProcs.Count > 0)
+                        if (browserKey == "opera" &&
+                            procsByName.TryGetValue("opera_gx", out var operaGxProcs) &&
+                            operaGxProcs.Count > 0)
+                        {
+                            browserProcs = operaGxProcs;
                             browserKey = "opera_gx";
+                        }
+                        else
+                        {
+                            continue;
+                        }
                     }
-                    if (browserProcs.Count == 0)
-                        continue;
 
-                    int[] pids = browserProcs.Select(p => p.Pid).ToArray();
-                    string exePath = browserProcs.Select(p => p.ExePath).FirstOrDefault(p => !string.IsNullOrEmpty(p)) ?? string.Empty;
+                    var (pids, exePath) = ExtractPidsAndExe(browserProcs);
 
                     string? siteKey = BrowserSiteScanner.DetectSite(tab.Url) ??
                                       BrowserSiteScanner.DetectSite(tab.Title, allowStandaloneX: true) ??
@@ -310,9 +311,9 @@ internal sealed class MediaSessionManager : IDisposable
                                     continue;
                             }
 
-                            var browserProcs = procSnapshot
-                                .Where(p => p.Name.Equals(resolved.AppKey, StringComparison.OrdinalIgnoreCase))
-                                .ToList();
+                            IReadOnlyList<RunningProcessInfo> browserProcs = procsByName.TryGetValue(resolved.AppKey, out var bProcsList)
+                                ? bProcsList
+                                : [];
                             var site = BrowserSiteScanner.ResolveBrowserSite(
                                 resolved.AppKey, aumid, title, artist, album, isPlaying, browserProcs, visibleWindows);
                             if (site.HasValue)
@@ -402,22 +403,23 @@ internal sealed class MediaSessionManager : IDisposable
             }
 
             // Retain recently played multi-site browser tabs when Companion Extension isn't connected for that browser
-            AppendRetainedSmtcBrowserTabs(collected, bridgeByBrowser, procSnapshot, visibleWindows, audioByPid);
+            AppendRetainedSmtcBrowserTabs(collected, bridgeByBrowser, procsByName, visibleWindows, audioByPid);
 
             // Optional mpv Named Pipe IPC integration (only query pipe when an mpv/mpvnet process is running)
             if (!mpvSeenViaSmtc)
             {
-                var mpvProcs = procSnapshot
-                    .Where(p => p.Name.Equals("mpv", StringComparison.OrdinalIgnoreCase) ||
-                                p.Name.Equals("mpvnet", StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-                if (mpvProcs.Count > 0)
+                procsByName.TryGetValue("mpv", out var mpvList);
+                procsByName.TryGetValue("mpvnet", out var mpvnetList);
+                if ((mpvList != null && mpvList.Count > 0) || (mpvnetList != null && mpvnetList.Count > 0))
                 {
+                    var mpvProcs = new List<RunningProcessInfo>((mpvList?.Count ?? 0) + (mpvnetList?.Count ?? 0));
+                    if (mpvList != null) mpvProcs.AddRange(mpvList);
+                    if (mpvnetList != null) mpvProcs.AddRange(mpvnetList);
+
                     var mpvState = _mpvClient.QueryState(settings.MpvPipeName);
                     if (mpvState.IsConnected)
                     {
-                        int[] mpvPids = mpvProcs.Select(p => p.Pid).ToArray();
-                        string mpvExePath = mpvProcs.Select(p => p.ExePath).FirstOrDefault(p => !string.IsNullOrEmpty(p)) ?? string.Empty;
+                        var (mpvPids, mpvExePath) = ExtractPidsAndExe(mpvProcs);
 
                         var (hasAudio, _, isMuted, volume, _) = AggregateAudioState(mpvPids, audioByPid);
                         ApplyOptimisticVolumeLatch("mpv:ipc", ref volume, ref isMuted);
@@ -476,7 +478,7 @@ internal sealed class MediaSessionManager : IDisposable
     private void AppendRetainedSmtcBrowserTabs(
         List<MediaSessionInfo> collected,
         Dictionary<string, List<MediaSessionInfo>> bridgeByBrowser,
-        IReadOnlyList<RunningProcessInfo> procSnapshot,
+        Dictionary<string, List<RunningProcessInfo>> procsByName,
         IReadOnlyList<Win32.VisibleWindowInfo> visibleWindows,
         Dictionary<uint, AudioProcessState> audioByPid)
     {
@@ -491,15 +493,18 @@ internal sealed class MediaSessionManager : IDisposable
             // If BrowserBridge is actively supplying tabs for a browser, prune passive SMTC tab cache for that browser
             if (bridgeByBrowser.Count > 0)
             {
-                var bridgedKeys = _recentSmtcBrowserTabs.Keys
-                    .Where(k =>
-                    {
-                        string? bk = BrowserSiteScanner.ExtractBrowserKeyFromAppKey(k);
-                        return !string.IsNullOrEmpty(bk) && bridgeByBrowser.ContainsKey(bk);
-                    })
-                    .ToList();
-                foreach (string k in bridgedKeys)
-                    _recentSmtcBrowserTabs.Remove(k);
+                List<string>? bridgedKeys = null;
+                foreach (string k in _recentSmtcBrowserTabs.Keys)
+                {
+                    string? bk = BrowserSiteScanner.ExtractBrowserKeyFromAppKey(k);
+                    if (!string.IsNullOrEmpty(bk) && bridgeByBrowser.ContainsKey(bk))
+                        (bridgedKeys ??= []).Add(k);
+                }
+                if (bridgedKeys != null)
+                {
+                    foreach (string k in bridgedKeys)
+                        _recentSmtcBrowserTabs.Remove(k);
+                }
             }
 
             candidates = new List<(string, MediaSessionInfo, long)>(_recentSmtcBrowserTabs.Count);
@@ -507,14 +512,16 @@ internal sealed class MediaSessionManager : IDisposable
                 candidates.Add((kv.Key, kv.Value.Info, kv.Value.LastSeenTick));
         }
 
-        var collectedKeys = new HashSet<string>(collected.Select(s => s.AppKey), StringComparer.OrdinalIgnoreCase);
-        var toRemove = new List<string>();
+        var collectedKeys = new HashSet<string>(collected.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var s in collected)
+            collectedKeys.Add(s.AppKey);
+        List<string>? toRemove = null;
 
         foreach (var (key, cached, lastSeen) in candidates)
         {
             if (now - lastSeen > 600_000)
             {
-                toRemove.Add(key);
+                (toRemove ??= []).Add(key);
                 continue;
             }
 
@@ -524,27 +531,24 @@ internal sealed class MediaSessionManager : IDisposable
             string? browserKey = BrowserSiteScanner.ExtractBrowserKeyFromAppKey(cached.AppKey);
             if (string.IsNullOrEmpty(browserKey))
             {
-                toRemove.Add(key);
+                (toRemove ??= []).Add(key);
                 continue;
             }
 
-            var browserProcs = procSnapshot
-                .Where(p => p.Name.Equals(browserKey, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-            if (browserProcs.Count == 0)
+            if (!procsByName.TryGetValue(browserKey, out var browserProcs) || browserProcs.Count == 0)
             {
-                toRemove.Add(key);
+                (toRemove ??= []).Add(key);
                 continue;
             }
 
             if (now - lastSeen > 25_000 &&
                 !BrowserSiteScanner.IsSiteTabStillOpen(browserKey, cached.SiteKey, browserProcs, visibleWindows))
             {
-                toRemove.Add(key);
+                (toRemove ??= []).Add(key);
                 continue;
             }
 
-            int[] pids = browserProcs.Select(p => p.Pid).ToArray();
+            var (pids, _) = ExtractPidsAndExe(browserProcs);
             var (_, _, isMuted, volume, _) = AggregateAudioState(pids, audioByPid);
             string sessionId = $"smtc-tab:{cached.AppKey}";
             ApplyOptimisticVolumeLatch(sessionId, ref volume, ref isMuted);
@@ -571,7 +575,7 @@ internal sealed class MediaSessionManager : IDisposable
             collectedKeys.Add(cached.AppKey);
         }
 
-        if (toRemove.Count > 0)
+        if (toRemove != null && toRemove.Count > 0)
         {
             lock (_sessionsLock)
             {
@@ -581,14 +585,54 @@ internal sealed class MediaSessionManager : IDisposable
         }
     }
 
+    private static (int[] Pids, string ExePath) ExtractPidsAndExe(IReadOnlyList<RunningProcessInfo> procs)
+    {
+        var pids = new int[procs.Count];
+        string exePath = string.Empty;
+        for (int i = 0; i < procs.Count; i++)
+        {
+            var p = procs[i];
+            pids[i] = p.Pid;
+            if (exePath.Length == 0 && !string.IsNullOrEmpty(p.ExePath))
+                exePath = p.ExePath;
+        }
+        return (pids, exePath);
+    }
+
     private void CollectAudioFallbackSessions(
         List<MediaSessionInfo> collected,
         IReadOnlyList<RunningProcessInfo> procSnapshot,
         IReadOnlyList<Win32.VisibleWindowInfo> visibleWindows,
         Dictionary<uint, AudioProcessState> audioByPid)
     {
-        var coveredPids = new HashSet<int>();
-        var coveredKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        bool hasStickyTracking;
+        lock (_sessionsLock)
+        {
+            hasStickyTracking = _audioLastPeakTick.Count > 0 || _audioLastHeardTick.Count > 0;
+        }
+
+        if (hasStickyTracking)
+        {
+            var runningGroups = new HashSet<string>(64, StringComparer.OrdinalIgnoreCase);
+            foreach (var p in procSnapshot)
+            {
+                string gk = ProcessResolver.NormalizeAppGroupKey(p.Name);
+                if (!string.IsNullOrEmpty(gk))
+                    runningGroups.Add(gk);
+            }
+
+            lock (_sessionsLock)
+            {
+                PruneMissingKeys(_audioLastPeakTick, runningGroups);
+                PruneMissingKeys(_audioLastHeardTick, runningGroups);
+            }
+        }
+
+        if (audioByPid.Count == 0)
+            return;
+
+        var coveredPids = new HashSet<int>(collected.Count * 2);
+        var coveredKeys = new HashSet<string>(collected.Count * 2, StringComparer.OrdinalIgnoreCase);
 
         foreach (var existing in collected)
         {
@@ -607,12 +651,35 @@ internal sealed class MediaSessionManager : IDisposable
             }
         }
 
-        // Group running processes by canonical app group key (e.g. stremio + stremio-shell-ng -> "stremio")
-        var groups = new Dictionary<string, List<RunningProcessInfo>>(StringComparer.OrdinalIgnoreCase);
+        // First pass: identify candidate app group keys that actually own an uncovered WASAPI session
+        var audioGroupKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in procSnapshot)
+        {
+            if (p.Pid <= 0 || coveredPids.Contains(p.Pid) || !audioByPid.ContainsKey((uint)p.Pid))
+                continue;
+
+            string groupKey = ProcessResolver.NormalizeAppGroupKey(p.Name);
+            if (string.IsNullOrEmpty(groupKey) ||
+                ProcessResolver.IsIgnoredAudioProcess(groupKey) ||
+                coveredKeys.Contains(groupKey))
+            {
+                continue;
+            }
+
+            audioGroupKeys.Add(groupKey);
+        }
+
+        if (audioGroupKeys.Count == 0)
+            return;
+
+        // Second pass: collect all sibling processes for candidate audio groups only (e.g. stremio + stremio-shell-ng)
+        var groups = new Dictionary<string, List<RunningProcessInfo>>(audioGroupKeys.Count, StringComparer.OrdinalIgnoreCase);
         foreach (var p in procSnapshot)
         {
             string groupKey = ProcessResolver.NormalizeAppGroupKey(p.Name);
-            if (string.IsNullOrEmpty(groupKey)) continue;
+            if (!audioGroupKeys.Contains(groupKey))
+                continue;
+
             if (!groups.TryGetValue(groupKey, out var list))
             {
                 list = [];
@@ -622,16 +689,6 @@ internal sealed class MediaSessionManager : IDisposable
         }
 
         long now = Environment.TickCount64;
-
-        // Prune exited apps from audio sticky tracking
-        lock (_sessionsLock)
-        {
-            var stalePeak = _audioLastPeakTick.Keys.Where(k => !groups.ContainsKey(k)).ToList();
-            foreach (string k in stalePeak) _audioLastPeakTick.Remove(k);
-
-            var staleHeard = _audioLastHeardTick.Keys.Where(k => !groups.ContainsKey(k)).ToList();
-            foreach (string k in staleHeard) _audioLastHeardTick.Remove(k);
-        }
 
         foreach (var kv in groups)
         {
@@ -726,6 +783,23 @@ internal sealed class MediaSessionManager : IDisposable
             {
                 _stateStore.RecordDiscoveredApp(info.AppKey, info.DisplayName, info.ExePath);
             }
+        }
+    }
+
+    private static void PruneMissingKeys(Dictionary<string, long> dict, HashSet<string> runningGroups)
+    {
+        if (dict.Count == 0)
+            return;
+        List<string>? stale = null;
+        foreach (string k in dict.Keys)
+        {
+            if (!runningGroups.Contains(k))
+                (stale ??= []).Add(k);
+        }
+        if (stale != null)
+        {
+            foreach (string k in stale)
+                dict.Remove(k);
         }
     }
 

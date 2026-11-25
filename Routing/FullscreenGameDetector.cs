@@ -6,39 +6,42 @@ namespace Cueway.Routing;
 
 internal static unsafe class FullscreenGameDetector
 {
+    private static string ResolveExeName(uint pid)
+    {
+        string? cached = ProcessResolver.TryGetCachedProcessName((int)pid);
+        if (!string.IsNullOrEmpty(cached))
+            return cached;
+
+        string? exePath = Win32.TryGetProcessImagePath(pid);
+        return string.IsNullOrEmpty(exePath) ? string.Empty : Path.GetFileNameWithoutExtension(exePath);
+    }
+
     public static bool IsFullscreenGameActive(AppSettings settings)
     {
         nint fg = Win32.GetForegroundWindow();
         if (fg == 0 || fg == Win32.GetShellWindow())
             return false;
 
-        string cls = Win32.GetWindowClassName(fg);
-        if (cls is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd" or "NotifyIconOverflowWindow")
+        if (Win32.IsDesktopShellWindowClass(fg))
             return false;
 
         Win32.GetWindowThreadProcessId(fg, out uint pid);
         if (pid == 0 || pid == Environment.ProcessId)
             return false;
 
-        string? exePath = Win32.TryGetProcessImagePath(pid);
-        string exeName = string.IsNullOrEmpty(exePath) ? string.Empty : Path.GetFileNameWithoutExtension(exePath);
-
-        if (!string.IsNullOrEmpty(exeName))
+        string? exeName = null;
+        if (settings.GameBlacklistExes.Count > 0)
         {
-            foreach (string black in settings.GameBlacklistExes)
+            exeName = ResolveExeName(pid);
+            if (!string.IsNullOrEmpty(exeName))
             {
-                string norm = Path.GetFileNameWithoutExtension(black.Trim());
-                if (!string.IsNullOrEmpty(norm) && exeName.Equals(norm, StringComparison.OrdinalIgnoreCase))
-                    return true;
+                foreach (string black in settings.GameBlacklistExes)
+                {
+                    string norm = Path.GetFileNameWithoutExtension(black.Trim());
+                    if (!string.IsNullOrEmpty(norm) && exeName.Equals(norm, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
             }
-
-            // Do not treat browsers themselves as fullscreen games (e.g. fullscreen YouTube)
-            if (ProcessResolver.IsBrowserProcessName(exeName))
-                return false;
-
-            // Explorer desktop / shell host is not a game
-            if (exeName.Equals("explorer", StringComparison.OrdinalIgnoreCase))
-                return false;
         }
 
         if (!Win32.GetWindowRect(fg, out var rect))
@@ -73,6 +76,21 @@ internal static unsafe class FullscreenGameDetector
             mi.rcMonitor.Height > mi.rcWork.Height ||
             mi.rcMonitor.Width > mi.rcWork.Width;
 
-        return !hasCaption || coversTaskbar;
+        if (hasCaption && !coversTaskbar)
+            return false;
+
+        exeName ??= ResolveExeName(pid);
+        if (!string.IsNullOrEmpty(exeName))
+        {
+            // Do not treat browsers themselves as fullscreen games (e.g. fullscreen YouTube)
+            if (ProcessResolver.IsBrowserProcessName(exeName))
+                return false;
+
+            // Explorer desktop / shell host is not a game
+            if (exeName.Equals("explorer", StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        return true;
     }
 }

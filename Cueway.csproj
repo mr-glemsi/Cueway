@@ -13,7 +13,7 @@
     <LangVersion>latest</LangVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\Cueway.ico</ApplicationIcon>
-    <Version>1.0.4</Version>
+    <Version>1.0.5</Version>
     <Product>Cueway</Product>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
@@ -29,6 +29,9 @@
     <StackTraceSupport>false</StackTraceSupport>
     <EventSourceSupport>false</EventSourceSupport>
     <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+    <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
+    <MetricsSupport>false</MetricsSupport>
+    <StartupHookSupport>false</StartupHookSupport>
     <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
 
     <!-- Workstation + non-concurrent GC: minimum idle RAM and no background GC threads -->

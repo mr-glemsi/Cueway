@@ -9,13 +9,13 @@ public sealed class AppSettings
     public bool AlwaysOnTop { get; set; } = false;
     public bool AutoCheckUpdates { get; set; } = true;
     public bool MediaHookEnabled { get; set; } = true;
-    public bool TrayWheelVolumeEnabled { get; set; } = true;
+    public bool TrayWheelVolumeEnabled { get; set; } = false;
     public int VolumeStepPercent { get; set; } = 5;
     public bool OsdEnabled { get; set; } = false;
-    public bool AutoPauseEnabled { get; set; } = true;
-    public bool HeadphoneGuardEnabled { get; set; } = true;
+    public bool AutoPauseEnabled { get; set; } = false;
+    public bool HeadphoneGuardEnabled { get; set; } = false;
     public bool SoloModeEnabled { get; set; } = false;
-    public bool GameFullscreenGuardEnabled { get; set; } = true;
+    public bool GameFullscreenGuardEnabled { get; set; } = false;
     public bool TimelineScrubbingEnabled { get; set; } = true;
     public int SeekSeconds { get; set; } = 10;
     public int LongPressThresholdMs { get; set; } = 400;

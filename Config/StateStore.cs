@@ -17,6 +17,9 @@ internal sealed class StateStore
     private readonly object _lock = new();
     private readonly string _filePath;
     private AppState _state;
+    private volatile AppSettings _cachedSettingsSnapshot = new();
+    private volatile Dictionary<string, int> _priorityIndexCache = new(StringComparer.OrdinalIgnoreCase);
+    private volatile Dictionary<string, (string DisplayName, string ExePath, long LastSeenTick)> _discoveredFastCache = new(StringComparer.OrdinalIgnoreCase);
 
     public event Action? StateChanged;
 
@@ -46,6 +49,10 @@ internal sealed class StateStore
         }
 
         _state = LoadInternal();
+        lock (_lock)
+        {
+            RebuildCachesLocked();
+        }
         Strings.SetLanguage(_state.Settings.Language);
         UI.Theme.SetTheme(_state.Settings.Theme);
     }
@@ -92,7 +99,7 @@ internal sealed class StateStore
         s.HotkeyToggleWindow = HotkeyHelper.Normalize(s.HotkeyToggleWindow);
         s.HotkeyManualLock = HotkeyHelper.Normalize(s.HotkeyManualLock);
         s.HotkeySoloMode = HotkeyHelper.Normalize(s.HotkeySoloMode);
-        s.HotkeyPlayPause = HotkeyHelper.Normalize(s.HotkeyPlayPause);
+        s.HotkeyPlayPause = HotkeyHelper.Normalize(s.HotkeyPlayPause, allowAnySingleKey: true);
         if (string.IsNullOrWhiteSpace(s.MpvPipeName))
             s.MpvPipeName = "mpvsocket";
     }
@@ -112,39 +119,51 @@ internal sealed class StateStore
         }
     }
 
-    public AppSettings GetSettingsSnapshot()
+    private void RebuildCachesLocked()
     {
-        lock (_lock)
+        var s = _state.Settings;
+        _cachedSettingsSnapshot = new AppSettings
         {
-            var s = _state.Settings;
-            return new AppSettings
-            {
-                Language = s.Language,
-                Theme = s.Theme,
-                StartMinimized = s.StartMinimized,
-                MinimizeToTrayOnClose = s.MinimizeToTrayOnClose,
-                AlwaysOnTop = s.AlwaysOnTop,
-                AutoCheckUpdates = s.AutoCheckUpdates,
-                MediaHookEnabled = s.MediaHookEnabled,
-                TrayWheelVolumeEnabled = s.TrayWheelVolumeEnabled,
-                VolumeStepPercent = s.VolumeStepPercent,
-                OsdEnabled = s.OsdEnabled,
-                AutoPauseEnabled = s.AutoPauseEnabled,
-                HeadphoneGuardEnabled = s.HeadphoneGuardEnabled,
-                SoloModeEnabled = s.SoloModeEnabled,
-                GameFullscreenGuardEnabled = s.GameFullscreenGuardEnabled,
-                TimelineScrubbingEnabled = s.TimelineScrubbingEnabled,
-                SeekSeconds = s.SeekSeconds,
-                LongPressThresholdMs = s.LongPressThresholdMs,
-                HotkeyToggleWindow = s.HotkeyToggleWindow,
-                HotkeyManualLock = s.HotkeyManualLock,
-                HotkeySoloMode = s.HotkeySoloMode,
-                HotkeyPlayPause = s.HotkeyPlayPause,
-                MpvPipeName = s.MpvPipeName,
-                GameBlacklistExes = [.. s.GameBlacklistExes]
-            };
+            Language = s.Language,
+            Theme = s.Theme,
+            StartMinimized = s.StartMinimized,
+            MinimizeToTrayOnClose = s.MinimizeToTrayOnClose,
+            AlwaysOnTop = s.AlwaysOnTop,
+            AutoCheckUpdates = s.AutoCheckUpdates,
+            MediaHookEnabled = s.MediaHookEnabled,
+            TrayWheelVolumeEnabled = s.TrayWheelVolumeEnabled,
+            VolumeStepPercent = s.VolumeStepPercent,
+            OsdEnabled = s.OsdEnabled,
+            AutoPauseEnabled = s.AutoPauseEnabled,
+            HeadphoneGuardEnabled = s.HeadphoneGuardEnabled,
+            SoloModeEnabled = s.SoloModeEnabled,
+            GameFullscreenGuardEnabled = s.GameFullscreenGuardEnabled,
+            TimelineScrubbingEnabled = s.TimelineScrubbingEnabled,
+            SeekSeconds = s.SeekSeconds,
+            LongPressThresholdMs = s.LongPressThresholdMs,
+            HotkeyToggleWindow = s.HotkeyToggleWindow,
+            HotkeyManualLock = s.HotkeyManualLock,
+            HotkeySoloMode = s.HotkeySoloMode,
+            HotkeyPlayPause = s.HotkeyPlayPause,
+            MpvPipeName = s.MpvPipeName,
+            GameBlacklistExes = [.. s.GameBlacklistExes]
+        };
+
+        long nowTick = Environment.TickCount64;
+        var prio = new Dictionary<string, int>(_state.PriorityApps.Count, StringComparer.OrdinalIgnoreCase);
+        var disc = new Dictionary<string, (string DisplayName, string ExePath, long LastSeenTick)>(_state.PriorityApps.Count, StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < _state.PriorityApps.Count; i++)
+        {
+            var app = _state.PriorityApps[i];
+            if (!prio.ContainsKey(app.AppKey))
+                prio[app.AppKey] = i;
+            disc[app.AppKey] = (app.DisplayName, app.ExePath, nowTick);
         }
+        _priorityIndexCache = prio;
+        _discoveredFastCache = disc;
     }
+
+    public AppSettings GetSettingsSnapshot() => _cachedSettingsSnapshot;
 
     public List<DiscoveredApp> GetPriorityAppsSnapshot()
     {
@@ -174,6 +193,7 @@ internal sealed class StateStore
             NormalizeSettings(_state.Settings);
             Strings.SetLanguage(_state.Settings.Language);
             UI.Theme.SetTheme(_state.Settings.Theme);
+            RebuildCachesLocked();
             SaveInternal(_state);
         }
         StateChanged?.Invoke();
@@ -194,6 +214,7 @@ internal sealed class StateStore
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeyManualLock, exceptGlobalSlot: GlobalHotkeySlot.ManualLock);
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeySoloMode, exceptGlobalSlot: GlobalHotkeySlot.SoloMode);
             UI.Theme.SetTheme(_state.Settings.Theme);
+            RebuildCachesLocked();
             SaveInternal(_state);
         }
         StateChanged?.Invoke();
@@ -203,6 +224,14 @@ internal sealed class StateStore
     {
         if (string.IsNullOrWhiteSpace(appKey))
             return false;
+
+        if (_discoveredFastCache.TryGetValue(appKey, out var cached) &&
+            (string.IsNullOrWhiteSpace(exePath) || string.Equals(cached.ExePath, exePath, StringComparison.OrdinalIgnoreCase)) &&
+            (string.IsNullOrWhiteSpace(displayName) || string.Equals(cached.DisplayName, displayName, StringComparison.Ordinal)) &&
+            Environment.TickCount64 - cached.LastSeenTick < 60_000)
+        {
+            return false;
+        }
 
         bool changed = false;
         lock (_lock)
@@ -225,6 +254,7 @@ internal sealed class StateStore
                     changed = true;
                 }
                 existing.LastSeenUtc = DateTimeOffset.UtcNow;
+                RebuildCachesLocked();
                 if (changed)
                     SaveInternal(_state);
             }
@@ -237,6 +267,7 @@ internal sealed class StateStore
                     ExePath = exePath,
                     LastSeenUtc = DateTimeOffset.UtcNow
                 });
+                RebuildCachesLocked();
                 SaveInternal(_state);
                 changed = true;
             }
@@ -248,17 +279,7 @@ internal sealed class StateStore
     }
 
     public int GetPriorityIndex(string appKey)
-    {
-        lock (_lock)
-        {
-            for (int i = 0; i < _state.PriorityApps.Count; i++)
-            {
-                if (string.Equals(_state.PriorityApps[i].AppKey, appKey, StringComparison.OrdinalIgnoreCase))
-                    return i;
-            }
-            return int.MaxValue;
-        }
-    }
+        => _priorityIndexCache.TryGetValue(appKey, out int idx) ? idx : int.MaxValue;
 
     public bool MovePriorityApp(string appKey, int delta)
     {
@@ -275,6 +296,7 @@ internal sealed class StateStore
                     var item = _state.PriorityApps[idx];
                     _state.PriorityApps.RemoveAt(idx);
                     _state.PriorityApps.Insert(target, item);
+                    RebuildCachesLocked();
                     SaveInternal(_state);
                     moved = true;
                 }
@@ -297,6 +319,7 @@ internal sealed class StateStore
                 var item = _state.PriorityApps[idx];
                 _state.PriorityApps.RemoveAt(idx);
                 _state.PriorityApps.Insert(0, item);
+                RebuildCachesLocked();
                 SaveInternal(_state);
                 moved = true;
             }
@@ -308,7 +331,7 @@ internal sealed class StateStore
 
     public bool SetGlobalHotkey(GlobalHotkeySlot slot, string hotkey)
     {
-        string normalized = HotkeyHelper.Normalize(hotkey);
+        string normalized = HotkeyHelper.Normalize(hotkey, allowAnySingleKey: slot == GlobalHotkeySlot.PlayPause);
         lock (_lock)
         {
             ClearDuplicateHotkeyLocked(normalized, exceptGlobalSlot: slot);
@@ -327,6 +350,7 @@ internal sealed class StateStore
                     _state.Settings.HotkeyPlayPause = normalized;
                     break;
             }
+            RebuildCachesLocked();
             SaveInternal(_state);
         }
         StateChanged?.Invoke();
@@ -348,6 +372,7 @@ internal sealed class StateStore
             {
                 ClearDuplicateHotkeyLocked(normalized, exceptAppKey: appKey);
                 app.Hotkey = normalized;
+                RebuildCachesLocked();
                 SaveInternal(_state);
                 updated = true;
             }
@@ -411,6 +436,7 @@ internal sealed class StateStore
                 string.Equals(a.AppKey, appKey, StringComparison.OrdinalIgnoreCase));
             if (count > 0)
             {
+                RebuildCachesLocked();
                 SaveInternal(_state);
                 removed = true;
             }
@@ -427,6 +453,7 @@ internal sealed class StateStore
             if (_state.PriorityApps.Count == 0)
                 return;
             _state.PriorityApps.Clear();
+            RebuildCachesLocked();
             SaveInternal(_state);
         }
         StateChanged?.Invoke();

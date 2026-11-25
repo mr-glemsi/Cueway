@@ -31,6 +31,13 @@ internal static unsafe partial class CoreAudio
         public uint pid;
     }
 
+    public static uint AddRef(nint comPtr)
+    {
+        if (comPtr == 0) return 0;
+        nint* vtbl = *(nint**)comPtr;
+        return ((delegate* unmanaged[Stdcall]<nint, uint>)vtbl[1])(comPtr);
+    }
+
     public static void Release(nint comPtr)
     {
         if (comPtr == 0) return;

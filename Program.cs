@@ -17,7 +17,8 @@ internal static unsafe class Program
 {
     private const nuint TIMER_REFRESH_POLL = 8001;
     private const uint POLL_INTERVAL_VISIBLE_MS = 2000;
-    private const uint POLL_INTERVAL_HIDDEN_MS = 3500;
+    private const uint POLL_INTERVAL_HIDDEN_ACTIVE_MS = 3500;
+    private const uint POLL_INTERVAL_HIDDEN_IDLE_MS = 6000;
 
     [STAThread]
     private static int Main(string[] args)
@@ -61,6 +62,22 @@ internal static unsafe class Program
             keyboardHook.ToggleWindowRequested += () => mainWindow.BeginInvoke(() => mainWindow.ToggleVisibility());
             using var trayWheelHook = new TrayWheelHookService(stateStore, () => tray.TryGetIconRect(), engine, mainWindow.BeginInvoke);
 
+            bool isWindowVisible = false;
+            bool hasLiveSessions = false;
+            uint currentPollMs = 0;
+
+            void UpdatePollTimer()
+            {
+                uint desired = isWindowVisible
+                    ? POLL_INTERVAL_VISIBLE_MS
+                    : (hasLiveSessions ? POLL_INTERVAL_HIDDEN_ACTIVE_MS : POLL_INTERVAL_HIDDEN_IDLE_MS);
+                if (desired != currentPollMs && mainWindow.Handle != 0)
+                {
+                    currentPollMs = desired;
+                    Win32.SetTimer(mainWindow.Handle, TIMER_REFRESH_POLL, desired, 0);
+                }
+            }
+
             void ShutdownApp()
             {
                 Win32.KillTimer(mainWindow.Handle, TIMER_REFRESH_POLL);
@@ -70,11 +87,8 @@ internal static unsafe class Program
             mainWindow.ExitRequested += ShutdownApp;
             mainWindow.VisibilityChanged += visible =>
             {
-                Win32.SetTimer(
-                    mainWindow.Handle,
-                    TIMER_REFRESH_POLL,
-                    visible ? POLL_INTERVAL_VISIBLE_MS : POLL_INTERVAL_HIDDEN_MS,
-                    0);
+                isWindowVisible = visible;
+                UpdatePollTimer();
             };
 
             mainWindow.ConfigureHostHooks(
@@ -114,7 +128,16 @@ internal static unsafe class Program
             tray.ToggleSoloModeRequested += () => engine.ToggleSoloMode();
             tray.ExitRequested += ShutdownApp;
 
-            engine.StateChanged += snap => mainWindow.BeginInvoke(() => tray.Update(snap));
+            engine.StateChanged += snap => mainWindow.BeginInvoke(() =>
+            {
+                tray.Update(snap);
+                bool live = snap.Sessions.Count > 0;
+                if (live != hasLiveSessions)
+                {
+                    hasLiveSessions = live;
+                    UpdatePollTimer();
+                }
+            });
             engine.OsdRequested += msg => mainWindow.BeginInvoke(() => osd.ShowMessage(msg));
             updateService.UpdateAvailableNotified += ver => mainWindow.BeginInvoke(() =>
             {
@@ -130,13 +153,14 @@ internal static unsafe class Program
             trayWheelHook.Start();
 
             bool showAtStart = forceShow || (!startMinimized && !stateStore.GetSettingsSnapshot().StartMinimized);
-            Win32.SetTimer(
-                mainWindow.Handle,
-                TIMER_REFRESH_POLL,
-                showAtStart ? POLL_INTERVAL_VISIBLE_MS : POLL_INTERVAL_HIDDEN_MS,
-                0);
+            isWindowVisible = showAtStart;
+            UpdatePollTimer();
             _ = sessionManager.InitializeAsync();
             _ = startupService.RefreshScheduledTaskStatusAsync();
+            if (!showAtStart)
+            {
+                _ = Task.Delay(6000).ContinueWith(static _ => Win32.TrimWorkingSet());
+            }
 
 #if DEBUG
             string? previewArg = args.FirstOrDefault(a =>

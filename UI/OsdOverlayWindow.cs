@@ -14,6 +14,10 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
 
     private readonly DynamicIconRenderer _iconRenderer;
     private nint _hwnd;
+    private nint _fontTitle;
+    private nint _fontSub;
+    private uint _fontDpi;
+    private string? _fontFace;
     private bool _disposed;
 
     public OsdOverlayWindow(DynamicIconRenderer iconRenderer)
@@ -139,45 +143,40 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
             int textLeft = hIcon != 0 ? iconX + iconSize + Theme.Scale(12, dpi) : Theme.Scale(18, dpi);
             int textRight = width - Theme.Scale(16, dpi);
 
-            nint fTitle = Win32.CreateFontW(
-                -Theme.Scale(14, dpi), 0, 0, 0, Win32.FW_SEMIBOLD, 0, 0, 0,
-                1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, Strings.PreferredFontName);
-            nint fSub = Win32.CreateFontW(
-                -Theme.Scale(12, dpi), 0, 0, 0, Win32.FW_NORMAL, 0, 0, 0,
-                1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, Strings.PreferredFontName);
+            EnsureFonts(dpi);
 
-            try
+            if (_fontTitle != 0 && _fontSub != 0)
             {
-                nint oldFont = Win32.SelectObject(memDc, fTitle);
-                Win32.SetTextColor(memDc, Theme.ToColorRef(msg.IsWarning ? Theme.Amber : Theme.TextPrimary));
-                var r1 = new Win32.RECT
+                nint oldFont = Win32.SelectObject(memDc, _fontTitle);
+                try
                 {
-                    Left = textLeft,
-                    Top = Theme.Scale(13, dpi),
-                    Right = textRight,
-                    Bottom = Theme.Scale(34, dpi)
-                };
-                Win32.DrawTextW(memDc, msg.AppName, -1, &r1,
-                    Win32.DT_LEFT | Win32.DT_VCENTER | Win32.DT_SINGLELINE | Win32.DT_END_ELLIPSIS | Win32.DT_NOPREFIX);
+                    Win32.SetTextColor(memDc, Theme.ToColorRef(msg.IsWarning ? Theme.Amber : Theme.TextPrimary));
+                    var r1 = new Win32.RECT
+                    {
+                        Left = textLeft,
+                        Top = Theme.Scale(13, dpi),
+                        Right = textRight,
+                        Bottom = Theme.Scale(34, dpi)
+                    };
+                    Win32.DrawTextW(memDc, msg.AppName, -1, &r1,
+                        Win32.DT_LEFT | Win32.DT_VCENTER | Win32.DT_SINGLELINE | Win32.DT_END_ELLIPSIS | Win32.DT_NOPREFIX);
 
-                Win32.SelectObject(memDc, fSub);
-                Win32.SetTextColor(memDc, Theme.ToColorRef(Theme.TextSecondary));
-                var r2 = new Win32.RECT
+                    Win32.SelectObject(memDc, _fontSub);
+                    Win32.SetTextColor(memDc, Theme.ToColorRef(Theme.TextSecondary));
+                    var r2 = new Win32.RECT
+                    {
+                        Left = textLeft,
+                        Top = Theme.Scale(34, dpi),
+                        Right = textRight,
+                        Bottom = Theme.Scale(56, dpi)
+                    };
+                    Win32.DrawTextW(memDc, msg.Subtitle, -1, &r2,
+                        Win32.DT_LEFT | Win32.DT_VCENTER | Win32.DT_SINGLELINE | Win32.DT_END_ELLIPSIS | Win32.DT_NOPREFIX);
+                }
+                finally
                 {
-                    Left = textLeft,
-                    Top = Theme.Scale(34, dpi),
-                    Right = textRight,
-                    Bottom = Theme.Scale(56, dpi)
-                };
-                Win32.DrawTextW(memDc, msg.Subtitle, -1, &r2,
-                    Win32.DT_LEFT | Win32.DT_VCENTER | Win32.DT_SINGLELINE | Win32.DT_END_ELLIPSIS | Win32.DT_NOPREFIX);
-
-                Win32.SelectObject(memDc, oldFont);
-            }
-            finally
-            {
-                if (fTitle != 0) Win32.DeleteObject(fTitle);
-                if (fSub != 0) Win32.DeleteObject(fSub);
+                    Win32.SelectObject(memDc, oldFont);
+                }
             }
 
             // Restore alpha channel for pixels written by GDI DrawTextW / DrawIconEx
@@ -228,6 +227,42 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
         return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
+    private void EnsureFonts(uint dpi)
+    {
+        string face = Strings.PreferredFontName;
+        if (_fontTitle != 0 && _fontSub != 0 && _fontDpi == dpi &&
+            string.Equals(_fontFace, face, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        ReleaseFonts();
+        _fontTitle = Win32.CreateFontW(
+            -Theme.Scale(14, dpi), 0, 0, 0, Win32.FW_SEMIBOLD, 0, 0, 0,
+            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, face);
+        _fontSub = Win32.CreateFontW(
+            -Theme.Scale(12, dpi), 0, 0, 0, Win32.FW_NORMAL, 0, 0, 0,
+            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, face);
+        _fontDpi = dpi;
+        _fontFace = face;
+    }
+
+    private void ReleaseFonts()
+    {
+        if (_fontTitle != 0)
+        {
+            Win32.DeleteObject(_fontTitle);
+            _fontTitle = 0;
+        }
+        if (_fontSub != 0)
+        {
+            Win32.DeleteObject(_fontSub);
+            _fontSub = 0;
+        }
+        _fontDpi = 0;
+        _fontFace = null;
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
@@ -238,6 +273,7 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
             Win32.DestroyWindow(_hwnd);
             _hwnd = 0;
         }
+        ReleaseFonts();
         if (ReferenceEquals(_instance, this))
             _instance = null;
     }

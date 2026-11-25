@@ -99,6 +99,10 @@
     collectFromShadowHosts(knownHosts, out);
     if (out.length > 0) return out;
 
+    if (!forceShadowScan && document.hidden) {
+      return out;
+    }
+
     const now = Date.now();
     if (!forceShadowScan && now - lastShadowScanTs < 6000) {
       return out;
@@ -136,6 +140,15 @@
 
     const feedSite = isFeedSite();
     const stickyHost = hadMediaOnHost === normalizedHost() || isExplicitMediaPath();
+    if (candidates.length === 1) {
+      const only = candidates[0];
+      const muted = only.muted || only.volume === 0;
+      if (feedSite && muted && only !== lastActiveEl && !stickyHost) {
+        return null;
+      }
+      return only;
+    }
+
     let best = null;
     let bestScore = -1;
 
@@ -156,9 +169,11 @@
         if (el.classList.contains("html5-main-video") || el.closest("ytd-reel-video-renderer[is-active]")) {
           score += 150;
         }
-        const rect = el.getBoundingClientRect();
-        const area = Math.max(0, Math.min(rect.width * rect.height, 2_000_000));
-        score += Math.floor(area / 10000);
+        if (!document.hidden) {
+          const rect = el.getBoundingClientRect();
+          const area = Math.max(0, Math.min(rect.width * rect.height, 2_000_000));
+          score += Math.floor(area / 10000);
+        }
       } else {
         score += 50;
       }
@@ -347,16 +362,7 @@
   function reportState(force = false) {
     if (window.__wmrVersion !== WMR_VERSION) return;
     const state = buildState();
-    const signature = JSON.stringify({
-      hasMedia: state.hasMedia,
-      url: state.url,
-      title: state.title,
-      artist: state.artist,
-      isPlaying: state.isPlaying,
-      isMuted: state.isMuted,
-      volume: Math.round((state.volume ?? 1) * 100),
-      hasVideo: state.hasVideo
-    });
+    const signature = `${state.hasMedia ? 1 : 0}|${state.url || ""}|${state.title || ""}|${state.artist || ""}|${state.isPlaying ? 1 : 0}|${state.isMuted ? 1 : 0}|${Math.round((state.volume ?? 1) * 100)}|${state.hasVideo ? 1 : 0}`;
 
     if (force || signature !== lastSerialized) {
       lastSerialized = signature;

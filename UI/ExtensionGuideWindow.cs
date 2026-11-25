@@ -33,6 +33,13 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
     private readonly Dictionary<(int PtSize, int Weight, string Face, uint Dpi), nint> _fontCache = new();
 
     private nint _hwnd;
+    private nint _cursorArrow;
+    private nint _cursorHand;
+    private nint _backDc;
+    private nint _backBmp;
+    private nint _backOldBmp;
+    private int _backW;
+    private int _backH;
     private uint _dpi = 96;
     private int _clientW = 640;
     private int _clientH = 540;
@@ -64,6 +71,8 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
 
     private void CreateGuideWindow()
     {
+        _cursorArrow = Win32.LoadCursorW(0, Win32.IDC_ARROW);
+        _cursorHand = Win32.LoadCursorW(0, Win32.IDC_HAND);
         nint hInst = Win32.GetModuleHandleW(null);
         fixed (char* cls = ClassName)
         {
@@ -73,7 +82,7 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
                 style = Win32.CS_HREDRAW | Win32.CS_VREDRAW,
                 lpfnWndProc = &WndProc,
                 hInstance = hInst,
-                hCursor = Win32.LoadCursorW(0, Win32.IDC_ARROW),
+                hCursor = _cursorArrow,
                 lpszClassName = cls
             };
             Win32.RegisterClassExW(&wc);
@@ -154,8 +163,12 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
     {
         if (_hwnd == 0) return;
         _scrubbing = false;
+        _hoverId = null;
         Win32.KillTimer(_hwnd, TIMER_ANIM);
         Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
+        ReleaseBackBuffer();
+        ClearFontCache();
+        _hitRegions.Clear();
     }
 
     private void CenterOverOwner()
@@ -336,7 +349,7 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
         }
 
         string? nextHover = FindHit(mx, my)?.Id;
-        Win32.SetCursor(Win32.LoadCursorW(0, nextHover != null ? Win32.IDC_HAND : Win32.IDC_ARROW));
+        Win32.SetCursor(nextHover != null && _cursorHand != 0 ? _cursorHand : _cursorArrow);
 
         if (!string.Equals(nextHover, _hoverId, StringComparison.Ordinal))
         {
@@ -383,6 +396,67 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
     private static bool PointInRect(Win32.RECT r, int x, int y)
         => x >= r.Left && x < r.Right && y >= r.Top && y < r.Bottom;
 
+    private bool EnsureBackBuffer(nint referenceDc, int w, int h)
+    {
+        if (_backDc != 0 && _backBmp != 0 && _backW == w && _backH == h)
+            return true;
+
+        ReleaseBackBuffer();
+
+        nint memDc = Win32.CreateCompatibleDC(referenceDc);
+        if (memDc == 0)
+            return false;
+
+        var bmi = new Win32.BITMAPINFO
+        {
+            bmiHeader = new Win32.BITMAPINFOHEADER
+            {
+                biSize = (uint)sizeof(Win32.BITMAPINFOHEADER),
+                biWidth = w,
+                biHeight = -h,
+                biPlanes = 1,
+                biBitCount = 32
+            }
+        };
+
+        nint dib = Win32.CreateDIBSection(memDc, &bmi, 0, out _, 0, 0);
+        if (dib == 0)
+        {
+            Win32.DeleteDC(memDc);
+            return false;
+        }
+
+        nint oldBmp = Win32.SelectObject(memDc, dib);
+        Win32.SetBkMode(memDc, Win32.TRANSPARENT);
+        _backDc = memDc;
+        _backBmp = dib;
+        _backOldBmp = oldBmp;
+        _backW = w;
+        _backH = h;
+        return true;
+    }
+
+    private void ReleaseBackBuffer()
+    {
+        if (_backDc != 0)
+        {
+            if (_backOldBmp != 0)
+            {
+                Win32.SelectObject(_backDc, _backOldBmp);
+                _backOldBmp = 0;
+            }
+            Win32.DeleteDC(_backDc);
+            _backDc = 0;
+        }
+        if (_backBmp != 0)
+        {
+            Win32.DeleteObject(_backBmp);
+            _backBmp = 0;
+        }
+        _backW = 0;
+        _backH = 0;
+    }
+
     private void PaintWindow()
     {
         var ps = new Win32.PAINTSTRUCT();
@@ -397,45 +471,29 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
             return;
         }
 
-        nint memDc = Win32.CreateCompatibleDC(paintDc);
-        var bmi = new Win32.BITMAPINFO
-        {
-            bmiHeader = new Win32.BITMAPINFOHEADER
-            {
-                biSize = (uint)sizeof(Win32.BITMAPINFOHEADER),
-                biWidth = w,
-                biHeight = -h,
-                biPlanes = 1,
-                biBitCount = 32
-            }
-        };
-
-        nint dib = Win32.CreateDIBSection(memDc, &bmi, 0, out _, 0, 0);
-        nint oldBmp = dib != 0 ? Win32.SelectObject(memDc, dib) : 0;
         nint gfx = 0;
-
         try
         {
-            _hitRegions.Clear();
-            Win32.SetBkMode(memDc, Win32.TRANSPARENT);
+            if (!EnsureBackBuffer(paintDc, w, h))
+                return;
 
-            if (GdiPlus.GdipCreateFromHDC(memDc, out gfx) == 0 && gfx != 0)
+            _hitRegions.Clear();
+            Win32.SetBkMode(_backDc, Win32.TRANSPARENT);
+
+            if (GdiPlus.GdipCreateFromHDC(_backDc, out gfx) == 0 && gfx != 0)
             {
                 GdiPlus.GdipSetSmoothingMode(gfx, GdiPlus.SmoothingModeAntiAlias);
                 GdiPlus.GdipSetPixelOffsetMode(gfx, GdiPlus.PixelOffsetModeHighQuality);
                 GdiPlus.GdipGraphicsClear(gfx, GdiPlus.Argb(Theme.BgWindow));
 
-                RenderContent(memDc, gfx, w, h);
+                RenderContent(_backDc, gfx, w, h);
             }
 
-            Win32.BitBlt(paintDc, 0, 0, w, h, memDc, 0, 0, Win32.SRCCOPY);
+            Win32.BitBlt(paintDc, 0, 0, w, h, _backDc, 0, 0, Win32.SRCCOPY);
         }
         finally
         {
             if (gfx != 0) GdiPlus.GdipDeleteGraphics(gfx);
-            if (oldBmp != 0) Win32.SelectObject(memDc, oldBmp);
-            if (dib != 0) Win32.DeleteObject(dib);
-            if (memDc != 0) Win32.DeleteDC(memDc);
             Win32.EndPaint(_hwnd, &ps);
         }
     }
@@ -1186,6 +1244,7 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
             _hwnd = 0;
         }
         ClearFontCache();
+        ReleaseBackBuffer();
         if (ReferenceEquals(_instance, this))
             _instance = null;
     }

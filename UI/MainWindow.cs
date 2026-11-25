@@ -15,6 +15,10 @@ internal sealed unsafe class MainWindow : IDisposable
     private const string ClassName = "Cueway_MainWindow";
     public const uint WM_APP_DISPATCH = Win32.WM_APP + 200;
     public const uint WM_APP_SHUTDOWN_INSTANCE = Win32.WM_APP + 201;
+    private const nuint TIMER_UI_ANIM = 8050;
+    private const uint UI_ANIM_INTERVAL_MS = 16;
+    private const int UI_HIGHLIGHT_DURATION_MS = 900;
+    private const int UI_SLIDE_DURATION_MS = 180;
 
     private enum TabKind
     {
@@ -58,6 +62,14 @@ internal sealed unsafe class MainWindow : IDisposable
     private readonly Queue<Action> _uiQueue = new();
 
     private nint _hwnd;
+    private nint _cursorArrow;
+    private nint _cursorHand;
+    private nint _backDc;
+    private nint _backBmp;
+    private nint _backOldBmp;
+    private int _backW;
+    private int _backH;
+    private bool _uiDataDirty;
     private nint _windowBigIcon;
     private nint _windowSmallIcon;
     private uint _dpi = 96;
@@ -101,6 +113,13 @@ internal sealed unsafe class MainWindow : IDisposable
     private AppSettings _settings;
     private List<DiscoveredApp> _priorityApps;
     private UpdateSnapshot _updateSnapshot;
+
+    private string? _highlightPrioAppKey;
+    private int _highlightPrioDir;
+    private long _highlightPrioStartTick;
+    private string? _highlightTargetSessionId;
+    private long _highlightTargetStartTick;
+    private bool _uiAnimTimerActive;
 
     private Func<nuint, bool>? _timerCallback;
     private Action? _wakeOrUnlockCallback;
@@ -165,7 +184,7 @@ internal sealed unsafe class MainWindow : IDisposable
         _keyboardHook = keyboardHook;
     }
 
-    private void StartHotkeyCapture(string targetId, string hitId, Action<string> onCommit)
+    private void StartHotkeyCapture(string targetId, string hitId, Action<string> onCommit, bool allowAnySingleKey = false)
     {
         if (_keyboardHook == null)
             return;
@@ -211,7 +230,8 @@ internal sealed unsafe class MainWindow : IDisposable
 
                 _capturingPreview = null;
                 ShowStatusBanner(Strings.MsgHotkeyNeedsModifier, isError: true);
-            }));
+            }),
+            allowAnySingleKey: allowAnySingleKey);
 
         RequestRepaint();
     }
@@ -229,6 +249,8 @@ internal sealed unsafe class MainWindow : IDisposable
 
     private void CreateHostWindow()
     {
+        _cursorArrow = Win32.LoadCursorW(0, Win32.IDC_ARROW);
+        _cursorHand = Win32.LoadCursorW(0, Win32.IDC_HAND);
         nint hInst = Win32.GetModuleHandleW(null);
         fixed (char* cls = ClassName)
         {
@@ -238,7 +260,7 @@ internal sealed unsafe class MainWindow : IDisposable
                 style = Win32.CS_HREDRAW | Win32.CS_VREDRAW | Win32.CS_DBLCLKS,
                 lpfnWndProc = &WndProc,
                 hInstance = hInst,
-                hCursor = Win32.LoadCursorW(0, Win32.IDC_ARROW),
+                hCursor = _cursorArrow,
                 lpszClassName = cls
             };
             Win32.RegisterClassExW(&wc);
@@ -332,6 +354,12 @@ internal sealed unsafe class MainWindow : IDisposable
             _activeTab = TabKind.Settings;
             _scrollY = 0;
         }
+        if (_uiDataDirty)
+        {
+            _priorityApps = _stateStore.GetPriorityAppsSnapshot();
+            _settings = _stateStore.GetSettingsSnapshot();
+            _uiDataDirty = false;
+        }
         if (Win32.IsIconic(_hwnd))
             Win32.ShowWindow(_hwnd, Win32.SW_RESTORE);
         else
@@ -355,10 +383,7 @@ internal sealed unsafe class MainWindow : IDisposable
         if (_hwnd == 0) return;
         if (Win32.IsWindowVisible(_hwnd) && !Win32.IsIconic(_hwnd))
         {
-            CancelHotkeyCapture();
-            _openDropdown = DropdownKind.None;
-            Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
-            VisibilityChanged?.Invoke(false);
+            HideToTray();
         }
         else
         {
@@ -366,13 +391,150 @@ internal sealed unsafe class MainWindow : IDisposable
         }
     }
 
+    private void HideToTray()
+    {
+        if (_hwnd == 0) return;
+        CancelHotkeyCapture();
+        StopUiAnimTimer();
+        _highlightPrioAppKey = null;
+        _highlightPrioDir = 0;
+        _highlightPrioStartTick = 0;
+        _highlightTargetSessionId = null;
+        _highlightTargetStartTick = 0;
+        _openDropdown = DropdownKind.None;
+        _hoverId = null;
+        Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
+        ReleaseBackBuffer();
+        ClearFontCache();
+        _hitRegions.Clear();
+        _hitRegions.TrimExcess();
+        _sliderRegions.Clear();
+        _sliderRegions.TrimExcess();
+        VisibilityChanged?.Invoke(false);
+        Win32.TrimWorkingSet();
+    }
+
+    internal void TriggerPriorityMoveFeedback(string appKey, bool movedUp)
+    {
+        if (string.IsNullOrWhiteSpace(appKey))
+            return;
+        _highlightPrioAppKey = appKey;
+        _highlightPrioDir = movedUp ? -1 : 1;
+        _highlightPrioStartTick = Environment.TickCount64;
+        StartUiAnimTimer();
+        RequestRepaint();
+    }
+
+    internal void TriggerTargetChangeFeedback(string sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+            return;
+        _highlightTargetSessionId = sessionId;
+        _highlightTargetStartTick = Environment.TickCount64;
+        StartUiAnimTimer();
+        RequestRepaint();
+    }
+
+    private static float GetHighlightIntensity(long startTick, long now)
+    {
+        if (startTick == 0)
+            return 0f;
+        long elapsed = now - startTick;
+        if (elapsed < 0 || elapsed >= UI_HIGHLIGHT_DURATION_MS)
+            return 0f;
+        float t = (float)elapsed / UI_HIGHLIGHT_DURATION_MS;
+        float remain = 1f - t;
+        return remain * remain;
+    }
+
+    private int GetSlideOffsetPx(long startTick, int dir, long now)
+    {
+        if (startTick == 0 || dir == 0)
+            return 0;
+        long elapsed = now - startTick;
+        if (elapsed < 0 || elapsed >= UI_SLIDE_DURATION_MS)
+            return 0;
+        float t = (float)elapsed / UI_SLIDE_DURATION_MS;
+        float inv = 1f - t;
+        float ease = inv * inv * inv;
+        return (int)MathF.Round(-dir * S(14) * ease);
+    }
+
+    private static bool HasActiveUiAnimation(long startPrio, long startTarget, long now)
+        => GetHighlightIntensity(startPrio, now) > 0.005f ||
+           GetHighlightIntensity(startTarget, now) > 0.005f;
+
+    private void StartUiAnimTimer()
+    {
+        if (_hwnd != 0 && Win32.IsWindowVisible(_hwnd) && !_uiAnimTimerActive)
+        {
+            Win32.SetTimer(_hwnd, TIMER_UI_ANIM, UI_ANIM_INTERVAL_MS, 0);
+            _uiAnimTimerActive = true;
+        }
+    }
+
+    private void StopUiAnimTimer()
+    {
+        if (_uiAnimTimerActive && _hwnd != 0)
+        {
+            Win32.KillTimer(_hwnd, TIMER_UI_ANIM);
+            _uiAnimTimerActive = false;
+        }
+    }
+
+    private void HandleUiAnimTimer()
+    {
+        long now = Environment.TickCount64;
+        if (!Win32.IsWindowVisible(_hwnd))
+        {
+            _highlightPrioAppKey = null;
+            _highlightPrioDir = 0;
+            _highlightPrioStartTick = 0;
+            _highlightTargetSessionId = null;
+            _highlightTargetStartTick = 0;
+            StopUiAnimTimer();
+            return;
+        }
+
+        if (GetHighlightIntensity(_highlightPrioStartTick, now) <= 0.005f)
+        {
+            _highlightPrioAppKey = null;
+            _highlightPrioDir = 0;
+            _highlightPrioStartTick = 0;
+        }
+        if (GetHighlightIntensity(_highlightTargetStartTick, now) <= 0.005f)
+        {
+            _highlightTargetSessionId = null;
+            _highlightTargetStartTick = 0;
+        }
+
+        if (!HasActiveUiAnimation(_highlightPrioStartTick, _highlightTargetStartTick, now))
+        {
+            StopUiAnimTimer();
+        }
+        RequestRepaint();
+    }
+
     private void OnEngineStateChanged(RouterStateSnapshot snap)
     {
         BeginInvoke(() =>
         {
+            string? prevTargetId = _snapshot.ActiveTarget?.SessionId;
             _snapshot = snap;
+            if (!Win32.IsWindowVisible(_hwnd))
+            {
+                _uiDataDirty = true;
+                UpdateWindowIcon(snap);
+                return;
+            }
             _priorityApps = _stateStore.GetPriorityAppsSnapshot();
             _settings = _stateStore.GetSettingsSnapshot();
+            _uiDataDirty = false;
+            if (snap.ActiveTarget != null &&
+                !string.Equals(prevTargetId, snap.ActiveTarget.SessionId, StringComparison.Ordinal))
+            {
+                TriggerTargetChangeFeedback(snap.ActiveTarget.SessionId);
+            }
             UpdateWindowIcon(snap);
             RequestRepaint();
         });
@@ -382,12 +544,21 @@ internal sealed unsafe class MainWindow : IDisposable
     {
         BeginInvoke(() =>
         {
+            var prevPriorityApps = _priorityApps;
             _priorityApps = _stateStore.GetPriorityAppsSnapshot();
             var nextSettings = _stateStore.GetSettingsSnapshot();
             bool topChanged = _settings.AlwaysOnTop != nextSettings.AlwaysOnTop;
             bool langChanged = !string.Equals(_settings.Language, nextSettings.Language, StringComparison.OrdinalIgnoreCase);
             bool themeChanged = !string.Equals(_settings.Theme, nextSettings.Theme, StringComparison.OrdinalIgnoreCase);
             _settings = nextSettings;
+            if (Win32.IsWindowVisible(_hwnd) &&
+                prevPriorityApps.Count > 1 &&
+                _priorityApps.Count == prevPriorityApps.Count &&
+                !string.Equals(prevPriorityApps[0].AppKey, _priorityApps[0].AppKey, StringComparison.OrdinalIgnoreCase) &&
+                Environment.TickCount64 - _highlightPrioStartTick > 120)
+            {
+                TriggerPriorityMoveFeedback(_priorityApps[0].AppKey, movedUp: true);
+            }
             if (topChanged)
                 ApplyAlwaysOnTop(_settings.AlwaysOnTop);
             if (themeChanged)
@@ -409,11 +580,15 @@ internal sealed unsafe class MainWindow : IDisposable
 
     private void OnStartupStatusChanged()
     {
+        if (_disposed || _hwnd == 0 || !Win32.IsWindowVisible(_hwnd))
+            return;
         BeginInvoke(RequestRepaint);
     }
 
     private void OnBridgeStatusChanged()
     {
+        if (_disposed || _hwnd == 0 || !Win32.IsWindowVisible(_hwnd))
+            return;
         BeginInvoke(RequestRepaint);
     }
 
@@ -532,6 +707,11 @@ internal sealed unsafe class MainWindow : IDisposable
                 return 0;
 
             case Win32.WM_TIMER:
+                if (wParam == TIMER_UI_ANIM)
+                {
+                    inst.HandleUiAnimTimer();
+                    return 0;
+                }
                 if (inst._timerCallback != null && inst._timerCallback(wParam))
                     return 0;
                 break;
@@ -634,15 +814,14 @@ internal sealed unsafe class MainWindow : IDisposable
                 break;
 
             case Win32.WM_CLOSE:
-                inst.CancelHotkeyCapture();
-                inst._openDropdown = DropdownKind.None;
                 if (inst._settings.MinimizeToTrayOnClose)
                 {
-                    Win32.ShowWindow(hwnd, Win32.SW_HIDE);
-                    inst.VisibilityChanged?.Invoke(false);
+                    inst.HideToTray();
                 }
                 else
                 {
+                    inst.CancelHotkeyCapture();
+                    inst._openDropdown = DropdownKind.None;
                     inst.ExitRequested?.Invoke();
                 }
                 return 0;
@@ -676,7 +855,7 @@ internal sealed unsafe class MainWindow : IDisposable
         {
             float vol = Math.Clamp((float)(x - _dragTrackLeft) / Math.Max(1, _dragTrackWidth), 0f, 1f);
             _dragPreviewVolume = vol;
-            Win32.SetCursor(Win32.LoadCursorW(0, Win32.IDC_HAND));
+            Win32.SetCursor(_cursorHand != 0 ? _cursorHand : _cursorArrow);
 
             long nowTick = Environment.TickCount64;
             if (nowTick - _lastSliderDispatchTick >= 35)
@@ -691,7 +870,7 @@ internal sealed unsafe class MainWindow : IDisposable
         var slider = _openDropdown == DropdownKind.None ? FindSliderHit(x, y) : null;
         if (slider != null)
         {
-            Win32.SetCursor(Win32.LoadCursorW(0, Win32.IDC_HAND));
+            Win32.SetCursor(_cursorHand != 0 ? _cursorHand : _cursorArrow);
             if (!string.Equals(_hoverId, slider.Id, StringComparison.Ordinal))
             {
                 _hoverId = slider.Id;
@@ -703,7 +882,7 @@ internal sealed unsafe class MainWindow : IDisposable
         var hit = FindHit(x, y);
         string? nextHover = hit?.Id;
 
-        Win32.SetCursor(Win32.LoadCursorW(0, hit != null && hit.IsButton ? Win32.IDC_HAND : Win32.IDC_ARROW));
+        Win32.SetCursor(hit != null && hit.IsButton && _cursorHand != 0 ? _cursorHand : _cursorArrow);
 
         if (!string.Equals(_hoverId, nextHover, StringComparison.Ordinal))
         {
@@ -823,6 +1002,62 @@ internal sealed unsafe class MainWindow : IDisposable
     private int S(int px) => Theme.Scale(px, _dpi);
     private float SF(float px) => Theme.ScaleF(px, _dpi);
 
+    private bool EnsureBackBuffer(nint referenceDc, int w, int h)
+    {
+        if (_backDc != 0 && _backBmp != 0 && _backW == w && _backH == h)
+            return true;
+
+        ReleaseBackBuffer();
+
+        nint memDc = Win32.CreateCompatibleDC(referenceDc);
+        if (memDc == 0)
+            return false;
+
+        var bmi = new Win32.BITMAPINFO();
+        bmi.bmiHeader.biSize = (uint)sizeof(Win32.BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+
+        nint hBmp = Win32.CreateDIBSection(memDc, &bmi, 0, out _, 0, 0);
+        if (hBmp == 0)
+        {
+            Win32.DeleteDC(memDc);
+            return false;
+        }
+
+        nint oldBmp = Win32.SelectObject(memDc, hBmp);
+        Win32.SetBkMode(memDc, Win32.TRANSPARENT);
+        _backDc = memDc;
+        _backBmp = hBmp;
+        _backOldBmp = oldBmp;
+        _backW = w;
+        _backH = h;
+        return true;
+    }
+
+    private void ReleaseBackBuffer()
+    {
+        if (_backDc != 0)
+        {
+            if (_backOldBmp != 0)
+            {
+                Win32.SelectObject(_backDc, _backOldBmp);
+                _backOldBmp = 0;
+            }
+            Win32.DeleteDC(_backDc);
+            _backDc = 0;
+        }
+        if (_backBmp != 0)
+        {
+            Win32.DeleteObject(_backBmp);
+            _backBmp = 0;
+        }
+        _backW = 0;
+        _backH = 0;
+    }
+
     private void HandlePaint(nint hwnd)
     {
         var ps = new Win32.PAINTSTRUCT();
@@ -832,24 +1067,16 @@ internal sealed unsafe class MainWindow : IDisposable
         int w = Math.Max(1, _clientW);
         int h = Math.Max(1, _clientH);
 
-        nint memDc = Win32.CreateCompatibleDC(hdc);
-        var bmi = new Win32.BITMAPINFO();
-        bmi.bmiHeader.biSize = (uint)sizeof(Win32.BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = w;
-        bmi.bmiHeader.biHeight = -h;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-
-        nint hBmp = Win32.CreateDIBSection(memDc, &bmi, 0, out _, 0, 0);
-        nint oldBmp = Win32.SelectObject(memDc, hBmp);
-
         try
         {
+            if (!EnsureBackBuffer(hdc, w, h))
+                return;
+
             _hitRegions.Clear();
             _sliderRegions.Clear();
-            Win32.SetBkMode(memDc, Win32.TRANSPARENT);
+            Win32.SetBkMode(_backDc, Win32.TRANSPARENT);
 
-            if (GdiPlus.GdipCreateFromHDC(memDc, out nint gfx) == 0 && gfx != 0)
+            if (GdiPlus.GdipCreateFromHDC(_backDc, out nint gfx) == 0 && gfx != 0)
             {
                 try
                 {
@@ -860,13 +1087,13 @@ internal sealed unsafe class MainWindow : IDisposable
                     int barH = ShouldShowUpdateBar() ? S(46) : 0;
                     int topChromeH = headerH + barH;
                     _bodyClipTop = topChromeH;
-                    DrawScrollableBody(memDc, gfx, w, h, topChromeH);
+                    DrawScrollableBody(_backDc, gfx, w, h, topChromeH);
                     _bodyClipTop = 0;
-                    DrawHeader(memDc, gfx, w, headerH);
+                    DrawHeader(_backDc, gfx, w, headerH);
                     if (barH > 0)
-                        DrawUpdateBannerBar(memDc, gfx, w, headerH, barH);
+                        DrawUpdateBannerBar(_backDc, gfx, w, headerH, barH);
                     if (_activeTab == TabKind.Settings && _openDropdown != DropdownKind.None)
-                        DrawOpenDropdownOverlay(memDc, gfx, w, h, topChromeH);
+                        DrawOpenDropdownOverlay(_backDc, gfx, w, h, topChromeH);
                 }
                 finally
                 {
@@ -874,13 +1101,10 @@ internal sealed unsafe class MainWindow : IDisposable
                 }
             }
 
-            Win32.BitBlt(hdc, 0, 0, w, h, memDc, 0, 0, Win32.SRCCOPY);
+            Win32.BitBlt(hdc, 0, 0, w, h, _backDc, 0, 0, Win32.SRCCOPY);
         }
         finally
         {
-            Win32.SelectObject(memDc, oldBmp);
-            if (hBmp != 0) Win32.DeleteObject(hBmp);
-            Win32.DeleteDC(memDc);
             Win32.EndPaint(hwnd, &ps);
         }
     }
@@ -1266,10 +1490,32 @@ internal sealed unsafe class MainWindow : IDisposable
         }
         else
         {
+            long animNow = Environment.TickCount64;
+            bool hasHighlight = !string.IsNullOrEmpty(_highlightPrioAppKey) &&
+                                GetHighlightIntensity(_highlightPrioStartTick, animNow) > 0.005f;
+            int deferredIdx = -1;
+            int deferredY = 0;
+
             for (int i = 0; i < _priorityApps.Count; i++)
             {
+                if (hasHighlight &&
+                    deferredIdx < 0 &&
+                    string.Equals(_highlightPrioAppKey, _priorityApps[i].AppKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    deferredIdx = i;
+                    deferredY = y;
+                    y += S(54) + S(8);
+                    continue;
+                }
+
                 y = DrawPriorityRow(dc, gfx, x, y, w, _priorityApps[i], i, _priorityApps.Count, headerH);
                 y += S(8);
+            }
+
+            // Draw the highlighted row last so its outer halo & slide glide render cleanly over neighbors
+            if (deferredIdx >= 0)
+            {
+                DrawPriorityRow(dc, gfx, x, deferredY, w, _priorityApps[deferredIdx], deferredIdx, _priorityApps.Count, headerH);
             }
         }
 
@@ -1291,6 +1537,14 @@ internal sealed unsafe class MainWindow : IDisposable
             GdiPlus.Argb(Theme.BgCardElevated),
             GdiPlus.Argb(borderColor, target == null ? (byte)255 : (byte)190),
             1.4f);
+
+        float targetGlow = target != null && string.Equals(_highlightTargetSessionId, target.SessionId, StringComparison.Ordinal)
+            ? GetHighlightIntensity(_highlightTargetStartTick, Environment.TickCount64)
+            : 0f;
+        if (targetGlow > 0.01f)
+        {
+            DrawCardGlow(gfx, x, y, w, cardH, SF(12), isManual ? Theme.Amber : Theme.Accent, targetGlow);
+        }
 
         int pad = S(18);
         int iconBox = S(58);
@@ -1423,6 +1677,14 @@ internal sealed unsafe class MainWindow : IDisposable
 
         GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
             GdiPlus.Argb(bg), GdiPlus.Argb(border, isTarget || focusHovered ? (byte)195 : (byte)255), isTarget ? 1.2f : 1f);
+
+        float rowGlow = isTarget && string.Equals(_highlightTargetSessionId, session.SessionId, StringComparison.Ordinal)
+            ? GetHighlightIntensity(_highlightTargetStartTick, Environment.TickCount64)
+            : 0f;
+        if (rowGlow > 0.01f)
+        {
+            DrawCardGlow(gfx, x, y, w, rowH, SF(10), isLocked ? Theme.Amber : Theme.Accent, rowGlow);
+        }
 
         int pad = S(14);
         int icoSz = S(28);
@@ -1681,31 +1943,51 @@ internal sealed unsafe class MainWindow : IDisposable
     private int DrawPriorityRow(nint dc, nint gfx, int x, int y, int w, DiscoveredApp app, int index, int total, int headerH)
     {
         int rowH = S(54);
-        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
-            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+        long now = Environment.TickCount64;
+        bool isHighlighted = string.Equals(_highlightPrioAppKey, app.AppKey, StringComparison.OrdinalIgnoreCase);
+        float glow = isHighlighted ? GetHighlightIntensity(_highlightPrioStartTick, now) : 0f;
+        int drawY = y + (isHighlighted ? GetSlideOffsetPx(_highlightPrioStartTick, _highlightPrioDir, now) : 0);
+        bool isLiveActive = _snapshot.ActiveTarget != null &&
+                            string.Equals(_snapshot.ActiveTarget.AppKey, app.AppKey, StringComparison.OrdinalIgnoreCase);
+
+        uint cardBg = (glow > 0.01f || isLiveActive) ? Theme.BgCardElevated : Theme.BgCard;
+        uint cardBorder = isLiveActive ? GdiPlus.Argb(Theme.Accent, 145) : GdiPlus.Argb(Theme.BorderSubtle);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, drawY, w, rowH, SF(10),
+            GdiPlus.Argb(cardBg), cardBorder, isLiveActive ? 1.2f : 1f);
+
+        if (glow > 0.01f)
+        {
+            DrawCardGlow(gfx, x, drawY, w, rowH, SF(10), Theme.Accent, glow);
+            byte barAlpha = (byte)Math.Clamp(glow * 1.4f * 255f, 0f, 255f);
+            GdiPlus.FillRoundedRect(gfx, x + S(3), drawY + S(9), S(3), rowH - S(18), SF(1.5f),
+                GdiPlus.Argb(Theme.Accent, barAlpha));
+        }
 
         int pad = S(14);
         int rankW = S(30);
         int rankH = S(24);
-        int rankY = y + (rowH - rankH) / 2;
-        GdiPlus.FillRoundedRect(gfx, x + pad, rankY, rankW, rankH, SF(6), GdiPlus.Argb(index == 0 ? Theme.AccentSoft : Theme.BgControl));
-        DrawText(dc, $"#{index + 1}", x + pad, rankY, x + pad + rankW, rankY + rankH, 11, Win32.FW_BOLD,
-            index == 0 ? Theme.Accent : Theme.TextSecondary, centered: true);
+        int rankY = drawY + (rowH - rankH) / 2;
+        bool glowPill = glow > 0.05f;
+        uint pillBg = glowPill ? Theme.Accent : (index == 0 ? Theme.AccentSoft : Theme.BgControl);
+        uint pillFg = glowPill ? Theme.OnAccent : (index == 0 ? Theme.Accent : Theme.TextSecondary);
+        GdiPlus.FillRoundedRect(gfx, x + pad, rankY, rankW, rankH, SF(6), GdiPlus.Argb(pillBg));
+        DrawText(dc, $"#{index + 1}", x + pad, rankY, x + pad + rankW, rankY + rankH, 11, Win32.FW_BOLD, pillFg, centered: true);
 
         int icoX = x + pad + rankW + S(10);
         int icoSz = S(24);
         nint hIcon = _iconRenderer.GetIconForApp(app.AppKey, app.ExePath);
         if (hIcon != 0)
         {
-            Win32.DrawIconEx(dc, icoX, y + (rowH - icoSz) / 2, hIcon, icoSz, icoSz, 0, 0, Win32.DI_NORMAL);
+            Win32.DrawIconEx(dc, icoX, drawY + (rowH - icoSz) / 2, hIcon, icoSz, icoSz, 0, 0, Win32.DI_NORMAL);
         }
         else
         {
-            GdiPlus.FillRoundedRect(gfx, icoX, y + (rowH - icoSz) / 2, icoSz, icoSz, SF(6), GdiPlus.Argb(Theme.BgControl));
+            GdiPlus.FillRoundedRect(gfx, icoX, drawY + (rowH - icoSz) / 2, icoSz, icoSz, SF(6), GdiPlus.Argb(Theme.BgControl));
         }
 
         int btnSz = S(28);
-        int btnY = y + (rowH - btnSz) / 2;
+        int btnY = drawY + (rowH - btnSz) / 2;
+        int hitBtnY = y + (rowH - btnSz) / 2;
         int delX = x + w - pad - btnSz;
         int downX = delX - S(6) - btnSz;
         int upX = downX - S(6) - btnSz;
@@ -1727,34 +2009,58 @@ internal sealed unsafe class MainWindow : IDisposable
             ? (clrX - S(4) - pillW)
             : (upX - S(10) - pillW);
 
+        bool showDirBadge = glowPill && _highlightPrioDir != 0;
+        int dirBadgeSz = S(20);
+        int dirBadgeX = hkX - S(8) - dirBadgeSz;
+        if (showDirBadge)
+        {
+            int dirBadgeY = drawY + (rowH - dirBadgeSz) / 2;
+            byte badgeAlpha = (byte)Math.Clamp(glow * 255f, 0f, 255f);
+            GdiPlus.FillRoundedRect(gfx, dirBadgeX, dirBadgeY, dirBadgeSz, dirBadgeSz, SF(6),
+                GdiPlus.Argb(Theme.AccentSoft, badgeAlpha));
+            GdiPlus.DrawRoundedRect(gfx, dirBadgeX, dirBadgeY, dirBadgeSz, dirBadgeSz, SF(6),
+                GdiPlus.Argb(Theme.Accent, badgeAlpha), 1f);
+            DrawDirectionArrowGlyph(gfx, dirBadgeX + dirBadgeSz / 2f, dirBadgeY + dirBadgeSz / 2f,
+                SF(10f), _highlightPrioDir < 0, GdiPlus.Argb(Theme.Accent, badgeAlpha));
+        }
+
         int textX = icoX + icoSz + S(12);
-        int textRight = hkX - S(12);
-        DrawText(dc, app.DisplayName, textX, y + S(8), textRight, y + S(28), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        int textRight = showDirBadge ? (dirBadgeX - S(8)) : (hkX - S(12));
+        DrawText(dc, app.DisplayName, textX, drawY + S(8), textRight, drawY + S(28), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
         string? browserKey = BrowserSiteScanner.ExtractBrowserKeyFromAppKey(app.AppKey);
         string exeSub = string.IsNullOrWhiteSpace(app.ExePath) ? app.AppKey : app.ExePath;
         if (!string.IsNullOrEmpty(browserKey))
             exeSub = $"{ProcessResolver.FormatDisplayName(browserKey, app.ExePath)} • {exeSub}";
-        DrawText(dc, exeSub, textX, y + S(27), textRight, y + S(46), 11, Win32.FW_NORMAL, Theme.TextMuted);
+        DrawText(dc, exeSub, textX, drawY + S(27), textRight, drawY + S(46), 11, Win32.FW_NORMAL, Theme.TextMuted);
 
         if (y + rowH > headerH)
         {
             DrawHotkeyPillButton(dc, gfx, hkHitId, hkText, hkX, btnY, pillW, btnSz,
                 isCapturing: isCapturingThis,
                 hasValue: hasHk,
-                () => StartHotkeyCapture(hkTargetId, hkHitId, hk => _stateStore.SetPriorityAppHotkey(app.AppKey, hk)));
+                () => StartHotkeyCapture(hkTargetId, hkHitId, hk => _stateStore.SetPriorityAppHotkey(app.AppKey, hk)),
+                hitY: hitBtnY);
 
             if (hasHk && !isCapturingThis)
             {
-                DrawIconButton(dc, gfx, hkClrHitId, SmallButtonGlyph.Close, clrX, y + (rowH - clrSz) / 2, clrSz, true,
-                    () => _stateStore.SetPriorityAppHotkey(app.AppKey, string.Empty), danger: true);
+                DrawIconButton(dc, gfx, hkClrHitId, SmallButtonGlyph.Close, clrX, drawY + (rowH - clrSz) / 2, clrSz, true,
+                    () => _stateStore.SetPriorityAppHotkey(app.AppKey, string.Empty), danger: true, hitY: y + (rowH - clrSz) / 2);
             }
 
             DrawIconButton(dc, gfx, $"prio_up_{app.AppKey}", SmallButtonGlyph.Up, upX, btnY, btnSz, index > 0,
-                () => _stateStore.MovePriorityApp(app.AppKey, -1));
+                () =>
+                {
+                    if (_stateStore.MovePriorityApp(app.AppKey, -1))
+                        TriggerPriorityMoveFeedback(app.AppKey, movedUp: true);
+                }, hitY: hitBtnY);
             DrawIconButton(dc, gfx, $"prio_dn_{app.AppKey}", SmallButtonGlyph.Down, downX, btnY, btnSz, index < total - 1,
-                () => _stateStore.MovePriorityApp(app.AppKey, 1));
+                () =>
+                {
+                    if (_stateStore.MovePriorityApp(app.AppKey, 1))
+                        TriggerPriorityMoveFeedback(app.AppKey, movedUp: false);
+                }, hitY: hitBtnY);
             DrawIconButton(dc, gfx, $"prio_rm_{app.AppKey}", SmallButtonGlyph.Close, delX, btnY, btnSz, true,
-                () => _stateStore.RemovePriorityApp(app.AppKey), danger: true);
+                () => _stateStore.RemovePriorityApp(app.AppKey), danger: true, hitY: hitBtnY);
         }
 
         return y + rowH;
@@ -1974,7 +2280,8 @@ internal sealed unsafe class MainWindow : IDisposable
             Strings.SetHkPlayPauseTitle,
             Strings.SetHkPlayPauseSub,
             _settings.HotkeyPlayPause,
-            hk => _stateStore.SetGlobalHotkey(GlobalHotkeySlot.PlayPause, hk));
+            hk => _stateStore.SetGlobalHotkey(GlobalHotkeySlot.PlayPause, hk),
+            allowAnySingleKey: true);
         y += S(8);
 
         DrawText(dc, Strings.HotkeyHint, x + S(4), y, x + w - S(4), y + S(18), 10, Win32.FW_NORMAL, Theme.TextMuted);
@@ -2006,7 +2313,8 @@ internal sealed unsafe class MainWindow : IDisposable
 
     private int DrawHotkeySettingRow(
         nint dc, nint gfx, int x, int y, int w, int headerH,
-        string targetId, string title, string subtitle, string currentHotkey, Action<string> onCommit)
+        string targetId, string title, string subtitle, string currentHotkey, Action<string> onCommit,
+        bool allowAnySingleKey = false)
     {
         int rowH = S(62);
         GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
@@ -2016,7 +2324,7 @@ internal sealed unsafe class MainWindow : IDisposable
         string hitId = $"hk_set_{targetId}";
         string clrHitId = $"hk_clr_{targetId}";
         bool isCapturingThis = string.Equals(_capturingTargetId, targetId, StringComparison.Ordinal);
-        string formatted = HotkeyHelper.FormatDisplay(currentHotkey, spaced: true);
+        string formatted = HotkeyHelper.FormatDisplay(currentHotkey, spaced: true, allowAnySingleKey: allowAnySingleKey);
         bool hasValue = !string.IsNullOrEmpty(formatted);
 
         string pillText = isCapturingThis
@@ -2042,7 +2350,7 @@ internal sealed unsafe class MainWindow : IDisposable
             DrawHotkeyPillButton(dc, gfx, hitId, pillText, pillX, btnY, pillW, btnH,
                 isCapturing: isCapturingThis,
                 hasValue: hasValue,
-                () => StartHotkeyCapture(targetId, hitId, onCommit));
+                () => StartHotkeyCapture(targetId, hitId, onCommit, allowAnySingleKey: allowAnySingleKey));
 
             if (hasValue && !isCapturingThis)
             {
@@ -2056,7 +2364,7 @@ internal sealed unsafe class MainWindow : IDisposable
 
     private void DrawHotkeyPillButton(
         nint dc, nint gfx, string id, string text,
-        int x, int y, int w, int h, bool isCapturing, bool hasValue, Action onClick)
+        int x, int y, int w, int h, bool isCapturing, bool hasValue, Action onClick, int hitY = -1)
     {
         bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
         uint bg = isCapturing
@@ -2069,7 +2377,8 @@ internal sealed unsafe class MainWindow : IDisposable
             GdiPlus.Argb(bg), GdiPlus.Argb(border, isCapturing || hasValue ? (byte)220 : (byte)255),
             isCapturing ? 1.4f : 1f);
         DrawText(dc, text, x + S(6), y, x + w - S(6), y + h, 11, Win32.FW_SEMIBOLD, fg, centered: true);
-        RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + w, Bottom = y + h }, id, onClick);
+        int regY = hitY >= 0 ? hitY : y;
+        RegisterScrollableHit(new Win32.RECT { Left = x, Top = regY, Right = x + w, Bottom = regY + h }, id, onClick);
     }
 
     private int DrawUpdateCheckRow(nint dc, nint gfx, int x, int y, int w, int headerH)
@@ -2955,9 +3264,74 @@ internal sealed unsafe class MainWindow : IDisposable
         }
     }
 
+    private void DrawCardGlow(nint gfx, float x, float y, float w, float h, float radius, uint colorRgb, float intensity)
+    {
+        if (intensity <= 0.01f)
+            return;
+
+        float e2 = SF(3.2f);
+        GdiPlus.DrawRoundedRect(
+            gfx,
+            x - e2, y - e2, w + e2 * 2f, h + e2 * 2f,
+            radius + e2,
+            GdiPlus.Argb(colorRgb, (byte)Math.Clamp(intensity * (Theme.IsLight ? 48f : 68f), 0f, 255f)),
+            MathF.Max(2.2f, SF(2.8f)));
+
+        float e1 = SF(1.3f);
+        GdiPlus.DrawRoundedRect(
+            gfx,
+            x - e1, y - e1, w + e1 * 2f, h + e1 * 2f,
+            radius + e1,
+            GdiPlus.Argb(colorRgb, (byte)Math.Clamp(intensity * (Theme.IsLight ? 115f : 155f), 0f, 255f)),
+            MathF.Max(1.4f, SF(1.8f)));
+
+        GdiPlus.FillRoundedRect(
+            gfx,
+            x, y, w, h,
+            radius,
+            GdiPlus.Argb(colorRgb, (byte)Math.Clamp(intensity * (Theme.IsLight ? 24f : 36f), 0f, 255f)));
+
+        GdiPlus.DrawRoundedRect(
+            gfx,
+            x, y, w, h,
+            radius,
+            GdiPlus.Argb(colorRgb, (byte)Math.Clamp(intensity * 245f, 0f, 255f)),
+            MathF.Max(1.5f, SF(1.7f)));
+    }
+
+    private void DrawDirectionArrowGlyph(nint gfx, float cx, float cy, float size, bool up, uint argb)
+    {
+        if (GdiPlus.GdipCreatePen1(argb, MathF.Max(1.4f, SF(1.5f)), GdiPlus.UnitPixel, out nint pen) != 0 || pen == 0)
+            return;
+
+        try
+        {
+            GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
+            GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
+            float h = size * 0.42f;
+            float w = size * 0.34f;
+            if (up)
+            {
+                GdiPlus.GdipDrawLine(gfx, pen, cx, cy - h, cx, cy + h);
+                GdiPlus.GdipDrawLine(gfx, pen, cx - w, cy - h * 0.1f, cx, cy - h);
+                GdiPlus.GdipDrawLine(gfx, pen, cx + w, cy - h * 0.1f, cx, cy - h);
+            }
+            else
+            {
+                GdiPlus.GdipDrawLine(gfx, pen, cx, cy - h, cx, cy + h);
+                GdiPlus.GdipDrawLine(gfx, pen, cx - w, cy + h * 0.1f, cx, cy + h);
+                GdiPlus.GdipDrawLine(gfx, pen, cx + w, cy + h * 0.1f, cx, cy + h);
+            }
+        }
+        finally
+        {
+            GdiPlus.GdipDeletePen(pen);
+        }
+    }
+
     private enum SmallButtonGlyph { Up, Down, Close }
 
-    private void DrawIconButton(nint dc, nint gfx, string id, SmallButtonGlyph glyph, int x, int y, int sz, bool enabled, Action onClick, bool danger = false)
+    private void DrawIconButton(nint dc, nint gfx, string id, SmallButtonGlyph glyph, int x, int y, int sz, bool enabled, Action onClick, bool danger = false, int hitY = -1)
     {
         bool hovered = enabled && string.Equals(_hoverId, id, StringComparison.Ordinal);
         uint bg = !enabled ? Theme.BgCard : (hovered ? (danger ? Theme.RedSoft : Theme.BgControlHover) : Theme.BgControl);
@@ -2999,7 +3373,8 @@ internal sealed unsafe class MainWindow : IDisposable
 
         if (enabled)
         {
-            RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + sz, Bottom = y + sz }, id, onClick);
+            int regY = hitY >= 0 ? hitY : y;
+            RegisterScrollableHit(new Win32.RECT { Left = x, Top = regY, Right = x + sz, Bottom = regY + sz }, id, onClick);
         }
     }
 
@@ -3122,11 +3497,13 @@ internal sealed unsafe class MainWindow : IDisposable
 
         if (_hwnd != 0)
         {
+            StopUiAnimTimer();
             Win32.WTSUnRegisterSessionNotification(_hwnd);
             Win32.DestroyWindow(_hwnd);
             _hwnd = 0;
         }
         ClearFontCache();
+        ReleaseBackBuffer();
         if (_windowBigIcon != 0)
         {
             Win32.DestroyIcon(_windowBigIcon);

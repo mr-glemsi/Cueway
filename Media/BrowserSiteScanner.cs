@@ -48,41 +48,71 @@ internal static unsafe partial class BrowserSiteScanner
         "soundcloud"
     };
 
-    private static readonly Regex YouTubeMusicRx = new(@"(?i)(\bmusic\.youtube\.com\b|[-–—|·]\s*youtube\s+music\b|^youtube\s+music\b)", RegexOptions.Compiled);
-    private static readonly Regex YouTubeRx = new(@"(?i)(\byoutube\.com\b|\byoutu\.be\b|[-–—|·]\s*youtube\b|^youtube\b)", RegexOptions.Compiled);
-    private static readonly Regex XRx = new(
-        @"(?i)(\b([a-z0-9-]+\.)?(x|twitter)\.com\b|\b([a-z0-9-]+\.)?twimg\.com\b|\s/\s*x(\s+(ve|and|und|et|y|и)\s+\d+|\s*[-–—|·,:;()]|$)|\bon\s+x\s*:|\bx['’]te\b|\bx\s+üzerinde\s*:|\ben\s+x\s*:|\bauf\s+x\s*:|\bsur\s+x\s*:|\bв\s+x\s*:|x\s*上的|^x\s*[-–—|·])",
-        RegexOptions.Compiled);
-    private static readonly Regex StandaloneXRx = new(
-        @"^(?i)(\(\d+\+?\)\s*)?x$",
-        RegexOptions.Compiled);
-    private static readonly Regex TwitchRx = new(@"(?i)(\btwitch\.tv\b|[-–—|·]\s*twitch\b|^twitch\b)", RegexOptions.Compiled);
-    private static readonly Regex KickRx = new(@"(?i)(\bkick\.com\b|[-–—|·]\s*kick\b|^kick\b)", RegexOptions.Compiled);
-    private static readonly Regex SpotifyRx = new(@"(?i)(\bopen\.spotify\.com\b|\bspotify\s*[-–·—]|^spotify\b)", RegexOptions.Compiled);
-    private static readonly Regex SoundCloudRx = new(@"(?i)(\bsoundcloud\.com\b|[-–—|·]\s*soundcloud\b|\bsoundcloud\b)", RegexOptions.Compiled);
-    private static readonly Regex NetflixRx = new(@"(?i)(\bnetflix\.com\b|[-–—|·]\s*netflix\b|\bnetflix\b)", RegexOptions.Compiled);
-    private static readonly Regex InstagramRx = new(@"(?i)(\binstagram\.com\b|[-–—|·•]\s*instagram\b|^instagram\b)", RegexOptions.Compiled);
-    private static readonly Regex TikTokRx = new(@"(?i)(\btiktok\.com\b|[-–—|·]\s*tiktok\b|^tiktok\b)", RegexOptions.Compiled);
-    private static readonly Regex RedditRx = new(@"(?i)(\breddit\.com\b|\bv\.redd\.it\b|[-–—|·]\s*reddit\b)", RegexOptions.Compiled);
-    private static readonly Regex FacebookRx = new(@"(?i)(\bfacebook\.com\b|\bfb\.watch\b|[-–—|·]\s*facebook\b)", RegexOptions.Compiled);
-    private static readonly Regex DisneyRx = new(@"(?i)(\bdisneyplus\.com\b|disney\s*\+)", RegexOptions.Compiled);
-    private static readonly Regex PrimeRx = new(@"(?i)(\bprimevideo\.com\b|prime\s*video)", RegexOptions.Compiled);
-    private static readonly Regex VimeoRx = new(@"(?i)(\bvimeo\.com\b|\bvimeo\b)", RegexOptions.Compiled);
-    private static readonly Regex DailymotionRx = new(@"(?i)(\bdailymotion\.com\b|\bdailymotion\b)", RegexOptions.Compiled);
-    private static readonly Regex BilibiliRx = new(@"(?i)(\bbilibili\.com\b|\bbilibili\b)", RegexOptions.Compiled);
+    [GeneratedRegex(@"(\bmusic\.youtube\.com\b|[-–—|·]\s*youtube\s+music\b|^youtube\s+music\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex YouTubeMusicRx();
 
-    private static readonly Regex BrowserSuffixRx = new(
-        @"(?i)\s*[-–—|]\s*(Microsoft\s*Edge|Google\s*Chrome|Brave|Zen\s*Browser|Zen|Mozilla\s*Firefox|Firefox|Opera(\s*GX)?|Vivaldi|Arc|Floorp|LibreWolf|Waterfox)\s*$",
-        RegexOptions.Compiled);
-    private static readonly Regex EdgeProfileSuffixRx = new(
-        @"(?i)\s*[-–—|]\s*(Kişisel|Personal|Work|İş|Profil\s*\d*|Profile\s*\d*)\s*$",
-        RegexOptions.Compiled);
-    private static readonly Regex EdgeMoreTabsTailRx = new(
-        @"(?i)\s+(ve\s+\d+\s+sayfa\s+daha|ve\s+diğer\s+\d+\s+sayfa|ve\s+\d+\s+diğer\s+sayfa|and\s+\d+\s+more\s+pages?|und\s+\d+\s+weitere\s+Seiten?|et\s+\d+\s+pages?\s+suppl[ée]mentaires?|y\s+\d+\s+p[áa]ginas?\s+m[áa]s|и\s+ещё\s+\d+\s+страниц\S*)(?:\s*[-–—|].*)?$",
-        RegexOptions.Compiled);
-    private static readonly Regex TabAudioStateRx = new(
-        @"(?i)(?:\s*[-–—|,]\s*|\s*\()(Ses\s+çalıyor|Ses\s+çalınıyor|Ses\s+yürütülüyor|Ses\s+yürütüyor|Ses\s+oynatılıyor|Ses\s+oynatıyor|Sesi\s+kapatıldı|Sesi\s+kısıldı|Sessize\s+alındı|Uyku\s+modunda|Uyku\s+modundaki\s+sekme|Sabitlendi|Playing\s+audio|Audio\s+playing|Audio\s+is\s+playing|Tab\s+is\s+playing\s+audio|Audio\s+wird\s+wiedergegeben|Contenu\s+audio\s+en\s+cours\s+de\s+lecture|Reproduciendo\s+audio|Воспроизводится\s+звук|正在播放音频|正在播放聲音|Sleeping\s+tab|Pinned|Muted)\)?\s*$",
-        RegexOptions.Compiled);
+    [GeneratedRegex(@"(\byoutube\.com\b|\byoutu\.be\b|[-–—|·]\s*youtube\b|^youtube\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex YouTubeRx();
+
+    [GeneratedRegex(@"(\b([a-z0-9-]+\.)?(x|twitter)\.com\b|\b([a-z0-9-]+\.)?twimg\.com\b|\s/\s*x(\s+(ve|and|und|et|y|и)\s+\d+|\s*[-–—|·,:;()]|$)|\bon\s+x\s*:|\bx['’]te\b|\bx\s+üzerinde\s*:|\ben\s+x\s*:|\bauf\s+x\s*:|\bsur\s+x\s*:|\bв\s+x\s*:|x\s*上的|^x\s*[-–—|·])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex XRx();
+
+    [GeneratedRegex(@"^(\(\d+\+?\)\s*)?x$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex StandaloneXRx();
+
+    [GeneratedRegex(@"(\btwitch\.tv\b|[-–—|·]\s*twitch\b|^twitch\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex TwitchRx();
+
+    [GeneratedRegex(@"(\bkick\.com\b|[-–—|·]\s*kick\b|^kick\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex KickRx();
+
+    [GeneratedRegex(@"(\bopen\.spotify\.com\b|\bspotify\s*[-–·—]|^spotify\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SpotifyRx();
+
+    [GeneratedRegex(@"(\bsoundcloud\.com\b|[-–—|·]\s*soundcloud\b|\bsoundcloud\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SoundCloudRx();
+
+    [GeneratedRegex(@"(\bnetflix\.com\b|[-–—|·]\s*netflix\b|\bnetflix\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex NetflixRx();
+
+    [GeneratedRegex(@"(\binstagram\.com\b|[-–—|·•]\s*instagram\b|^instagram\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex InstagramRx();
+
+    [GeneratedRegex(@"(\btiktok\.com\b|[-–—|·]\s*tiktok\b|^tiktok\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex TikTokRx();
+
+    [GeneratedRegex(@"(\breddit\.com\b|\bv\.redd\.it\b|[-–—|·]\s*reddit\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex RedditRx();
+
+    [GeneratedRegex(@"(\bfacebook\.com\b|\bfb\.watch\b|[-–—|·]\s*facebook\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex FacebookRx();
+
+    [GeneratedRegex(@"(\bdisneyplus\.com\b|disney\s*\+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex DisneyRx();
+
+    [GeneratedRegex(@"(\bprimevideo\.com\b|prime\s*video)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex PrimeRx();
+
+    [GeneratedRegex(@"(\bvimeo\.com\b|\bvimeo\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex VimeoRx();
+
+    [GeneratedRegex(@"(\bdailymotion\.com\b|\bdailymotion\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex DailymotionRx();
+
+    [GeneratedRegex(@"(\bbilibili\.com\b|\bbilibili\b)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex BilibiliRx();
+
+    [GeneratedRegex(@"\s*[-–—|]\s*(Microsoft\s*Edge|Google\s*Chrome|Brave|Zen\s*Browser|Zen|Mozilla\s*Firefox|Firefox|Opera(\s*GX)?|Vivaldi|Arc|Floorp|LibreWolf|Waterfox)\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex BrowserSuffixRx();
+
+    [GeneratedRegex(@"\s*[-–—|]\s*(Kişisel|Personal|Work|İş|Profil\s*\d*|Profile\s*\d*)\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex EdgeProfileSuffixRx();
+
+    [GeneratedRegex(@"\s+(ve\s+\d+\s+sayfa\s+daha|ve\s+diğer\s+\d+\s+sayfa|ve\s+\d+\s+diğer\s+sayfa|and\s+\d+\s+more\s+pages?|und\s+\d+\s+weitere\s+Seiten?|et\s+\d+\s+pages?\s+suppl[ée]mentaires?|y\s+\d+\s+p[áa]ginas?\s+m[áa]s|и\s+ещё\s+\d+\s+страниц\S*)(?:\s*[-–—|].*)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex EdgeMoreTabsTailRx();
+
+    [GeneratedRegex(@"(?:\s*[-–—|,]\s*|\s*\()(Ses\s+çalıyor|Ses\s+çalınıyor|Ses\s+yürütülüyor|Ses\s+yürütüyor|Ses\s+oynatılıyor|Ses\s+oynatıyor|Sesi\s+kapatıldı|Sesi\s+kısıldı|Sessize\s+alındı|Uyku\s+modunda|Uyku\s+modundaki\s+sekme|Sabitlendi|Playing\s+audio|Audio\s+playing|Audio\s+is\s+playing|Tab\s+is\s+playing\s+audio|Audio\s+wird\s+wiedergegeben|Contenu\s+audio\s+en\s+cours\s+de\s+lecture|Reproduciendo\s+audio|Воспроизводится\s+звук|正在播放音频|正在播放聲音|Sleeping\s+tab|Pinned|Muted)\)?\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex TabAudioStateRx();
 
     public static bool IsMusicSite(string? siteKey)
         => !string.IsNullOrEmpty(siteKey) && MusicSiteKeys.Contains(siteKey);
@@ -148,10 +178,10 @@ internal static unsafe partial class BrowserSiteScanner
         for (int pass = 0; pass < 4; pass++)
         {
             string prev = s;
-            s = TabAudioStateRx.Replace(s, string.Empty).Trim();
-            s = BrowserSuffixRx.Replace(s, string.Empty).Trim();
-            s = EdgeProfileSuffixRx.Replace(s, string.Empty).Trim();
-            s = EdgeMoreTabsTailRx.Replace(s, string.Empty).Trim();
+            s = TabAudioStateRx().Replace(s, string.Empty).Trim();
+            s = BrowserSuffixRx().Replace(s, string.Empty).Trim();
+            s = EdgeProfileSuffixRx().Replace(s, string.Empty).Trim();
+            s = EdgeMoreTabsTailRx().Replace(s, string.Empty).Trim();
             if (string.Equals(s, prev, StringComparison.Ordinal))
                 break;
         }
@@ -176,25 +206,25 @@ internal static unsafe partial class BrowserSiteScanner
 
     private static string? DetectSiteCore(string text, bool allowStandaloneX)
     {
-        if (YouTubeMusicRx.IsMatch(text)) return "youtubemusic";
-        if (YouTubeRx.IsMatch(text)) return "youtube";
-        if (XRx.IsMatch(text)) return "x";
-        if (TwitchRx.IsMatch(text)) return "twitch";
-        if (KickRx.IsMatch(text)) return "kick";
-        if (SpotifyRx.IsMatch(text)) return "spotifyweb";
-        if (SoundCloudRx.IsMatch(text)) return "soundcloud";
-        if (NetflixRx.IsMatch(text)) return "netflix";
-        if (InstagramRx.IsMatch(text)) return "instagram";
-        if (TikTokRx.IsMatch(text)) return "tiktok";
-        if (RedditRx.IsMatch(text)) return "reddit";
-        if (FacebookRx.IsMatch(text)) return "facebook";
-        if (DisneyRx.IsMatch(text)) return "disneyplus";
-        if (PrimeRx.IsMatch(text)) return "primevideo";
-        if (VimeoRx.IsMatch(text)) return "vimeo";
-        if (DailymotionRx.IsMatch(text)) return "dailymotion";
-        if (BilibiliRx.IsMatch(text)) return "bilibili";
+        if (YouTubeMusicRx().IsMatch(text)) return "youtubemusic";
+        if (YouTubeRx().IsMatch(text)) return "youtube";
+        if (XRx().IsMatch(text)) return "x";
+        if (TwitchRx().IsMatch(text)) return "twitch";
+        if (KickRx().IsMatch(text)) return "kick";
+        if (SpotifyRx().IsMatch(text)) return "spotifyweb";
+        if (SoundCloudRx().IsMatch(text)) return "soundcloud";
+        if (NetflixRx().IsMatch(text)) return "netflix";
+        if (InstagramRx().IsMatch(text)) return "instagram";
+        if (TikTokRx().IsMatch(text)) return "tiktok";
+        if (RedditRx().IsMatch(text)) return "reddit";
+        if (FacebookRx().IsMatch(text)) return "facebook";
+        if (DisneyRx().IsMatch(text)) return "disneyplus";
+        if (PrimeRx().IsMatch(text)) return "primevideo";
+        if (VimeoRx().IsMatch(text)) return "vimeo";
+        if (DailymotionRx().IsMatch(text)) return "dailymotion";
+        if (BilibiliRx().IsMatch(text)) return "bilibili";
 
-        if (allowStandaloneX && StandaloneXRx.IsMatch(text.Trim()))
+        if (allowStandaloneX && StandaloneXRx().IsMatch(text.Trim()))
             return "x";
 
         return null;
@@ -287,7 +317,7 @@ internal static unsafe partial class BrowserSiteScanner
 
         lock (PwaCacheLock)
         {
-            if (PwaAumidCache.Count >= 64)
+            if (PwaAumidCache.Count >= 128)
                 PwaAumidCache.Clear();
             PwaAumidCache[cacheKey] = resolved;
         }
@@ -493,7 +523,7 @@ internal static unsafe partial class BrowserSiteScanner
         string key = $"{browserAppKey.ToLowerInvariant()}|{trimmed}";
         lock (StickyLock)
         {
-            if (StickySiteCache.Count >= 64 && !StickySiteCache.ContainsKey(key))
+            if (StickySiteCache.Count >= 256 && !StickySiteCache.ContainsKey(key))
                 StickySiteCache.Clear();
             StickySiteCache[key] = info;
         }

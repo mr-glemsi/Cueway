@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
@@ -18,6 +19,7 @@ internal sealed class BrowserBridgeServer : IDisposable
     private const int MaxConnections = 16;
     private const int MaxTabsPerConnection = 100;
     private const string WebSocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    private static readonly byte[] PongPayload = "{\"type\":\"pong\"}"u8.ToArray();
 
     private sealed class BridgeClientConnection : IDisposable
     {
@@ -41,12 +43,14 @@ internal sealed class BrowserBridgeServer : IDisposable
         {
             if (_disposed) return false;
             await WriteLock.WaitAsync(ct).ConfigureAwait(false);
+            byte[]? frame = null;
             try
             {
                 if (_disposed) return false;
                 int len = payload.Length;
                 int hdrLen = len <= 125 ? 2 : (len <= 65535 ? 4 : 10);
-                byte[] frame = new byte[hdrLen + len];
+                int totalLen = hdrLen + len;
+                frame = ArrayPool<byte>.Shared.Rent(totalLen);
                 frame[0] = (byte)(0x80 | (opcode & 0x0F));
 
                 if (len <= 125)
@@ -67,7 +71,7 @@ internal sealed class BrowserBridgeServer : IDisposable
                 if (len > 0)
                     payload.Span.CopyTo(frame.AsSpan(hdrLen));
 
-                await Stream.WriteAsync(frame, ct).ConfigureAwait(false);
+                await Stream.WriteAsync(frame.AsMemory(0, totalLen), ct).ConfigureAwait(false);
                 await Stream.FlushAsync(ct).ConfigureAwait(false);
                 return true;
             }
@@ -77,6 +81,7 @@ internal sealed class BrowserBridgeServer : IDisposable
             }
             finally
             {
+                if (frame != null) ArrayPool<byte>.Shared.Return(frame);
                 try { WriteLock.Release(); } catch { }
             }
         }
@@ -472,84 +477,98 @@ internal sealed class BrowserBridgeServer : IDisposable
                 break;
 
             int intLen = (int)payloadLen;
-            byte[] payload = intLen > 0 ? new byte[intLen] : [];
-            if (intLen > 0)
+            byte[]? payload = intLen > 0 ? ArrayPool<byte>.Shared.Rent(intLen) : null;
+            try
             {
-                if (!await ReadExactAsync(conn.Stream, payload, intLen, ct).ConfigureAwait(false))
-                    break;
+                if (payload != null && intLen > 0)
+                {
+                    if (!await ReadExactAsync(conn.Stream, payload, intLen, ct).ConfigureAwait(false))
+                        break;
 
-                for (int i = 0; i < intLen; i++)
-                    payload[i] ^= maskKey[i & 3];
+                    for (int i = 0; i < intLen; i++)
+                        payload[i] ^= maskKey[i & 3];
+                }
+
+                switch (opcode)
+                {
+                    case 0x8: // Close
+                        await conn.SendFrameAsync(0x8, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
+                        return;
+
+                    case 0x9: // Ping
+                        await conn.SendFrameAsync(0xA, payload != null ? payload.AsMemory(0, intLen) : ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
+                        break;
+
+                    case 0xA: // Pong
+                        break;
+
+                    case 0x1: // Text
+                        if (fin && fragmentBuffer.Length == 0)
+                        {
+                            var msg = TryDeserializeMessage(payload != null ? payload.AsSpan(0, intLen) : ReadOnlySpan<byte>.Empty);
+                            if (msg != null)
+                                await HandleParsedMessageAsync(conn, msg).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            fragmentedOpcode = 0x1;
+                            fragmentBuffer.SetLength(0);
+                            if (payload != null && intLen > 0)
+                                fragmentBuffer.Write(payload, 0, intLen);
+                            if (fin)
+                            {
+                                var msg = TryDeserializeMessage(fragmentBuffer.GetBuffer().AsSpan(0, (int)fragmentBuffer.Length));
+                                fragmentBuffer.SetLength(0);
+                                if (msg != null)
+                                    await HandleParsedMessageAsync(conn, msg).ConfigureAwait(false);
+                            }
+                        }
+                        break;
+
+                    case 0x0: // Continuation
+                        if (fragmentedOpcode == 0x1)
+                        {
+                            if (fragmentBuffer.Length + intLen > MaxPayloadBytes)
+                                return;
+                            if (payload != null && intLen > 0)
+                                fragmentBuffer.Write(payload, 0, intLen);
+                            if (fin)
+                            {
+                                var msg = TryDeserializeMessage(fragmentBuffer.GetBuffer().AsSpan(0, (int)fragmentBuffer.Length));
+                                fragmentBuffer.SetLength(0);
+                                fragmentedOpcode = 0;
+                                if (msg != null)
+                                    await HandleParsedMessageAsync(conn, msg).ConfigureAwait(false);
+                            }
+                        }
+                        break;
+                }
             }
-
-            switch (opcode)
+            finally
             {
-                case 0x8: // Close
-                    await conn.SendFrameAsync(0x8, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
-                    return;
-
-                case 0x9: // Ping
-                    await conn.SendFrameAsync(0xA, payload, ct).ConfigureAwait(false);
-                    break;
-
-                case 0xA: // Pong
-                    break;
-
-                case 0x1: // Text
-                    if (fin && fragmentBuffer.Length == 0)
-                    {
-                        await HandleJsonMessageAsync(conn, Encoding.UTF8.GetString(payload)).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        fragmentedOpcode = 0x1;
-                        fragmentBuffer.SetLength(0);
-                        fragmentBuffer.Write(payload, 0, payload.Length);
-                        if (fin)
-                        {
-                            string full = Encoding.UTF8.GetString(fragmentBuffer.GetBuffer(), 0, (int)fragmentBuffer.Length);
-                            fragmentBuffer.SetLength(0);
-                            await HandleJsonMessageAsync(conn, full).ConfigureAwait(false);
-                        }
-                    }
-                    break;
-
-                case 0x0: // Continuation
-                    if (fragmentedOpcode == 0x1)
-                    {
-                        if (fragmentBuffer.Length + payload.Length > MaxPayloadBytes)
-                            return;
-                        fragmentBuffer.Write(payload, 0, payload.Length);
-                        if (fin)
-                        {
-                            string full = Encoding.UTF8.GetString(fragmentBuffer.GetBuffer(), 0, (int)fragmentBuffer.Length);
-                            fragmentBuffer.SetLength(0);
-                            fragmentedOpcode = 0;
-                            await HandleJsonMessageAsync(conn, full).ConfigureAwait(false);
-                        }
-                    }
-                    break;
+                if (payload != null)
+                    ArrayPool<byte>.Shared.Return(payload);
             }
         }
     }
 
-    private async Task HandleJsonMessageAsync(BridgeClientConnection conn, string json)
+    private static BridgeIncomingMessage? TryDeserializeMessage(ReadOnlySpan<byte> utf8)
     {
-        if (string.IsNullOrWhiteSpace(json))
-            return;
+        if (utf8.Length == 0)
+            return null;
 
-        BridgeIncomingMessage? msg;
         try
         {
-            msg = JsonSerializer.Deserialize(json, AppJsonContext.Default.BridgeIncomingMessage);
+            return JsonSerializer.Deserialize(utf8, AppJsonContext.Default.BridgeIncomingMessage);
         }
         catch
         {
-            return;
+            return null;
         }
-        if (msg == null)
-            return;
+    }
 
+    private async Task HandleParsedMessageAsync(BridgeClientConnection conn, BridgeIncomingMessage msg)
+    {
         string? normalizedBrowser = string.IsNullOrWhiteSpace(msg.Browser)
             ? null
             : msg.Browser.Trim().ToLowerInvariant();
@@ -575,7 +594,7 @@ internal sealed class BrowserBridgeServer : IDisposable
                     if (msg.Version > 0)
                         conn.ProtocolVersion = msg.Version;
                 }
-                await conn.SendTextAsync("{\"type\":\"pong\"}").ConfigureAwait(false);
+                await conn.SendFrameAsync(0x1, PongPayload).ConfigureAwait(false);
                 break;
 
             case "tabs":
@@ -610,28 +629,33 @@ internal sealed class BrowserBridgeServer : IDisposable
 
     private static async Task<string?> ReadHttpHeaderAsync(NetworkStream stream, CancellationToken ct)
     {
-        var buffer = new byte[MaxHandshakeBytes];
-        int total = 0;
-        var one = new byte[1];
-
-        while (total < MaxHandshakeBytes)
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(MaxHandshakeBytes);
+        try
         {
-            int n = await stream.ReadAsync(one, ct).ConfigureAwait(false);
-            if (n <= 0)
-                return null;
-            if (total == 0 && (one[0] < 0x20 || one[0] > 0x7E))
-                return null;
-            buffer[total++] = one[0];
-            if (total >= 4 &&
-                buffer[total - 4] == (byte)'\r' &&
-                buffer[total - 3] == (byte)'\n' &&
-                buffer[total - 2] == (byte)'\r' &&
-                buffer[total - 1] == (byte)'\n')
+            int total = 0;
+            while (total < MaxHandshakeBytes)
             {
-                return Encoding.UTF8.GetString(buffer, 0, total);
+                int n = await stream.ReadAsync(buffer.AsMemory(total, MaxHandshakeBytes - total), ct).ConfigureAwait(false);
+                if (n <= 0)
+                    return null;
+                if (total == 0 && (buffer[0] < 0x20 || buffer[0] > 0x7E))
+                    return null;
+
+                int searchStart = Math.Max(0, total - 3);
+                total += n;
+                int relIdx = buffer.AsSpan(searchStart, total - searchStart).IndexOf("\r\n\r\n"u8);
+                if (relIdx >= 0)
+                {
+                    int headerEnd = searchStart + relIdx + 4;
+                    return Encoding.UTF8.GetString(buffer, 0, headerEnd);
+                }
             }
+            return null;
         }
-        return null;
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     private static Dictionary<string, string> ParseHeaders(string raw, out string requestLine)

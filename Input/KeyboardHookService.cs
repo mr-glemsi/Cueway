@@ -52,6 +52,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
     private Action<string?>? _onCaptureResult;
     private Action<string>? _onCapturePreview;
     private Action? _onCaptureNeedsModifier;
+    private bool _captureAllowAnySingleKey;
     private bool _disposed;
 
     private volatile bool _mediaHookEnabled = true;
@@ -84,7 +85,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
         HotkeyHelper.TryParse(s.HotkeyToggleWindow, out var toggleWin);
         HotkeyHelper.TryParse(s.HotkeyManualLock, out var manualLock);
         HotkeyHelper.TryParse(s.HotkeySoloMode, out var soloMode);
-        HotkeyHelper.TryParse(s.HotkeyPlayPause, out var playPause);
+        HotkeyHelper.TryParse(s.HotkeyPlayPause, out var playPause, allowAnySingleKey: true);
 
         var appEntries = new List<AppHotkeyEntry>();
         foreach (var app in apps)
@@ -99,11 +100,13 @@ internal sealed unsafe class KeyboardHookService : IDisposable
     public void BeginHotkeyCapture(
         Action<string?> onResult,
         Action<string>? onPreview = null,
-        Action? onNeedsModifier = null)
+        Action? onNeedsModifier = null,
+        bool allowAnySingleKey = false)
     {
         _onCaptureResult = onResult;
         _onCapturePreview = onPreview;
         _onCaptureNeedsModifier = onNeedsModifier;
+        _captureAllowAnySingleKey = allowAnySingleKey;
         _heldCustomVks.Clear();
     }
 
@@ -112,6 +115,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
         _onCaptureResult = null;
         _onCapturePreview = null;
         _onCaptureNeedsModifier = null;
+        _captureAllowAnySingleKey = false;
     }
 
     private void FinishHotkeyCapture(string? result)
@@ -120,6 +124,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
         _onCaptureResult = null;
         _onCapturePreview = null;
         _onCaptureNeedsModifier = null;
+        _captureAllowAnySingleKey = false;
         cb?.Invoke(result);
     }
 
@@ -219,9 +224,14 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                 or Win32.VK_MEDIA_STOP;
 
             // Wireless/USB/Bluetooth headsets often deliver VK_MEDIA_* via Windows hidserv/AVRCP
-            // with LLKHF_INJECTED set. Because WinMediaRouter uses SMTC/IPC (never SendInput),
-            // capture all media keys regardless of LLKHF_INJECTED while keeping the guard for Alt+M / Alt+S.
-            if (!isInjected || isMediaKey)
+            // with LLKHF_INJECTED set, and laptop Fn layers/macros can inject single-key hotkeys.
+            // Because Cueway uses SMTC/IPC (never SendInput), allow injected events during capture
+            // and for the PlayPause shortcut while keeping the guard for other shortcuts.
+            bool allowInjected = isMediaKey ||
+                                 inst.IsCapturingHotkey ||
+                                 (!inst._hotkeys.PlayPause.IsEmpty && inst._hotkeys.PlayPause.VkCode == kb.vkCode);
+
+            if (!isInjected || allowInjected)
             {
                 bool isDown = wParam == Win32.WM_KEYDOWN || wParam == Win32.WM_SYSKEYDOWN;
                 bool isUp = wParam == Win32.WM_KEYUP || wParam == Win32.WM_SYSKEYUP;
@@ -238,7 +248,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
         if (isUp && _swallowedCaptureVks.Remove(vkCode))
             return true;
 
-        if (_onCaptureResult != null && !isInjected && !HotkeyHelper.IsMediaVk(vkCode))
+        if (_onCaptureResult != null && !HotkeyHelper.IsMediaVk(vkCode))
         {
             if (HotkeyHelper.IsModifierVk(vkCode))
             {
@@ -267,7 +277,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                     return true;
                 }
 
-                if (HotkeyHelper.TryCreate(mods, vkCode, out var captured, out bool needsModifier))
+                if (HotkeyHelper.TryCreate(mods, vkCode, out var captured, out bool needsModifier, _captureAllowAnySingleKey))
                 {
                     FinishHotkeyCapture(captured.NormalizedText);
                 }
@@ -281,7 +291,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
             return false;
         }
 
-        if (!isInjected && !HotkeyHelper.IsMediaVk(vkCode))
+        if (!HotkeyHelper.IsMediaVk(vkCode))
         {
             if (isUp && _heldCustomVks.Remove(vkCode))
                 return true;
@@ -291,41 +301,47 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                 var snap = _hotkeys;
                 HotkeyModifiers mods = GetCurrentModifiers();
 
-                if (!snap.ToggleWindow.IsEmpty && snap.ToggleWindow.VkCode == vkCode && snap.ToggleWindow.Modifiers == mods)
-                {
-                    if (_heldCustomVks.Add(vkCode))
-                        ToggleWindowRequested?.Invoke();
-                    return true;
-                }
-
-                if (!snap.ManualLock.IsEmpty && snap.ManualLock.VkCode == vkCode && snap.ManualLock.Modifiers == mods)
-                {
-                    if (_heldCustomVks.Add(vkCode))
-                        _engine.ToggleManualLockOnActiveOrSelected();
-                    return true;
-                }
-
-                if (!snap.SoloMode.IsEmpty && snap.SoloMode.VkCode == vkCode && snap.SoloMode.Modifiers == mods)
-                {
-                    if (_heldCustomVks.Add(vkCode))
-                        _engine.ToggleSoloMode();
-                    return true;
-                }
-
                 if (!snap.PlayPause.IsEmpty && snap.PlayPause.VkCode == vkCode && snap.PlayPause.Modifiers == mods)
                 {
                     if (_heldCustomVks.Add(vkCode))
-                        _ = _engine.DispatchMediaActionAsync(MediaActionKind.PlayPause, secondary: false);
+                        _ = Task.Run(() => _engine.DispatchMediaActionAsync(MediaActionKind.PlayPause, secondary: false));
                     return true;
                 }
 
-                foreach (var entry in snap.AppHotkeys)
+                if (!isInjected)
                 {
-                    if (!entry.Binding.IsEmpty && entry.Binding.VkCode == vkCode && entry.Binding.Modifiers == mods)
+                    if (!snap.ToggleWindow.IsEmpty && snap.ToggleWindow.VkCode == vkCode && snap.ToggleWindow.Modifiers == mods)
                     {
                         if (_heldCustomVks.Add(vkCode))
-                            _engine.PromoteAppToTop(entry.AppKey);
+                            ToggleWindowRequested?.Invoke();
                         return true;
+                    }
+
+                    if (!snap.ManualLock.IsEmpty && snap.ManualLock.VkCode == vkCode && snap.ManualLock.Modifiers == mods)
+                    {
+                        if (_heldCustomVks.Add(vkCode))
+                            _ = Task.Run(() => _engine.ToggleManualLockOnActiveOrSelected());
+                        return true;
+                    }
+
+                    if (!snap.SoloMode.IsEmpty && snap.SoloMode.VkCode == vkCode && snap.SoloMode.Modifiers == mods)
+                    {
+                        if (_heldCustomVks.Add(vkCode))
+                            _ = Task.Run(() => _engine.ToggleSoloMode());
+                        return true;
+                    }
+
+                    foreach (var entry in snap.AppHotkeys)
+                    {
+                        if (!entry.Binding.IsEmpty && entry.Binding.VkCode == vkCode && entry.Binding.Modifiers == mods)
+                        {
+                            if (_heldCustomVks.Add(vkCode))
+                            {
+                                string promotedKey = entry.AppKey;
+                                _ = Task.Run(() => _engine.PromoteAppToTop(promotedKey));
+                            }
+                            return true;
+                        }
                     }
                 }
             }
@@ -348,7 +364,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                     _playPauseHeld = true;
                     _lastPlayPauseDownTick = now;
                     bool secondary = IsKeyDown(Win32.VK_CONTROL) || IsKeyDown(Win32.VK_SHIFT);
-                    _ = _engine.DispatchMediaActionAsync(MediaActionKind.PlayPause, secondary);
+                    _ = Task.Run(() => _engine.DispatchMediaActionAsync(MediaActionKind.PlayPause, secondary));
                 }
             }
             else if (isUp)
@@ -376,7 +392,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                     var snap = _engine.GetSnapshot();
                     if (snap.Sessions.Any(s => s.IsPlaying || s.IsEffectivelyPlaying))
                     {
-                        _ = _engine.DispatchMediaActionAsync(MediaActionKind.PlayPause, secondary: false);
+                        _ = Task.Run(() => _engine.DispatchMediaActionAsync(MediaActionKind.PlayPause, secondary: false));
                     }
                 }
             }
@@ -412,7 +428,8 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                         var action = vkCode == Win32.VK_MEDIA_NEXT_TRACK
                             ? MediaActionKind.Next
                             : MediaActionKind.Previous;
-                        _ = _engine.DispatchMediaActionAsync(action, _heldIsSecondary);
+                        bool sec = _heldIsSecondary;
+                        _ = Task.Run(() => _engine.DispatchMediaActionAsync(action, sec));
                     }
                     else
                     {
@@ -427,7 +444,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                     var action = vkCode == Win32.VK_MEDIA_NEXT_TRACK
                         ? MediaActionKind.SeekForward
                         : MediaActionKind.SeekBackward;
-                    _ = _engine.DispatchMediaActionAsync(action, secondary: false);
+                    _ = Task.Run(() => _engine.DispatchMediaActionAsync(action, secondary: false));
                 }
                 return true;
             }

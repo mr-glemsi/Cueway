@@ -46,7 +46,8 @@ internal static class HotkeyHelper
         HotkeyModifiers modifiers,
         uint vkCode,
         out HotkeyBinding binding,
-        out bool requiresModifier)
+        out bool requiresModifier,
+        bool allowAnySingleKey = false)
     {
         binding = default;
         requiresModifier = false;
@@ -57,7 +58,7 @@ internal static class HotkeyHelper
         if (!TryFormatVk(vkCode, out string keyToken))
             return false;
 
-        if (modifiers == HotkeyModifiers.None && !IsAllowedWithoutModifier(vkCode))
+        if (!allowAnySingleKey && modifiers == HotkeyModifiers.None && !IsAllowedWithoutModifier(vkCode))
         {
             requiresModifier = true;
             return false;
@@ -68,7 +69,7 @@ internal static class HotkeyHelper
         return true;
     }
 
-    public static bool TryParse(string? text, out HotkeyBinding binding)
+    public static bool TryParse(string? text, out HotkeyBinding binding, bool allowAnySingleKey = false)
     {
         binding = default;
         if (string.IsNullOrWhiteSpace(text))
@@ -94,11 +95,11 @@ internal static class HotkeyHelper
                 return false;
         }
 
-        return TryCreate(mods, vk, out binding, out _);
+        return TryCreate(mods, vk, out binding, out _, allowAnySingleKey);
     }
 
-    public static string Normalize(string? text)
-        => TryParse(text, out var binding) ? binding.NormalizedText : string.Empty;
+    public static string Normalize(string? text, bool allowAnySingleKey = false)
+        => TryParse(text, out var binding, allowAnySingleKey) ? binding.NormalizedText : string.Empty;
 
     public static string FormatModifierPreview(HotkeyModifiers modifiers)
     {
@@ -111,12 +112,12 @@ internal static class HotkeyHelper
         return sb.ToString();
     }
 
-    public static string FormatDisplay(string? normalized, bool spaced = false)
+    public static string FormatDisplay(string? normalized, bool spaced = false, bool allowAnySingleKey = false)
     {
         if (string.IsNullOrWhiteSpace(normalized))
             return string.Empty;
 
-        if (!TryParse(normalized, out var binding))
+        if (!TryParse(normalized, out var binding, allowAnySingleKey))
             return normalized.Trim();
 
         if (!spaced)
@@ -231,6 +232,7 @@ internal static class HotkeyHelper
             Win32.VK_OEM_PERIOD => ".",
             Win32.VK_OEM_2 => "/",
             Win32.VK_OEM_3 => "`",
+            Win32.VK_OEM_8 => "OEM8",
             Win32.VK_OEM_102 => "<>",
             _ => string.Empty
         };
@@ -301,6 +303,7 @@ internal static class HotkeyHelper
             "." or "PERIOD" => Win32.VK_OEM_PERIOD,
             "/" => Win32.VK_OEM_2,
             "`" => Win32.VK_OEM_3,
+            "OEM8" => Win32.VK_OEM_8,
             "<>" => Win32.VK_OEM_102,
             _ => 0
         };
