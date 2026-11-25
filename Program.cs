@@ -8,6 +8,7 @@ using Cueway.Interop;
 using Cueway.Media;
 using Cueway.Routing;
 using Cueway.Startup;
+using Cueway.Localization;
 using Cueway.UI;
 
 namespace Cueway;
@@ -45,16 +46,19 @@ internal static unsafe class Program
         {
             var stateStore = new StateStore();
             var startupService = new StartupService();
+            using var updateService = new AppUpdateService();
             using var audioService = new CoreAudioService();
             using var bridgeServer = new BrowserBridgeServer();
             using var sessionManager = new MediaSessionManager(stateStore, audioService, bridgeServer);
             using var engine = new MediaRouterEngine(stateStore, audioService, sessionManager);
             using var iconRenderer = new DynamicIconRenderer();
 
-            using var mainWindow = new MainWindow(stateStore, sessionManager, engine, iconRenderer, startupService, bridgeServer);
-            using var tray = new TrayController(mainWindow.Handle, iconRenderer);
+            using var mainWindow = new MainWindow(stateStore, sessionManager, engine, iconRenderer, startupService, bridgeServer, updateService);
+            using var tray = new TrayController(mainWindow.Handle, iconRenderer, stateStore, updateService);
             using var osd = new OsdOverlayWindow(iconRenderer);
             using var keyboardHook = new KeyboardHookService(mainWindow.Handle, stateStore, engine);
+            mainWindow.ConfigureKeyboardHook(keyboardHook);
+            keyboardHook.ToggleWindowRequested += () => mainWindow.BeginInvoke(() => mainWindow.ToggleVisibility());
             using var trayWheelHook = new TrayWheelHookService(stateStore, () => tray.TryGetIconRect(), engine, mainWindow.BeginInvoke);
 
             void ShutdownApp()
@@ -105,12 +109,18 @@ internal static unsafe class Program
             tray.ShowMainWindowRequested += () => mainWindow.ShowAndFocus();
             tray.ToggleMainWindowRequested += () => mainWindow.ToggleVisibility();
             tray.OpenSettingsRequested += () => mainWindow.ShowAndFocus(settingsTab: true);
+            tray.OpenUpdateRequested += () => mainWindow.ShowAndFocus();
             tray.ToggleManualLockRequested += () => engine.ToggleManualLockOnActiveOrSelected();
             tray.ToggleSoloModeRequested += () => engine.ToggleSoloMode();
             tray.ExitRequested += ShutdownApp;
 
             engine.StateChanged += snap => mainWindow.BeginInvoke(() => tray.Update(snap));
             engine.OsdRequested += msg => mainWindow.BeginInvoke(() => osd.ShowMessage(msg));
+            updateService.UpdateAvailableNotified += ver => mainWindow.BeginInvoke(() =>
+            {
+                if (!Win32.IsWindowVisible(mainWindow.Handle))
+                    osd.ShowMessage(new OsdMessage(Strings.OsdUpdateTitle, Strings.OsdUpdateBody(ver), null));
+            });
 
             // Start services
             bridgeServer.Start();
@@ -127,6 +137,24 @@ internal static unsafe class Program
                 0);
             _ = sessionManager.InitializeAsync();
             _ = startupService.RefreshScheduledTaskStatusAsync();
+
+#if DEBUG
+            string? previewArg = args.FirstOrDefault(a =>
+                a.StartsWith("--preview-update=", StringComparison.OrdinalIgnoreCase));
+            if (previewArg != null)
+            {
+                updateService.ApplyDebugPreview(previewArg["--preview-update=".Length..]);
+            }
+            else if (stateStore.GetSettingsSnapshot().AutoCheckUpdates)
+            {
+                _ = updateService.CheckForUpdatesAsync(silent: true, initialDelayMs: showAtStart ? 1200 : 5000);
+            }
+#else
+            if (stateStore.GetSettingsSnapshot().AutoCheckUpdates)
+            {
+                _ = updateService.CheckForUpdatesAsync(silent: true, initialDelayMs: showAtStart ? 1200 : 5000);
+            }
+#endif
 
             if (showAtStart)
             {

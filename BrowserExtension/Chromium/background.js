@@ -5,8 +5,9 @@ const BRIDGE_PROTOCOL_VERSION = 3;
 const tabStates = new Map();
 let ws = null;
 let connected = false;
-let reconnectDelayMs = 2000;
+let reconnectDelayMs = 1000;
 let reconnectTimer = null;
+let connectTimeout = null;
 let heartbeatTimer = null;
 let flushTimer = null;
 
@@ -247,6 +248,13 @@ async function forwardCommand(tabId, action, delta) {
   }
 }
 
+function clearConnectTimeout() {
+  if (connectTimeout) {
+    clearTimeout(connectTimeout);
+    connectTimeout = null;
+  }
+}
+
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
@@ -256,17 +264,31 @@ function connect() {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  clearConnectTimeout();
 
+  let socket;
   try {
-    ws = new WebSocket(WS_URL);
+    socket = new WebSocket(WS_URL);
+    ws = socket;
   } catch {
     scheduleReconnect();
     return;
   }
 
-  ws.onopen = () => {
+  connectTimeout = setTimeout(() => {
+    connectTimeout = null;
+    if (ws === socket && socket.readyState === WebSocket.CONNECTING) {
+      try {
+        socket.close();
+      } catch {}
+    }
+  }, 5000);
+
+  socket.onopen = () => {
+    if (ws !== socket) return;
+    clearConnectTimeout();
     connected = true;
-    reconnectDelayMs = 2000;
+    reconnectDelayMs = 1000;
     sendWs({ type: "hello", browser: BROWSER_KEY, version: BRIDGE_PROTOCOL_VERSION });
     scheduleFlush();
     scanAndInjectTabs();
@@ -277,7 +299,8 @@ function connect() {
     }, 20000);
   };
 
-  ws.onmessage = (event) => {
+  socket.onmessage = (event) => {
+    if (ws !== socket) return;
     let msg;
     try {
       msg = JSON.parse(event.data);
@@ -295,7 +318,9 @@ function connect() {
     }
   };
 
-  ws.onclose = () => {
+  socket.onclose = () => {
+    if (ws !== socket) return;
+    clearConnectTimeout();
     connected = false;
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer);
@@ -305,9 +330,11 @@ function connect() {
     scheduleReconnect();
   };
 
-  ws.onerror = () => {
+  socket.onerror = () => {
+    if (ws !== socket) return;
+    clearConnectTimeout();
     try {
-      ws?.close();
+      socket.close();
     } catch {}
   };
 }
@@ -315,7 +342,7 @@ function connect() {
 function scheduleReconnect() {
   if (reconnectTimer) return;
   const delay = reconnectDelayMs;
-  reconnectDelayMs = Math.min(8000, Math.round(reconnectDelayMs * 1.5));
+  reconnectDelayMs = Math.min(3000, Math.round(reconnectDelayMs * 1.5));
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
@@ -386,11 +413,18 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "popup_reconnect") {
-    try {
-      ws?.close();
-    } catch {}
+    clearConnectTimeout();
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    const prev = ws;
     ws = null;
-    reconnectDelayMs = 2000;
+    try {
+      prev?.close();
+    } catch {}
+    connected = false;
+    reconnectDelayMs = 1000;
     connect();
     scanAndInjectTabs();
     sendResponse({ ok: true });
@@ -470,9 +504,9 @@ if (api.alarms) {
   api.alarms.create("wmr_keepalive", { periodInMinutes: 0.5 });
   api.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === "wmr_keepalive") {
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (!ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)) {
         connect();
-      } else {
+      } else if (ws.readyState === WebSocket.OPEN) {
         sendWs({ type: "ping", browser: BROWSER_KEY, version: BRIDGE_PROTOCOL_VERSION });
       }
     }

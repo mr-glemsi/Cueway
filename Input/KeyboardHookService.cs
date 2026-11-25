@@ -8,6 +8,15 @@ namespace Cueway.Input;
 
 internal sealed unsafe class KeyboardHookService : IDisposable
 {
+    private sealed record AppHotkeyEntry(HotkeyBinding Binding, string AppKey);
+
+    private sealed record HotkeySnapshot(
+        HotkeyBinding ToggleWindow,
+        HotkeyBinding ManualLock,
+        HotkeyBinding SoloMode,
+        HotkeyBinding PlayPause,
+        AppHotkeyEntry[] AppHotkeys);
+
     private const nuint TIMER_WATCHDOG = 9001;
     private const nuint TIMER_LONG_PRESS = 9002;
     private const nuint TIMER_DOUBLE_TAP = 9003;
@@ -38,13 +47,20 @@ internal sealed unsafe class KeyboardHookService : IDisposable
     private long _lastPlayPauseDownTick;
     private bool _stopHeld;
     private long _lastStopDownTick;
-    private bool _altMHeld;
-    private bool _altSHeld;
+    private readonly HashSet<uint> _heldCustomVks = [];
+    private readonly HashSet<uint> _swallowedCaptureVks = [];
+    private Action<string?>? _onCaptureResult;
+    private Action<string>? _onCapturePreview;
+    private Action? _onCaptureNeedsModifier;
     private bool _disposed;
 
     private volatile bool _mediaHookEnabled = true;
     private volatile bool _timelineScrubbingEnabled = true;
     private volatile int _longPressThresholdMs = 400;
+    private volatile HotkeySnapshot _hotkeys = new(default, default, default, default, []);
+
+    public event Action? ToggleWindowRequested;
+    public bool IsCapturingHotkey => _onCaptureResult != null;
 
     public KeyboardHookService(nint hwndHost, StateStore stateStore, MediaRouterEngine engine)
     {
@@ -59,9 +75,52 @@ internal sealed unsafe class KeyboardHookService : IDisposable
     private void SyncCachedSettings()
     {
         var s = _stateStore.GetSettingsSnapshot();
+        var apps = _stateStore.GetPriorityAppsSnapshot();
+
         _mediaHookEnabled = s.MediaHookEnabled;
         _timelineScrubbingEnabled = s.TimelineScrubbingEnabled;
         _longPressThresholdMs = s.LongPressThresholdMs;
+
+        HotkeyHelper.TryParse(s.HotkeyToggleWindow, out var toggleWin);
+        HotkeyHelper.TryParse(s.HotkeyManualLock, out var manualLock);
+        HotkeyHelper.TryParse(s.HotkeySoloMode, out var soloMode);
+        HotkeyHelper.TryParse(s.HotkeyPlayPause, out var playPause);
+
+        var appEntries = new List<AppHotkeyEntry>();
+        foreach (var app in apps)
+        {
+            if (HotkeyHelper.TryParse(app.Hotkey, out var appBinding))
+                appEntries.Add(new AppHotkeyEntry(appBinding, app.AppKey));
+        }
+
+        _hotkeys = new HotkeySnapshot(toggleWin, manualLock, soloMode, playPause, [.. appEntries]);
+    }
+
+    public void BeginHotkeyCapture(
+        Action<string?> onResult,
+        Action<string>? onPreview = null,
+        Action? onNeedsModifier = null)
+    {
+        _onCaptureResult = onResult;
+        _onCapturePreview = onPreview;
+        _onCaptureNeedsModifier = onNeedsModifier;
+        _heldCustomVks.Clear();
+    }
+
+    public void CancelHotkeyCapture()
+    {
+        _onCaptureResult = null;
+        _onCapturePreview = null;
+        _onCaptureNeedsModifier = null;
+    }
+
+    private void FinishHotkeyCapture(string? result)
+    {
+        var cb = _onCaptureResult;
+        _onCaptureResult = null;
+        _onCapturePreview = null;
+        _onCaptureNeedsModifier = null;
+        cb?.Invoke(result);
     }
 
     public void ForceRefreshHook() => EnsureHookInstalled(forceSwap: true);
@@ -176,46 +235,100 @@ internal sealed unsafe class KeyboardHookService : IDisposable
 
     private bool ProcessKey(uint vkCode, bool isDown, bool isUp, bool isInjected)
     {
-        // Alt + M -> Toggle Manual Lock
-        if (vkCode == Win32.VK_M)
+        if (isUp && _swallowedCaptureVks.Remove(vkCode))
+            return true;
+
+        if (_onCaptureResult != null && !isInjected && !HotkeyHelper.IsMediaVk(vkCode))
         {
-            bool alt = IsKeyDown(Win32.VK_MENU);
-            if (isDown && alt)
+            if (HotkeyHelper.IsModifierVk(vkCode))
             {
-                if (!_altMHeld)
+                HotkeyModifiers liveMods = GetModifiersForTransition(vkCode, isDown);
+                _onCapturePreview?.Invoke(HotkeyHelper.FormatModifierPreview(liveMods));
+                return false;
+            }
+
+            if (isDown)
+            {
+                HotkeyModifiers mods = GetCurrentModifiers();
+                if (mods == HotkeyModifiers.Alt && (vkCode == Win32.VK_TAB || vkCode == Win32.VK_F1 + 3))
+                    return false;
+
+                _swallowedCaptureVks.Add(vkCode);
+
+                if (vkCode == Win32.VK_ESCAPE && mods == HotkeyModifiers.None)
                 {
-                    _altMHeld = true;
-                    _engine.ToggleManualLockOnActiveOrSelected();
+                    FinishHotkeyCapture(null);
+                    return true;
+                }
+
+                if ((vkCode == Win32.VK_BACK || vkCode == Win32.VK_DELETE) && mods == HotkeyModifiers.None)
+                {
+                    FinishHotkeyCapture(string.Empty);
+                    return true;
+                }
+
+                if (HotkeyHelper.TryCreate(mods, vkCode, out var captured, out bool needsModifier))
+                {
+                    FinishHotkeyCapture(captured.NormalizedText);
+                }
+                else if (needsModifier)
+                {
+                    _onCaptureNeedsModifier?.Invoke();
                 }
                 return true;
             }
-            if (isUp && _altMHeld)
-            {
-                _altMHeld = false;
-                return true;
-            }
+
             return false;
         }
 
-        // Alt + S -> Toggle Solo Mode
-        if (vkCode == Win32.VK_S)
+        if (!isInjected && !HotkeyHelper.IsMediaVk(vkCode))
         {
-            bool alt = IsKeyDown(Win32.VK_MENU);
-            if (isDown && alt)
+            if (isUp && _heldCustomVks.Remove(vkCode))
+                return true;
+
+            if (isDown)
             {
-                if (!_altSHeld)
+                var snap = _hotkeys;
+                HotkeyModifiers mods = GetCurrentModifiers();
+
+                if (!snap.ToggleWindow.IsEmpty && snap.ToggleWindow.VkCode == vkCode && snap.ToggleWindow.Modifiers == mods)
                 {
-                    _altSHeld = true;
-                    _engine.ToggleSoloMode();
+                    if (_heldCustomVks.Add(vkCode))
+                        ToggleWindowRequested?.Invoke();
+                    return true;
                 }
-                return true;
+
+                if (!snap.ManualLock.IsEmpty && snap.ManualLock.VkCode == vkCode && snap.ManualLock.Modifiers == mods)
+                {
+                    if (_heldCustomVks.Add(vkCode))
+                        _engine.ToggleManualLockOnActiveOrSelected();
+                    return true;
+                }
+
+                if (!snap.SoloMode.IsEmpty && snap.SoloMode.VkCode == vkCode && snap.SoloMode.Modifiers == mods)
+                {
+                    if (_heldCustomVks.Add(vkCode))
+                        _engine.ToggleSoloMode();
+                    return true;
+                }
+
+                if (!snap.PlayPause.IsEmpty && snap.PlayPause.VkCode == vkCode && snap.PlayPause.Modifiers == mods)
+                {
+                    if (_heldCustomVks.Add(vkCode))
+                        _ = _engine.DispatchMediaActionAsync(MediaActionKind.PlayPause, secondary: false);
+                    return true;
+                }
+
+                foreach (var entry in snap.AppHotkeys)
+                {
+                    if (!entry.Binding.IsEmpty && entry.Binding.VkCode == vkCode && entry.Binding.Modifiers == mods)
+                    {
+                        if (_heldCustomVks.Add(vkCode))
+                            _engine.PromoteAppToTop(entry.AppKey);
+                        return true;
+                    }
+                }
             }
-            if (isUp && _altSHeld)
-            {
-                _altSHeld = false;
-                return true;
-            }
-            return false;
         }
 
         if (vkCode == Win32.VK_MEDIA_PLAY_PAUSE)
@@ -354,6 +467,35 @@ internal sealed unsafe class KeyboardHookService : IDisposable
         }
 
         return false;
+    }
+
+    private static HotkeyModifiers GetCurrentModifiers()
+    {
+        HotkeyModifiers mods = HotkeyModifiers.None;
+        if (IsKeyDown(Win32.VK_CONTROL)) mods |= HotkeyModifiers.Ctrl;
+        if (IsKeyDown(Win32.VK_MENU)) mods |= HotkeyModifiers.Alt;
+        if (IsKeyDown(Win32.VK_SHIFT)) mods |= HotkeyModifiers.Shift;
+        if (IsKeyDown(Win32.VK_LWIN) || IsKeyDown(Win32.VK_RWIN)) mods |= HotkeyModifiers.Win;
+        return mods;
+    }
+
+    private static HotkeyModifiers GetModifiersForTransition(uint vkCode, bool isDown)
+    {
+        bool ctrl = (vkCode == Win32.VK_LCONTROL || vkCode == Win32.VK_CONTROL ? isDown : IsKeyDown(Win32.VK_LCONTROL)) ||
+                    (vkCode == Win32.VK_RCONTROL ? isDown : IsKeyDown(Win32.VK_RCONTROL));
+        bool alt = (vkCode == Win32.VK_LMENU || vkCode == Win32.VK_MENU ? isDown : IsKeyDown(Win32.VK_LMENU)) ||
+                   (vkCode == Win32.VK_RMENU ? isDown : IsKeyDown(Win32.VK_RMENU));
+        bool shift = (vkCode == Win32.VK_LSHIFT || vkCode == Win32.VK_SHIFT ? isDown : IsKeyDown(Win32.VK_LSHIFT)) ||
+                     (vkCode == Win32.VK_RSHIFT ? isDown : IsKeyDown(Win32.VK_RSHIFT));
+        bool win = (vkCode == Win32.VK_LWIN ? isDown : IsKeyDown(Win32.VK_LWIN)) ||
+                   (vkCode == Win32.VK_RWIN ? isDown : IsKeyDown(Win32.VK_RWIN));
+
+        HotkeyModifiers mods = HotkeyModifiers.None;
+        if (ctrl) mods |= HotkeyModifiers.Ctrl;
+        if (alt) mods |= HotkeyModifiers.Alt;
+        if (shift) mods |= HotkeyModifiers.Shift;
+        if (win) mods |= HotkeyModifiers.Win;
+        return mods;
     }
 
     private static bool IsKeyDown(int vKey) => (Win32.GetAsyncKeyState(vKey) & 0x8000) != 0;

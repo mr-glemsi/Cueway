@@ -7,6 +7,7 @@ public sealed class AppSettings
     public bool StartMinimized { get; set; } = false;
     public bool MinimizeToTrayOnClose { get; set; } = true;
     public bool AlwaysOnTop { get; set; } = false;
+    public bool AutoCheckUpdates { get; set; } = true;
     public bool MediaHookEnabled { get; set; } = true;
     public bool TrayWheelVolumeEnabled { get; set; } = true;
     public int VolumeStepPercent { get; set; } = 5;
@@ -18,6 +19,10 @@ public sealed class AppSettings
     public bool TimelineScrubbingEnabled { get; set; } = true;
     public int SeekSeconds { get; set; } = 10;
     public int LongPressThresholdMs { get; set; } = 400;
+    public string HotkeyToggleWindow { get; set; } = "Alt+C";
+    public string HotkeyManualLock { get; set; } = "Alt+M";
+    public string HotkeySoloMode { get; set; } = "Alt+S";
+    public string HotkeyPlayPause { get; set; } = string.Empty;
     public string MpvPipeName { get; set; } = "mpvsocket";
     public List<string> GameBlacklistExes { get; set; } = [];
 }
@@ -27,6 +32,7 @@ public sealed class DiscoveredApp
     public string AppKey { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public string ExePath { get; set; } = string.Empty;
+    public string Hotkey { get; set; } = string.Empty;
     public DateTimeOffset LastSeenUtc { get; set; } = DateTimeOffset.UtcNow;
 }
 

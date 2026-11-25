@@ -95,6 +95,7 @@ internal sealed class BrowserBridgeServer : IDisposable
     }
 
     private readonly int _port;
+    private readonly object _lifecycleLock = new();
     private readonly object _connLock = new();
     private readonly Dictionary<string, BridgeClientConnection> _connections = new(StringComparer.Ordinal);
     private CancellationTokenSource? _cts;
@@ -114,22 +115,78 @@ internal sealed class BrowserBridgeServer : IDisposable
 
     public void Start()
     {
-        if (_disposed || _listener != null)
-            return;
+        lock (_lifecycleLock)
+        {
+            if (_disposed || _cts != null)
+                return;
 
-        try
-        {
             var cts = new CancellationTokenSource();
-            var listener = new TcpListener(IPAddress.Loopback, _port);
-            listener.Start(16);
             _cts = cts;
-            _listener = listener;
-            _isListening = true;
-            _ = Task.Run(() => AcceptLoopAsync(listener, cts.Token));
+            _ = Task.Run(() => RunListenerLoopAsync(cts.Token));
         }
-        catch
+    }
+
+    private async Task RunListenerLoopAsync(CancellationToken ct)
+    {
+        int retryDelayMs = 400;
+        while (!ct.IsCancellationRequested && !_disposed)
         {
-            _isListening = false;
+            TcpListener? listener = null;
+            try
+            {
+                listener = new TcpListener(IPAddress.Loopback, _port);
+                listener.Start(16);
+
+                lock (_lifecycleLock)
+                {
+                    if (_disposed || ct.IsCancellationRequested)
+                    {
+                        try { listener.Stop(); } catch { }
+                        return;
+                    }
+                    _listener = listener;
+                }
+
+                _isListening = true;
+                retryDelayMs = 400;
+                SessionsChanged?.Invoke();
+
+                await AcceptLoopAsync(listener, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch
+            {
+                // Port may still be releasing after an instance swap or elevation restart; retry cleanly
+            }
+            finally
+            {
+                _isListening = false;
+                lock (_lifecycleLock)
+                {
+                    if (ReferenceEquals(_listener, listener))
+                        _listener = null;
+                }
+                if (listener != null)
+                {
+                    try { listener.Stop(); } catch { }
+                }
+            }
+
+            if (ct.IsCancellationRequested || _disposed)
+                break;
+
+            try
+            {
+                await Task.Delay(retryDelayMs, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            retryDelayMs = Math.Min(1500, retryDelayMs * 2);
         }
     }
 
@@ -616,15 +673,22 @@ internal sealed class BrowserBridgeServer : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        _isListening = false;
+        CancellationTokenSource? cts;
+        TcpListener? listener;
+        lock (_lifecycleLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _isListening = false;
+            cts = _cts;
+            listener = _listener;
+            _cts = null;
+            _listener = null;
+        }
 
-        try { _cts?.Cancel(); } catch { }
-        try { _listener?.Stop(); } catch { }
-        _cts?.Dispose();
-        _cts = null;
-        _listener = null;
+        try { cts?.Cancel(); } catch { }
+        try { listener?.Stop(); } catch { }
+        try { cts?.Dispose(); } catch { }
 
         lock (_connLock)
         {

@@ -1,7 +1,16 @@
 using System.Text.Json;
+using Cueway.Input;
 using Cueway.Localization;
 
 namespace Cueway.Config;
+
+internal enum GlobalHotkeySlot
+{
+    ToggleWindow = 0,
+    ManualLock = 1,
+    SoloMode = 2,
+    PlayPause = 3
+}
 
 internal sealed class StateStore
 {
@@ -55,6 +64,10 @@ internal sealed class StateStore
                     loaded.PriorityApps ??= [];
                     loaded.Settings.GameBlacklistExes ??= [];
                     NormalizeSettings(loaded.Settings);
+                    foreach (var app in loaded.PriorityApps)
+                    {
+                        app.Hotkey = HotkeyHelper.Normalize(app.Hotkey);
+                    }
                     return loaded;
                 }
             }
@@ -76,6 +89,10 @@ internal sealed class StateStore
         s.VolumeStepPercent = Math.Clamp(s.VolumeStepPercent, 1, 20);
         s.SeekSeconds = Math.Clamp(s.SeekSeconds, 1, 120);
         s.LongPressThresholdMs = Math.Clamp(s.LongPressThresholdMs, 150, 1500);
+        s.HotkeyToggleWindow = HotkeyHelper.Normalize(s.HotkeyToggleWindow);
+        s.HotkeyManualLock = HotkeyHelper.Normalize(s.HotkeyManualLock);
+        s.HotkeySoloMode = HotkeyHelper.Normalize(s.HotkeySoloMode);
+        s.HotkeyPlayPause = HotkeyHelper.Normalize(s.HotkeyPlayPause);
         if (string.IsNullOrWhiteSpace(s.MpvPipeName))
             s.MpvPipeName = "mpvsocket";
     }
@@ -107,6 +124,7 @@ internal sealed class StateStore
                 StartMinimized = s.StartMinimized,
                 MinimizeToTrayOnClose = s.MinimizeToTrayOnClose,
                 AlwaysOnTop = s.AlwaysOnTop,
+                AutoCheckUpdates = s.AutoCheckUpdates,
                 MediaHookEnabled = s.MediaHookEnabled,
                 TrayWheelVolumeEnabled = s.TrayWheelVolumeEnabled,
                 VolumeStepPercent = s.VolumeStepPercent,
@@ -118,6 +136,10 @@ internal sealed class StateStore
                 TimelineScrubbingEnabled = s.TimelineScrubbingEnabled,
                 SeekSeconds = s.SeekSeconds,
                 LongPressThresholdMs = s.LongPressThresholdMs,
+                HotkeyToggleWindow = s.HotkeyToggleWindow,
+                HotkeyManualLock = s.HotkeyManualLock,
+                HotkeySoloMode = s.HotkeySoloMode,
+                HotkeyPlayPause = s.HotkeyPlayPause,
                 MpvPipeName = s.MpvPipeName,
                 GameBlacklistExes = [.. s.GameBlacklistExes]
             };
@@ -136,6 +158,7 @@ internal sealed class StateStore
                     AppKey = app.AppKey,
                     DisplayName = app.DisplayName,
                     ExePath = app.ExePath,
+                    Hotkey = app.Hotkey,
                     LastSeenUtc = app.LastSeenUtc
                 });
             }
@@ -167,6 +190,9 @@ internal sealed class StateStore
                 Language = Strings.NormalizeCode(currentLang),
                 Theme = UI.Theme.NormalizeId(currentTheme)
             };
+            ClearDuplicateHotkeyLocked(_state.Settings.HotkeyToggleWindow, exceptGlobalSlot: GlobalHotkeySlot.ToggleWindow);
+            ClearDuplicateHotkeyLocked(_state.Settings.HotkeyManualLock, exceptGlobalSlot: GlobalHotkeySlot.ManualLock);
+            ClearDuplicateHotkeyLocked(_state.Settings.HotkeySoloMode, exceptGlobalSlot: GlobalHotkeySlot.SoloMode);
             UI.Theme.SetTheme(_state.Settings.Theme);
             SaveInternal(_state);
         }
@@ -257,6 +283,123 @@ internal sealed class StateStore
         if (moved)
             StateChanged?.Invoke();
         return moved;
+    }
+
+    public bool MovePriorityAppToTop(string appKey)
+    {
+        bool moved = false;
+        lock (_lock)
+        {
+            int idx = _state.PriorityApps.FindIndex(a =>
+                string.Equals(a.AppKey, appKey, StringComparison.OrdinalIgnoreCase));
+            if (idx > 0)
+            {
+                var item = _state.PriorityApps[idx];
+                _state.PriorityApps.RemoveAt(idx);
+                _state.PriorityApps.Insert(0, item);
+                SaveInternal(_state);
+                moved = true;
+            }
+        }
+        if (moved)
+            StateChanged?.Invoke();
+        return moved;
+    }
+
+    public bool SetGlobalHotkey(GlobalHotkeySlot slot, string hotkey)
+    {
+        string normalized = HotkeyHelper.Normalize(hotkey);
+        lock (_lock)
+        {
+            ClearDuplicateHotkeyLocked(normalized, exceptGlobalSlot: slot);
+            switch (slot)
+            {
+                case GlobalHotkeySlot.ToggleWindow:
+                    _state.Settings.HotkeyToggleWindow = normalized;
+                    break;
+                case GlobalHotkeySlot.ManualLock:
+                    _state.Settings.HotkeyManualLock = normalized;
+                    break;
+                case GlobalHotkeySlot.SoloMode:
+                    _state.Settings.HotkeySoloMode = normalized;
+                    break;
+                case GlobalHotkeySlot.PlayPause:
+                    _state.Settings.HotkeyPlayPause = normalized;
+                    break;
+            }
+            SaveInternal(_state);
+        }
+        StateChanged?.Invoke();
+        return true;
+    }
+
+    public bool SetPriorityAppHotkey(string appKey, string hotkey)
+    {
+        if (string.IsNullOrWhiteSpace(appKey))
+            return false;
+
+        string normalized = HotkeyHelper.Normalize(hotkey);
+        bool updated = false;
+        lock (_lock)
+        {
+            var app = _state.PriorityApps.Find(a =>
+                string.Equals(a.AppKey, appKey, StringComparison.OrdinalIgnoreCase));
+            if (app != null)
+            {
+                ClearDuplicateHotkeyLocked(normalized, exceptAppKey: appKey);
+                app.Hotkey = normalized;
+                SaveInternal(_state);
+                updated = true;
+            }
+        }
+        if (updated)
+            StateChanged?.Invoke();
+        return updated;
+    }
+
+    public (string DisplayName, string ExePath)? GetPriorityAppInfo(string appKey)
+    {
+        lock (_lock)
+        {
+            var app = _state.PriorityApps.Find(a =>
+                string.Equals(a.AppKey, appKey, StringComparison.OrdinalIgnoreCase));
+            return app != null ? (app.DisplayName, app.ExePath) : null;
+        }
+    }
+
+    private void ClearDuplicateHotkeyLocked(
+        string normalizedHotkey,
+        GlobalHotkeySlot? exceptGlobalSlot = null,
+        string? exceptAppKey = null)
+    {
+        if (string.IsNullOrEmpty(normalizedHotkey))
+            return;
+
+        if (exceptGlobalSlot != GlobalHotkeySlot.ToggleWindow &&
+            string.Equals(_state.Settings.HotkeyToggleWindow, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
+            _state.Settings.HotkeyToggleWindow = string.Empty;
+
+        if (exceptGlobalSlot != GlobalHotkeySlot.ManualLock &&
+            string.Equals(_state.Settings.HotkeyManualLock, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
+            _state.Settings.HotkeyManualLock = string.Empty;
+
+        if (exceptGlobalSlot != GlobalHotkeySlot.SoloMode &&
+            string.Equals(_state.Settings.HotkeySoloMode, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
+            _state.Settings.HotkeySoloMode = string.Empty;
+
+        if (exceptGlobalSlot != GlobalHotkeySlot.PlayPause &&
+            string.Equals(_state.Settings.HotkeyPlayPause, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
+            _state.Settings.HotkeyPlayPause = string.Empty;
+
+        foreach (var other in _state.PriorityApps)
+        {
+            if (exceptAppKey != null &&
+                string.Equals(other.AppKey, exceptAppKey, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (string.Equals(other.Hotkey, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
+                other.Hotkey = string.Empty;
+        }
     }
 
     public bool RemovePriorityApp(string appKey)

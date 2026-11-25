@@ -422,6 +422,45 @@ internal sealed class MediaRouterEngine : IDisposable
             NotifyOsd("Cueway", Strings.OsdAutoMode, null);
     }
 
+    public void PromoteAppToTop(string appKey)
+    {
+        if (string.IsNullOrWhiteSpace(appKey))
+            return;
+
+        lock (_lock)
+        {
+            if (!string.IsNullOrEmpty(_lockedAppKey) &&
+                !string.Equals(_lockedAppKey, appKey, StringComparison.OrdinalIgnoreCase))
+            {
+                _lockedSessionId = null;
+                _lockedAppKey = null;
+            }
+        }
+
+        _stateStore.MovePriorityAppToTop(appKey);
+        Evaluate(forceNotify: true);
+
+        var snap = GetSnapshot();
+        var matchingSession = snap.Sessions.Find(s =>
+            string.Equals(s.AppKey, appKey, StringComparison.OrdinalIgnoreCase));
+
+        string displayName;
+        string? exePath;
+        if (matchingSession != null)
+        {
+            displayName = matchingSession.DisplayName;
+            exePath = matchingSession.ExePath;
+        }
+        else
+        {
+            var info = _stateStore.GetPriorityAppInfo(appKey);
+            displayName = info?.DisplayName ?? appKey;
+            exePath = info?.ExePath;
+        }
+
+        NotifyOsd(displayName, Strings.OsdPromotedTop, exePath, appKey: appKey);
+    }
+
     public void ToggleSoloMode()
     {
         bool nextSolo = false;

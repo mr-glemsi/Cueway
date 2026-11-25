@@ -295,23 +295,46 @@ internal static class Strings
     // Elevation & Task Scheduler Card
     public static string ElevCardTitle => T("Yönetici Yetkisi ve Görev Zamanlayıcı (UIPI)", "Administrator Elevation & Task Scheduler (UIPI)", "管理员权限与计划任务 (UIPI)", "Permisos y Programador de Tareas (UIPI)", "Права администратора и Планировщик (UIPI)", "Administratorrechte & Aufgabenplanung (UIPI)", "Élévation & Planificateur de tâches (UIPI)", "管理者権限とタスクスケジューラ (UIPI)", "관리자 권한 및 작업 스케줄러 (UIPI)");
     public static string ElevCardSub => T(
-        "Tam ekran oyunlarda ve yönetici pencerelerinde medya kancasının düşmemesi için HighestAvailable görevi kurar",
-        "Registers a HighestAvailable logon task so media hooks stay active over fullscreen games and elevated apps",
-        "创建 HighestAvailable 登录任务，防止全屏游戏或管理员窗口拦截媒体按键钩子",
-        "Crea una tarea HighestAvailable para mantener los atajos activos sobre juegos en pantalla completa",
-        "Создаёт задачу HighestAvailable, чтобы хук не слетал в полноэкранных играх и окнах от имени администратора",
-        "Erstellt eine HighestAvailable-Aufgabe, damit Medientasten in Vollbildspielen aktiv bleiben",
-        "Crée une tâche HighestAvailable pour garder les raccourcis actifs dans les jeux plein écran",
-        "フルスクリーンゲームや管理者権限アプリ上でもメディアフックが動作するようタスク登録します",
-        "전체 화면 게임이나 관리자 창에서도 미디어 후크가 유지되도록 HighestAvailable 작업을 등록합니다");
+        "Başlangıç görevini Yönetici İzinli (oyunlar için önerilen) veya Normal yetkili kurun",
+        "Register startup task with Elevated (recommended for games) or Normal privileges",
+        "可选择管理员权限（推荐）或普通用户权限注册开机登录任务",
+        "Crea una tarea de inicio con privilegios elevados o normales",
+        "Создаёт задачу автозапуска с правами администратора или обычными правами",
+        "Erstellt Anmeldeaufgabe mit erhöhten oder normalen Rechten",
+        "Enregistre une tâche d'ouverture avec droits élevés ou normaux",
+        "管理者権限（推奨）または通常権限でログオン起動タスクを登録します",
+        "관리자 권한(권장) 또는 일반 사용자 권한으로 로그온 시작 작업을 등록합니다");
     public static string BadgeAdmin => T("Yönetici", "Elevated", "管理员", "Admin", "Админ", "Admin", "Admin", "管理者", "관리자");
     public static string BadgeStandard => T("Standart", "Standard", "标准权限", "Estándar", "Обычный", "Standard", "Standard", "標準", "표준");
-    public static string BadgeTaskInstalled => T("Görev Kayıtlı", "Task Installed", "任务已注册", "Tarea activa", "Задача создана", "Aufgabe aktiv", "Tâche active", "タスク登録済", "작업 등록됨");
+    public static string BadgeTaskInstalledElevated => T("Görev: Yönetici", "Task: Elevated", "任务：管理员", "Tarea: Admin", "Задача: Админ", "Aufgabe: Admin", "Tâche : Admin", "タスク: 管理者", "작업: 관리자");
+    public static string BadgeTaskInstalledNormal => T("Görev: Normal", "Task: Normal", "任务：普通", "Tarea: Normal", "Задача: Обычная", "Aufgabe: Normal", "Tâche : Normal", "タスク: 通常", "작업: 일반");
     public static string BadgeTaskMissing => T("Kayıtlı Değil", "Not Installed", "未注册", "Sin tarea", "Нет задачи", "Nicht erstellt", "Non installée", "未登録", "미등록");
     public static string BtnTaskInstall => T("Görev Kur", "Install Task", "安装任务", "Crear tarea", "Создать задачу", "Aufgabe erstellen", "Créer tâche", "タスク登録", "작업 설치");
     public static string BtnTaskRemove => T("Görevi Kaldır", "Remove Task", "移除任务", "Eliminar tarea", "Удалить задачу", "Aufgabe entfernen", "Supprimer", "タスク削除", "작업 제거");
     public static string BtnTaskBusy => T("İşleniyor...", "Working...", "处理中...", "Procesando...", "Выполнение...", "Läuft...", "En cours...", "処理中...", "처리 중...");
     public static string BtnRestartAdmin => T("Yönetici Başlat", "Run as Admin", "管理员重启", "Abrir como Admin", "От имени админа", "Als Admin starten", "Relancer Admin", "管理者で再起動", "관리자 실행");
+    public static string TaskOptElevatedTitle => T("Yönetici İzinli (Önerilen)", "Elevated (Recommended)", "管理员权限（推荐）", "Con permisos elevados (Rec.)", "С правами администратора", "Erhöhte Rechte (Empfohlen)", "Privilèges élevés (Recommandé)", "管理者権限（推奨）", "관리자 권한 (권장)");
+    public static string TaskOptElevatedSub => T(
+        "Oyun ve yönetici pencerelerinde tuşlar düşmez (tek sefer UAC)",
+        "Keeps hotkeys active over games & elevated apps (1x UAC)",
+        "在游戏与管理员窗口中热键不失效（创建时需一次 UAC）",
+        "Mantiene los atajos activos sobre juegos y apps elevadas",
+        "Хуки работают поверх игр и окон от имени администратора",
+        "Tasten bleiben in Spielen & Admin-Fenstern aktiv",
+        "Garde les raccourcis actifs sur jeux et fenêtres élevées",
+        "ゲームや管理者権限アプリ上でも動作します（初回のみ UAC）",
+        "게임 및 관리자 창에서도 단축키가 유지됩니다 (최초 1회 UAC)");
+    public static string TaskOptNormalTitle => T("Normal Yetkili", "Normal Privilege", "普通用户权限", "Privilegios normales", "Обычные права", "Normale Rechte", "Privilèges normaux", "通常権限", "일반 권한");
+    public static string TaskOptNormalSub => T(
+        "Standart kullanıcı yetkisiyle başlar (UAC istemez)",
+        "Runs with standard user rights (no UAC prompt)",
+        "以标准用户权限自动启动（无需 UAC 确认）",
+        "Inicia con permisos estándar sin avisos de UAC",
+        "Запускается с обычными правами без запросов UAC",
+        "Startet mit Standardrechten ohne UAC-Abfrage",
+        "Démarre avec les droits standard sans invite UAC",
+        "標準ユーザー権限で自動起動します（UAC 不要）",
+        "표준 사용자 권한으로 자동 시작합니다 (UAC 없음)");
 
     // Media & Audio Section
     public static string SecMediaAudio => T("MEDYA VE SES KONTROLÜ", "MEDIA & AUDIO CONTROL", "媒体与音频控制", "CONTROL MULTIMEDIA Y AUDIO", "УПРАВЛЕНИЕ МЕДИА И ЗВУКОМ", "MEDIEN- & AUDIOSTEUERUNG", "CONTRÔLE MÉDIA & AUDIO", "メディアとオーディオ制御", "미디어 및 오디오 제어");
@@ -387,7 +410,7 @@ internal static class Strings
         "既定のオーディオ出力デバイスが切断・変更された際、再生中メディアを即座に一時停止します",
         "기본 오디오 출력 장치가 끊기거나 변경되면 재생 중인 모든 세션을 즉시 일시정지합니다");
 
-    public static string SetSoloTitle => T("Solo Modu (Alt + S)", "Solo Mode (Alt + S)", "独奏模式 (Alt + S)", "Modo Solo (Alt + S)", "Режим Соло (Alt + S)", "Solo-Modus (Alt + S)", "Mode Solo (Alt + S)", "ソロモード (Alt + S)", "솔로 모드 (Alt + S)");
+    public static string SetSoloTitle => T("Solo Modu", "Solo Mode", "独奏模式", "Modo Solo", "Режим Соло", "Solo-Modus", "Mode Solo", "ソロモード", "솔로 모드");
     public static string SetSoloSub => T(
         "Aktif hedef dışındaki tüm açık uygulamaların sesini geçici olarak sustur",
         "Temporarily mute all running applications except the active target",
@@ -451,6 +474,76 @@ internal static class Strings
 
     public static string UnitSeconds => T("sn", "s", "秒", "s", "с", "s", "s", "秒", "초");
 
+    // Shortcuts Section & Hotkey Capture
+    public static string SecGlobalHotkeys => T("KISAYOLLAR", "KEYBOARD SHORTCUTS", "快捷键设置", "ATAJOS DE TECLADO", "ГОРЯЧИЕ КЛАВИШИ", "TASTENKÜRZEL", "RACCOURCIS CLAVIER", "ショートカット", "단축키 설정");
+    public static string SetHkToggleTitle => T("Cueway Penceresini Aç / Gizle", "Show / Hide Cueway Window", "打开 / 隐藏主窗口", "Mostrar u ocultar Cueway", "Показать / скрыть окно", "Fenster anzeigen / ausblenden", "Afficher / masquer la fenêtre", "ウィンドウを表示 / 非表示", "Cueway 창 열기 / 숨기기");
+    public static string SetHkToggleSub => T(
+        "Herhangi bir pencereden Cueway kontrol panelini hızlıca açar veya küçültür",
+        "Quickly bring up or hide the Cueway window from anywhere",
+        "从任意应用全局呼出或隐藏 Cueway 控制面板",
+        "Abre o minimiza la ventana de Cueway desde cualquier lugar",
+        "Быстрый вызов или скрытие окна Cueway из любого приложения",
+        "Öffnet oder versteckt Cueway schnell aus jeder Anwendung",
+        "Affiche ou masque rapidement Cueway depuis n'importe où",
+        "どこからでも Cueway ウィンドウを素早く開閉します",
+        "어디서나 Cueway 창을 빠르게 열거나 숨깁니다");
+    public static string SetHkLockTitle => T("Manuel Kilit Aç / Kapat", "Toggle Manual Lock", "切换手动锁定", "Alternar bloqueo manual", "Ручной замок", "Manuelle Sperre umschalten", "Basculer le verrou manuel", "手動ロック切替", "수동 잠금 전환");
+    public static string SetHkLockSub => T(
+        "Medya tuşlarını seçili hedefe kilitlemek veya serbest bırakmak için kısayol",
+        "Lock or unlock media routing to the current active target",
+        "将媒体控制锁定到当前目标或恢复自动优先级",
+        "Fija o libera el destino multimedia activo",
+        "Закрепляет или снимает блокировку текущей медиацели",
+        "Sperrt oder entsperrt das aktuelle aktive Medienziel",
+        "Verrouille ou déverrouille la cible média active",
+        "現在の対象への手動ロックを切り替えます",
+        "현재 활성 미디어 대상에 대한 수동 잠금을 전환합니다");
+    public static string SetHkSoloTitle => T("Solo Modunu Aç / Kapat", "Toggle Solo Mode", "切换独奏模式", "Alternar modo Solo", "Режим Соло", "Solo-Modus umschalten", "Basculer le mode Solo", "ソロモード切替", "솔로 모드 전환");
+    public static string SetHkSoloSub => T(
+        "Aktif hedef dışındaki tüm açık uygulamaların sesini susturur veya geri açar",
+        "Mute or restore audio for all running apps except the active target",
+        "一键静音或恢复除当前目标外的所有应用程序音量",
+        "Silencia o restaura el audio de todas las apps excepto el destino activo",
+        "Отключает или возвращает звук всем приложениям, кроме активной цели",
+        "Schaltet alle Apps außer dem aktiven Ziel stumm oder stellt sie wieder her",
+        "Coupe ou rétablit le son de toutes les apps sauf la cible active",
+        "対象以外のすべてのアプリの音をミュートまたは解除します",
+        "활성 대상 외의 모든 실행 중 앱 소리를 끄거나 켭니다");
+    public static string SetHkPlayPauseTitle => T("Oynat / Duraklat Kısayolu", "Play / Pause Shortcut", "播放 / 暂停快捷键", "Atajo Reproducir / Pausar", "Воспр. / Пауза", "Wiedergabe / Pause-Kürzel", "Raccourci Lecture / Pause", "再生 / 一時停止ショートカット", "재생 / 일시정지 단축키");
+    public static string SetHkPlayPauseSub => T(
+        "Fiziksel medya tuşu olmayan klavyeler için isteğe bağlı Oynat/Duraklat tuşu",
+        "Optional Play/Pause shortcut for keyboards without dedicated media keys",
+        "为没有独立媒体键的键盘提供可选播放/暂停快捷键",
+        "Atajo opcional de Reproducir/Pausar para teclados sin teclas multimedia",
+        "Дополнительная клавиша Воспр./Пауза для клавиатур без медиа-кнопок",
+        "Optionales Kürzel für Tastaturen ohne eigene Medientasten",
+        "Raccourci optionnel Lecture/Pause pour claviers sans touches média",
+        "メディアキー非搭載キーボード用の再生/一時停止ショートカット",
+        "미디어 키가 없는 키보드용 선택적 재생/일시정지 단축키");
+    public static string HotkeyAssignShort => T("+ Kısayol", "+ Hotkey", "+ 快捷键", "+ Atajo", "+ Клавиша", "+ Kürzel", "+ Raccourci", "+ キー設定", "+ 단축키");
+    public static string HotkeyUnassigned => T("Atanmadı", "Not set", "未设置", "Sin asignar", "Не задано", "Nicht belegt", "Non défini", "未設定", "미지정");
+    public static string HotkeyListening => T("Tuşa basın...", "Press keys...", "请按键...", "Pulsa teclas...", "Нажмите...", "Taste drücken...", "Appuyez...", "キー入力待ち...", "키를 누르세요...");
+    public static string HotkeyHint => T(
+        "Kısayola tıklayıp tuş kombinasyonuna basın (örn. Ctrl+Alt+Y)  •  Esc: İptal  •  Backspace / ×: Temizle",
+        "Click a shortcut pill and press any combo (e.g. Ctrl+Alt+Y)  •  Esc: Cancel  •  Backspace / ×: Clear",
+        "点击快捷键按钮并按下组合键（例如 Ctrl+Alt+Y） •  Esc：取消  •  Backspace / ×：清除",
+        "Haz clic y pulsa una combinación (ej. Ctrl+Alt+Y)  •  Esc: Cancelar  •  Backspace / ×: Borrar",
+        "Нажмите на кнопку и введите сочетание (напр. Ctrl+Alt+Y)  •  Esc: Отмена  •  Backspace / ×: Сброс",
+        "Feld anklicken und Kombination drücken (z. B. Strg+Alt+Y)  •  Esc: Abbruch  •  Backspace / ×: Leeren",
+        "Cliquez puis appuyez sur une combinaison (ex. Ctrl+Alt+Y)  •  Échap : Annuler  •  Retour / × : Effacer",
+        "ボタンをクリックしてキーを押してください（例: Ctrl+Alt+Y） •  Esc: 取消  •  Backspace / ×: 解除",
+        "단축키를 클릭하고 키 조합을 누르세요 (예: Ctrl+Alt+Y)  •  Esc: 취소  •  Backspace / ×: 지우기");
+    public static string MsgHotkeyNeedsModifier => T(
+        "Harf/sayı tuşları için Ctrl, Alt, Shift veya Win ile birlikte basın (F1-F12 ve Numpad tek basılabilir).",
+        "Combine letters or numbers with Ctrl, Alt, Shift, or Win (F1-F12 and Numpad work alone).",
+        "字母和数字键需搭配 Ctrl、Alt、Shift 或 Win 使用（F1-F12 与小键盘可单独使用）。",
+        "Combina letras o números con Ctrl, Alt, Shift o Win (F1-F12 y Numpad funcionan solos).",
+        "Буквы и цифры используйте с Ctrl, Alt, Shift или Win (F1-F12 и Numpad работают отдельно).",
+        "Buchstaben/Zahlen mit Ctrl, Alt, Shift oder Win kombinieren (F1-F12 & Numpad gehen einzeln).",
+        "Associez lettres/chiffres à Ctrl, Alt, Shift ou Win (F1-F12 et pavé numérique seuls).",
+        "文字・数字キーは Ctrl/Alt/Shift/Win と組み合わせてください（F1〜F12 とテンキーは単体可）。",
+        "문자/숫자 키는 Ctrl, Alt, Shift 또는 Win과 함께 누르세요 (F1-F12 및 숫자 패드 단독 가능).");
+
     // Tools & Shortcuts
     public static string SecToolsShortcuts => T("ARAÇLAR, KISAYOLLAR VE DURUM DOSYASI", "TOOLS, SHORTCUTS & STATE FILE", "工具、快捷键与状态文件", "HERRAMIENTAS, ATAJOS Y ESTADO", "ИНСТРУМЕНТЫ, КЛАВИШИ И ФАЙЛ СОСТОЯНИЯ", "WERKZEUGE, KÜRZEL & STATUSDATEI", "OUTILS, RACCOURCIS & ÉTAT", "ツール・ショートカット・設定ファイル", "도구, 단축키 및 상태 파일");
     public static string BtnRehook => T("Kancayı Yenile", "Refresh Hooks", "刷新钩子", "Refrescar ganchos", "Обновить хуки", "Hooks erneuern", "Actualiser hooks", "フック更新", "후크 새로고침");
@@ -468,16 +561,25 @@ internal static class Strings
         "Ctrl / Shift + メディアキー  →  優先順を変えずに 2 番目の対象へ単発コマンド送信",
         "Ctrl / Shift + 미디어 키  →  우선순위 변경 없이 2순위 세션에 일회성 명령 전송");
 
-    public static string ShortcutToggles => T(
-        "Alt + M  →  Manuel Kilidi aç/kapat     •     Alt + S  →  Solo Modunu aç/kapat",
-        "Alt + M  →  Toggle Manual Lock     •     Alt + S  →  Toggle Solo Mode",
-        "Alt + M  →  切换手动锁定     •     Alt + S  →  切换独奏模式",
-        "Alt + M  →  Bloqueo manual     •     Alt + S  →  Modo Solo",
-        "Alt + M  →  Ручной замок     •     Alt + S  →  Режим Соло",
-        "Alt + M  →  Manuelle Sperre     •     Alt + S  →  Solo-Modus",
-        "Alt + M  →  Verrou manuel     •     Alt + S  →  Mode Solo",
-        "Alt + M  →  手動ロック切替     •     Alt + S  →  ソロモード切替",
-        "Alt + M  →  수동 잠금 전환     •     Alt + S  →  솔로 모드 전환");
+    public static string FormatShortcutToggles(string toggleHk, string lockHk, string soloHk)
+    {
+        string none = HotkeyUnassigned;
+        string t = string.IsNullOrEmpty(toggleHk) ? none : toggleHk;
+        string l = string.IsNullOrEmpty(lockHk) ? none : lockHk;
+        string s = string.IsNullOrEmpty(soloHk) ? none : soloHk;
+        return Current switch
+        {
+            AppLanguage.En => $"{t} → Window   •   {l} → Manual Lock   •   {s} → Solo Mode",
+            AppLanguage.Zh => $"{t} → 窗口   •   {l} → 手动锁定   •   {s} → 独奏模式",
+            AppLanguage.Es => $"{t} → Ventana   •   {l} → Bloqueo   •   {s} → Modo Solo",
+            AppLanguage.Ru => $"{t} → Окно   •   {l} → Замок   •   {s} → Режим Соло",
+            AppLanguage.De => $"{t} → Fenster   •   {l} → Sperre   •   {s} → Solo-Modus",
+            AppLanguage.Fr => $"{t} → Fenêtre   •   {l} → Verrou   •   {s} → Mode Solo",
+            AppLanguage.Ja => $"{t} → 画面   •   {l} → ロック   •   {s} → ソロ",
+            AppLanguage.Ko => $"{t} → 창 전환   •   {l} → 수동 잠금   •   {s} → 솔로 모드",
+            _ => $"{t} → Pencere   •   {l} → Manuel Kilit   •   {s} → Solo Modu"
+        };
+    }
 
     public static string ShortcutTrayWheel => T(
         "Tepsi Simgesi Üzerinde Scroll  →  Yalnızca aktif hedef uygulamanın ses seviyesini değiştirir",
@@ -494,8 +596,8 @@ internal static class Strings
 
     // Tray Menu & Tooltips
     public static string TrayMenuOpen => T("Kontrol Panelini Aç", "Open Control Panel", "打开控制面板", "Abrir panel de control", "Открыть панель управления", "Bedienfeld öffnen", "Ouvrir le panneau", "コントロールパネルを開く", "제어판 열기");
-    public static string TrayMenuLock => T("Manuel Kilit (Alt+M)", "Manual Lock (Alt+M)", "手动锁定 (Alt+M)", "Bloqueo manual (Alt+M)", "Ручной замок (Alt+M)", "Manuelle Sperre (Alt+M)", "Verrou manuel (Alt+M)", "手動ロック (Alt+M)", "수동 잠금 (Alt+M)");
-    public static string TrayMenuSolo => T("Solo Modu (Alt+S)", "Solo Mode (Alt+S)", "独奏模式 (Alt+S)", "Modo Solo (Alt+S)", "Режим Соло (Alt+S)", "Solo-Modus (Alt+S)", "Mode Solo (Alt+S)", "ソロモード (Alt+S)", "솔로 모드 (Alt+S)");
+    public static string TrayMenuLockBase => T("Manuel Kilit", "Manual Lock", "手动锁定", "Bloqueo manual", "Ручной замок", "Manuelle Sperre", "Verrou manuel", "手動ロック", "수동 잠금");
+    public static string TrayMenuSoloBase => T("Solo Modu", "Solo Mode", "独奏模式", "Modo Solo", "Режим Соло", "Solo-Modus", "Mode Solo", "ソロモード", "솔로 모드");
     public static string TrayMenuSettings => T("Ayarlar", "Settings", "设置", "Ajustes", "Настройки", "Einstellungen", "Paramètres", "設定", "설정");
     public static string TrayMenuExit => T("Çıkış", "Exit", "退出", "Salir", "Выход", "Beenden", "Quitter", "終了", "종료");
     public static string TrayTipEmpty => T("Cueway — Aktif medya yok", "Cueway — No active media", "Cueway — 无活动媒体", "Cueway — Sin medios activos", "Cueway — Нет активных медиа", "Cueway — Keine aktiven Medien", "Cueway — Aucun média actif", "Cueway — アクティブなメディアなし", "Cueway — 활성 미디어 없음");
@@ -509,8 +611,10 @@ internal static class Strings
     public static string MsgRestartAdminCancelled => T("Yönetici olarak yeniden başlatma iptal edildi.", "Restart as Administrator cancelled.", "已取消管理员权限重启。", "Reinicio como administrador cancelado.", "Перезапуск с правами администратора отменён.", "Neustart als Administrator abgebrochen.", "Redémarrage administrateur annulé.", "管理者としての再起動をキャンセルしました。", "관리자 권한 재시작이 취소되었습니다.");
 
     public static string MsgTaskExeMissing => T("Uygulama yolu bulunamadı.", "Executable path not found.", "未找到程序路径。", "No se encontró el ejecutable.", "Путь к файлу не найден.", "Programmpfad nicht gefunden.", "Chemin de l'exécutable introuvable.", "実行ファイルパスが見つかりません。", "실행 파일 경로를 찾을 수 없습니다.");
-    public static string MsgTaskInstalled => T("Yüksek yetkili başlangıç görevi kaydedildi.", "Elevated logon task installed.", "高权限开机任务已成功创建。", "Tarea elevada registrada.", "Задача с повышенными правами создана.", "Aufgabe mit höchsten Rechten installiert.", "Tâche planifiée élevée créée.", "高権限のログオンタスクを登録しました。", "관리자 권한 로그온 작업이 등록되었습니다.");
+    public static string MsgTaskInstalledElevated => T("Yönetici izinli başlangıç görevi kaydedildi.", "Elevated logon task installed.", "管理员权限开机任务已创建。", "Tarea elevada registrada.", "Задача с правами администратора создана.", "Aufgabe mit erhöhten Rechten installiert.", "Tâche élevée créée.", "管理者権限のログオンタスクを登録しました。", "관리자 권한 로그온 작업이 등록되었습니다.");
+    public static string MsgTaskInstalledNormal => T("Normal yetkili başlangıç görevi kaydedildi.", "Normal-privilege logon task installed.", "普通权限开机任务已创建。", "Tarea estándar registrada.", "Задача с обычными правами создана.", "Aufgabe mit normalen Rechten installiert.", "Tâche normale créée.", "通常権限のログオンタスクを登録しました。", "일반 권한 로그온 작업이 등록되었습니다.");
     public static string MsgTaskInstallFail => T("Görev kaydedilemedi veya UAC iptal edildi.", "Task installation failed or UAC cancelled.", "创建任务失败或已取消 UAC 授权。", "Error al crear la tarea o UAC cancelado.", "Не удалось создать задачу или UAC отменён.", "Aufgabenerstellung fehlgeschlagen oder abgebrochen.", "Échec de création ou UAC annulé.", "タスクの登録に失敗または UAC がキャンセルされました。", "작업을 설치하지 못했거나 UAC가 취소되었습니다.");
+    public static string MsgTaskInstallFailNormal => T("Normal başlangıç görevi kaydedilemedi.", "Failed to install normal logon task.", "无法创建普通权限开机任务。", "No se pudo crear la tarea estándar.", "Не удалось создать обычную задачу.", "Normale Aufgabe konnte nicht erstellt werden.", "Impossible de créer la tâche normale.", "通常タスクの登録に失敗しました。", "일반 작업을 등록하지 못했습니다.");
     public static string MsgTaskRemoved => T("Görev Zamanlayıcısı kaydı kaldırıldı.", "Scheduled task removed.", "计划任务已移除。", "Tarea programada eliminada.", "Задача планировщика удалена.", "Geplante Aufgabe entfernt.", "Tâche planifiée supprimée.", "スケジュールタスクを削除しました。", "예약된 작업이 제거되었습니다.");
     public static string MsgTaskRemoveFail => T("Görev kaldırılamadı.", "Failed to remove scheduled task.", "无法移除计划任务。", "No se pudo eliminar la tarea.", "Не удалось удалить задачу.", "Aufgabe konnte nicht entfernt werden.", "Impossible de supprimer la tâche.", "タスクを削除できませんでした。", "작업을 제거하지 못했습니다.");
     public static string MsgTaskCancelled => T("Görev kaldırma işlemi iptal edildi.", "Task removal cancelled.", "已取消移除任务。", "Eliminación cancelada.", "Удаление задачи отменено.", "Entfernen abgebrochen.", "Suppression annulée.", "タスク削除をキャンセルしました。", "작업 제거가 취소되었습니다.");
@@ -806,6 +910,7 @@ internal static class Strings
     public static string OsdHeadphoneBody => T("Ses çıkışı değişti — tüm medya duraklatıldı", "Audio output changed — all media paused", "音频输出已改变 — 已暂停所有媒体", "Salida de audio cambiada — medios en pausa", "Устройство вывода изменилось — всё на паузе", "Audioausgabe geändert — Medien pausiert", "Sortie audio changée — médias en pause", "音声出力が変更されました — 全て一時停止", "오디오 출력 변경됨 — 모든 미디어 일시정지");
     public static string OsdManualLockActive => T("Manuel kilit aktif", "Manual lock active", "手动锁定已开启", "Bloqueo manual activo", "Ручной замок активен", "Manuelle Sperre aktiv", "Verrou manuel actif", "手動ロック有効", "수동 잠금 활성화");
     public static string OsdAutoMode => T("Otomatik öncelik moduna geçildi", "Switched to auto priority mode", "已切换回自动优先级模式", "Modo automático activado", "Включён режим автоприоритета", "Auto-Prioritätsmodus aktiv", "Mode priorité auto activé", "自動優先モードに切替", "자동 우선순위 모드로 전환");
+    public static string OsdPromotedTop => T("Öncelik #1 sırasına alındı", "Promoted to #1 priority", "已置顶为第 1 优先级", "Movido a prioridad #1", "Перемещено на 1-е место", "Auf Priorität #1 gesetzt", "Placé en priorité #1", "優先順位 1 位に移動しました", "우선순위 1위로 올렸습니다");
     public static string OsdSoloTitle => T("Solo Modu", "Solo Mode", "独奏模式", "Modo Solo", "Режим Соло", "Solo-Modus", "Mode Solo", "ソロモード", "솔로 모드");
     public static string OsdSoloNoTarget => T("Hedef yok", "No target", "无目标", "Sin destino", "Нет цели", "Kein Ziel", "Aucune cible", "対象なし", "대상 없음");
     public static string OsdSoloEnabled(string targetName) => Current switch
@@ -867,4 +972,139 @@ internal static class Strings
     public static string OsdMuted => T("Sessize alındı", "Muted", "已静音", "Silenciado", "Без звука", "Stummgeschaltet", "Son coupé", "ミュートしました", "음소거됨");
     public static string OsdUnmuted => T("Ses açıldı", "Unmuted", "已取消静音", "Sonido activado", "Звук включён", "Stummschaltung aus", "Son réactivé", "ミュート解除", "음소거 해제됨");
     public static string FormatPercent(int pct) => Current == AppLanguage.Tr ? $"%{pct}" : $"{pct}%";
+
+    // Auto-Updater & In-App Release Banner
+    public static string UpdateBadgeNew => T("YENİ", "NEW", "新版", "NUEVO", "НОВОЕ", "NEU", "NOUVEAU", "新着", "새 버전");
+    public static string UpdateAvailableBanner(string ver) => Current switch
+    {
+        AppLanguage.En => $"Cueway v{ver} is available — click to download",
+        AppLanguage.Zh => $"Cueway v{ver} 新版本可用 — 点击立即下载",
+        AppLanguage.Es => $"Cueway v{ver} disponible — haz clic para descargar",
+        AppLanguage.Ru => $"Доступна Cueway v{ver} — нажмите для загрузки",
+        AppLanguage.De => $"Cueway v{ver} verfügbar — zum Herunterladen klicken",
+        AppLanguage.Fr => $"Cueway v{ver} disponible — cliquez pour télécharger",
+        AppLanguage.Ja => $"Cueway v{ver} が利用可能です — クリックしてダウンロード",
+        AppLanguage.Ko => $"Cueway v{ver} 업데이트 있음 — 클릭하여 다운로드",
+        _ => $"Cueway v{ver} güncellemesi hazır — indirmek için tıklayın"
+    };
+    public static string UpdateBtnDownload => T("İndir", "Download", "下载", "Descargar", "Скачать", "Laden", "Télécharger", "ダウンロード", "다운로드");
+    public static string UpdateDownloadingText(string ver, int pct, string progressMb) => Current switch
+    {
+        AppLanguage.En => $"Downloading v{ver}... {pct}% ({progressMb})",
+        AppLanguage.Zh => $"正在下载 v{ver}... {pct}% ({progressMb})",
+        AppLanguage.Es => $"Descargando v{ver}... {pct}% ({progressMb})",
+        AppLanguage.Ru => $"Загрузка v{ver}... {pct}% ({progressMb})",
+        AppLanguage.De => $"Lade v{ver}... {pct}% ({progressMb})",
+        AppLanguage.Fr => $"Téléchargement v{ver}... {pct}% ({progressMb})",
+        AppLanguage.Ja => $"v{ver} をダウンロード中... {pct}% ({progressMb})",
+        AppLanguage.Ko => $"v{ver} 다운로드 중... {pct}% ({progressMb})",
+        _ => $"v{ver} indiriliyor... %{pct} ({progressMb})"
+    };
+    public static string UpdateDownloadingIndetText(string ver, string doneMb) => Current switch
+    {
+        AppLanguage.En => $"Downloading v{ver}... ({doneMb})",
+        AppLanguage.Zh => $"正在下载 v{ver}... ({doneMb})",
+        AppLanguage.Es => $"Descargando v{ver}... ({doneMb})",
+        AppLanguage.Ru => $"Загрузка v{ver}... ({doneMb})",
+        AppLanguage.De => $"Lade v{ver}... ({doneMb})",
+        AppLanguage.Fr => $"Téléchargement v{ver}... ({doneMb})",
+        AppLanguage.Ja => $"v{ver} をダウンロード中... ({doneMb})",
+        AppLanguage.Ko => $"v{ver} 다운로드 중... ({doneMb})",
+        _ => $"v{ver} indiriliyor... ({doneMb})"
+    };
+    public static string UpdateBtnCancel => T("İptal", "Cancel", "取消", "Cancelar", "Отмена", "Abbrechen", "Annuler", "キャンセル", "취소");
+    public static string UpdateReadyBanner(string ver) => Current switch
+    {
+        AppLanguage.En => $"Cueway v{ver} downloaded — ready to install",
+        AppLanguage.Zh => $"Cueway v{ver} 下载完成 — 可以安装",
+        AppLanguage.Es => $"Cueway v{ver} descargada — lista para instalar",
+        AppLanguage.Ru => $"Cueway v{ver} загружена — готова к установке",
+        AppLanguage.De => $"Cueway v{ver} geladen — bereit zur Installation",
+        AppLanguage.Fr => $"Cueway v{ver} téléchargée — prête à installer",
+        AppLanguage.Ja => $"Cueway v{ver} の準備ができました",
+        AppLanguage.Ko => $"Cueway v{ver} 다운로드 완료 — 설치 준비됨",
+        _ => $"Cueway v{ver} indirildi — kuruluma hazır"
+    };
+    public static string UpdateBtnInstall => T("Kur ve Yeniden Başlat", "Install & Restart", "安装并重启", "Instalar y reiniciar", "Установить и перезапустить", "Installieren & Neu starten", "Installer et redémarrer", "インストールして再起動", "설치 및 다시 시작");
+    public static string UpdateFailedBanner => T("Güncelleme indirilemedi", "Update download failed", "更新下载失败", "Error al descargar la actualización", "Не удалось загрузить обновление", "Update-Download fehlgeschlagen", "Échec du téléchargement", "更新のダウンロードに失敗", "업데이트 다운로드 실패");
+    public static string UpdateBtnRetry => T("Tekrar Dene", "Retry", "重试", "Reintentar", "Повторить", "Erneut", "Réessayer", "再試行", "다시 시도");
+
+    public static string SetAutoUpdateTitle => T("Otomatik Güncelleme Kontrolü", "Automatic Update Checks", "自动检查更新", "Buscar actualizaciones automáticamente", "Автопроверка обновлений", "Automatisch nach Updates suchen", "Vérification automatique des mises à jour", "自動アップデート確認", "자동 업데이트 확인");
+    public static string SetAutoUpdateSub => T(
+        "Başlangıçta GitHub üzerinden yeni Cueway sürümü olup olmadığını sessizce kontrol et",
+        "Check GitHub Releases silently at startup for new Cueway versions",
+        "启动时自动检查 GitHub Releases 是否有新版本",
+        "Comprueba en segundo plano si hay una nueva versión en GitHub",
+        "Проверять новые релизы Cueway на GitHub при запуске",
+        "Beim Start automatisch auf GitHub nach neuen Versionen suchen",
+        "Vérifier automatiquement les nouvelles versions sur GitHub au démarrage",
+        "起動時に GitHub の新しいリリースを自動確認します",
+        "시작 시 GitHub 릴리스에서 새 버전을 자동으로 확인합니다");
+    public static string SetUpdateCheckTitle => T("Uygulama Güncellemeleri", "Application Updates", "应用更新", "Actualizaciones de la app", "Обновления приложения", "Anwendungs-Updates", "Mises à jour", "アプリの更新", "애플리케이션 업데이트");
+    public static string SetUpdateSubCurrent(string cur) => Current switch
+    {
+        AppLanguage.En => $"Installed version: v{cur}",
+        AppLanguage.Zh => $"当前版本：v{cur}",
+        AppLanguage.Es => $"Versión instalada: v{cur}",
+        AppLanguage.Ru => $"Установлена версия: v{cur}",
+        AppLanguage.De => $"Installierte Version: v{cur}",
+        AppLanguage.Fr => $"Version installée : v{cur}",
+        AppLanguage.Ja => $"現在のバージョン: v{cur}",
+        AppLanguage.Ko => $"현재 버전: v{cur}",
+        _ => $"Mevcut sürüm: v{cur}"
+    };
+    public static string SetUpdateSubChecking => T("GitHub üzerinden yeni sürüm kontrol ediliyor...", "Checking GitHub for updates...", "正在检查更新...", "Comprobando actualizaciones en GitHub...", "Проверка обновлений на GitHub...", "Suche nach Updates auf GitHub...", "Recherche de mises à jour sur GitHub...", "GitHub で更新を確認中...", "GitHub에서 업데이트 확인 중...");
+    public static string SetUpdateSubUpToDate(string cur) => Current switch
+    {
+        AppLanguage.En => $"You're up to date (v{cur})",
+        AppLanguage.Zh => $"已是最新版本 (v{cur})",
+        AppLanguage.Es => $"Están al día (v{cur})",
+        AppLanguage.Ru => $"У вас актуальная версия (v{cur})",
+        AppLanguage.De => $"Sie sind auf dem neuesten Stand (v{cur})",
+        AppLanguage.Fr => $"Vous utilisez la dernière version (v{cur})",
+        AppLanguage.Ja => $"最新バージョンです (v{cur})",
+        AppLanguage.Ko => $"최신 버전입니다 (v{cur})",
+        _ => $"Güncel sürüm kullanıyorsunuz (v{cur})"
+    };
+    public static string SetUpdateSubAvailable(string latest) => Current switch
+    {
+        AppLanguage.En => $"New release found: v{latest}",
+        AppLanguage.Zh => $"发现新版本：v{latest}",
+        AppLanguage.Es => $"Nueva versión encontrada: v{latest}",
+        AppLanguage.Ru => $"Найдена новая версия: v{latest}",
+        AppLanguage.De => $"Neue Version gefunden: v{latest}",
+        AppLanguage.Fr => $"Nouvelle version disponible : v{latest}",
+        AppLanguage.Ja => $"新しいバージョンが見つかりました: v{latest}",
+        AppLanguage.Ko => $"새 버전 발견: v{latest}",
+        _ => $"Yeni sürüm bulundu: v{latest}"
+    };
+    public static string SetUpdateSubFailed => T("GitHub sürüm sunucusuna ulaşılamadı", "Could not reach GitHub Releases", "无法连接到 GitHub 更新服务器", "No se pudo conectar con GitHub", "Не удалось связаться с GitHub", "GitHub konnte nicht erreicht werden", "Impossible de joindre GitHub", "GitHub に接続できませんでした", "GitHub 서버에 연결할 수 없습니다");
+    public static string BtnCheckUpdates => T("Kontrol Et", "Check Now", "检查更新", "Buscar ahora", "Проверить", "Jetzt prüfen", "Vérifier", "今すぐ確認", "지금 확인");
+    public static string BtnCheckingUpdates => T("Kontrol...", "Checking...", "检查中...", "Buscando...", "Проверка...", "Prüfe...", "Recherche...", "確認中...", "확인 중...");
+    public static string TrayMenuUpdateAvailable(string ver) => Current switch
+    {
+        AppLanguage.En => $"Update Available (v{ver})",
+        AppLanguage.Zh => $"发现新版本 (v{ver})",
+        AppLanguage.Es => $"Actualización disponible (v{ver})",
+        AppLanguage.Ru => $"Доступно обновление (v{ver})",
+        AppLanguage.De => $"Update verfügbar (v{ver})",
+        AppLanguage.Fr => $"Mise à jour disponible (v{ver})",
+        AppLanguage.Ja => $"更新が利用可能 (v{ver})",
+        AppLanguage.Ko => $"업데이트 사용 가능 (v{ver})",
+        _ => $"Güncelleme Mevcut (v{ver})"
+    };
+    public static string OsdUpdateTitle => T("Cueway Güncellemesi", "Cueway Update", "Cueway 更新", "Actualización de Cueway", "Обновление Cueway", "Cueway-Update", "Mise à jour Cueway", "Cueway アップデート", "Cueway 업데이트");
+    public static string OsdUpdateBody(string ver) => Current switch
+    {
+        AppLanguage.En => $"v{ver} available — open Cueway to download",
+        AppLanguage.Zh => $"v{ver} 已发布 — 打开 Cueway 即可下载",
+        AppLanguage.Es => $"v{ver} disponible — abre Cueway para descargar",
+        AppLanguage.Ru => $"Доступна v{ver} — откройте Cueway",
+        AppLanguage.De => $"v{ver} verfügbar — Cueway öffnen",
+        AppLanguage.Fr => $"v{ver} disponible — ouvrez Cueway",
+        AppLanguage.Ja => $"v{ver} が公開中 — Cueway でダウンロード",
+        AppLanguage.Ko => $"v{ver} 출시됨 — Cueway에서 다운로드",
+        _ => $"v{ver} hazır — indirmek için Cueway'i açın"
+    };
+    public static string MsgUpdateLaunchCancelled => T("Güncelleme kurulumu iptal edildi.", "Update installation cancelled.", "已取消更新安装。", "Instalación de actualización cancelada.", "Установка обновления отменена.", "Update-Installation abgebrochen.", "Installation annulée.", "アップデートのインストールをキャンセルしました。", "업데이트 설치가 취소되었습니다.");
 }

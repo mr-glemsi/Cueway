@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using Cueway.Media;
+using Cueway.Startup;
 
 namespace Cueway.Config;
 
@@ -13,6 +14,9 @@ namespace Cueway.Config;
 [JsonSerializable(typeof(BridgeTabDto))]
 [JsonSerializable(typeof(List<BridgeTabDto>))]
 [JsonSerializable(typeof(BridgeCommandMessage))]
+[JsonSerializable(typeof(GitHubReleaseDto))]
+[JsonSerializable(typeof(GitHubReleaseAssetDto))]
+[JsonSerializable(typeof(List<GitHubReleaseAssetDto>))]
 internal sealed partial class AppJsonContext : JsonSerializerContext
 {
 }

@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Cueway.Config;
+using Cueway.Input;
 using Cueway.Interop;
 using Cueway.Localization;
 using Cueway.Media;
@@ -25,7 +26,8 @@ internal sealed unsafe class MainWindow : IDisposable
     {
         None = 0,
         Language = 1,
-        Theme = 2
+        Theme = 2,
+        TaskInstall = 3
     }
 
     private sealed record HitRegion(
@@ -49,6 +51,7 @@ internal sealed unsafe class MainWindow : IDisposable
     private readonly DynamicIconRenderer _iconRenderer;
     private readonly StartupService _startupService;
     private readonly BrowserBridgeServer _bridgeServer;
+    private readonly AppUpdateService _updateService;
     private ExtensionGuideWindow? _guideWindow;
 
     private readonly object _dispatchLock = new();
@@ -72,6 +75,10 @@ internal sealed unsafe class MainWindow : IDisposable
     private bool _statusBannerIsError;
     private long _statusBannerUntilTick;
     private bool _taskOpBusy;
+    private KeyboardHookService? _keyboardHook;
+    private string? _capturingTargetId;
+    private string? _capturingHitId;
+    private string? _capturingPreview;
 
     private readonly List<HitRegion> _hitRegions = [];
     private readonly List<SliderRegion> _sliderRegions = [];
@@ -93,6 +100,7 @@ internal sealed unsafe class MainWindow : IDisposable
     private RouterStateSnapshot _snapshot;
     private AppSettings _settings;
     private List<DiscoveredApp> _priorityApps;
+    private UpdateSnapshot _updateSnapshot;
 
     private Func<nuint, bool>? _timerCallback;
     private Action? _wakeOrUnlockCallback;
@@ -112,7 +120,8 @@ internal sealed unsafe class MainWindow : IDisposable
         MediaRouterEngine engine,
         DynamicIconRenderer iconRenderer,
         StartupService startupService,
-        BrowserBridgeServer bridgeServer)
+        BrowserBridgeServer bridgeServer,
+        AppUpdateService updateService)
     {
         _stateStore = stateStore;
         _sessionManager = sessionManager;
@@ -120,9 +129,11 @@ internal sealed unsafe class MainWindow : IDisposable
         _iconRenderer = iconRenderer;
         _startupService = startupService;
         _bridgeServer = bridgeServer;
+        _updateService = updateService;
         _snapshot = _engine.GetSnapshot();
         _settings = _stateStore.GetSettingsSnapshot();
         _priorityApps = _stateStore.GetPriorityAppsSnapshot();
+        _updateSnapshot = _updateService.GetSnapshot();
         _instance = this;
 
         _wmTaskbarCreated = Win32.RegisterWindowMessageW("TaskbarCreated");
@@ -132,6 +143,7 @@ internal sealed unsafe class MainWindow : IDisposable
         _stateStore.StateChanged += OnStoreStateChanged;
         _startupService.StatusChanged += OnStartupStatusChanged;
         _bridgeServer.SessionsChanged += OnBridgeStatusChanged;
+        _updateService.StateChanged += OnUpdateStateChanged;
     }
 
     public void ConfigureHostHooks(
@@ -146,6 +158,73 @@ internal sealed unsafe class MainWindow : IDisposable
         _taskbarCreatedCallback = onTaskbarCreated;
         _trayMessageCallback = onTrayMessage;
         _refreshHooksCallback = onRefreshHooks;
+    }
+
+    public void ConfigureKeyboardHook(KeyboardHookService keyboardHook)
+    {
+        _keyboardHook = keyboardHook;
+    }
+
+    private void StartHotkeyCapture(string targetId, string hitId, Action<string> onCommit)
+    {
+        if (_keyboardHook == null)
+            return;
+
+        if (string.Equals(_capturingTargetId, targetId, StringComparison.Ordinal))
+        {
+            CancelHotkeyCapture();
+            return;
+        }
+
+        _openDropdown = DropdownKind.None;
+        _capturingTargetId = targetId;
+        _capturingHitId = hitId;
+        _capturingPreview = null;
+
+        _keyboardHook.BeginHotkeyCapture(
+            onResult: result => BeginInvoke(() =>
+            {
+                if (!string.Equals(_capturingTargetId, targetId, StringComparison.Ordinal))
+                    return;
+
+                _capturingTargetId = null;
+                _capturingHitId = null;
+                _capturingPreview = null;
+
+                if (result != null)
+                    onCommit(result);
+
+                RequestRepaint();
+            }),
+            onPreview: preview => BeginInvoke(() =>
+            {
+                if (!string.Equals(_capturingTargetId, targetId, StringComparison.Ordinal))
+                    return;
+
+                _capturingPreview = string.IsNullOrEmpty(preview) ? null : preview;
+                RequestRepaint();
+            }),
+            onNeedsModifier: () => BeginInvoke(() =>
+            {
+                if (!string.Equals(_capturingTargetId, targetId, StringComparison.Ordinal))
+                    return;
+
+                _capturingPreview = null;
+                ShowStatusBanner(Strings.MsgHotkeyNeedsModifier, isError: true);
+            }));
+
+        RequestRepaint();
+    }
+
+    private void CancelHotkeyCapture()
+    {
+        bool wasCapturing = _capturingTargetId != null;
+        _capturingTargetId = null;
+        _capturingHitId = null;
+        _capturingPreview = null;
+        _keyboardHook?.CancelHotkeyCapture();
+        if (wasCapturing)
+            RequestRepaint();
     }
 
     private void CreateHostWindow()
@@ -186,6 +265,9 @@ internal sealed unsafe class MainWindow : IDisposable
 
         if (_hwnd != 0)
         {
+            // Allow standard-privilege restarted instances to signal an elevated instance cleanly
+            Win32.ChangeWindowMessageFilterEx(_hwnd, WM_APP_SHUTDOWN_INSTANCE, Win32.MSGFLT_ALLOW, 0);
+
             uint d = Win32.GetDpiForWindow(_hwnd);
             if (d >= 96) _dpi = d;
 
@@ -261,6 +343,11 @@ internal sealed unsafe class MainWindow : IDisposable
         Win32.SetForegroundWindow(_hwnd);
         VisibilityChanged?.Invoke(true);
         RequestRepaint();
+
+        if (_settings.AutoCheckUpdates)
+        {
+            _ = _updateService.CheckIfStaleAsync();
+        }
     }
 
     public void ToggleVisibility()
@@ -268,6 +355,7 @@ internal sealed unsafe class MainWindow : IDisposable
         if (_hwnd == 0) return;
         if (Win32.IsWindowVisible(_hwnd) && !Win32.IsIconic(_hwnd))
         {
+            CancelHotkeyCapture();
             _openDropdown = DropdownKind.None;
             Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
             VisibilityChanged?.Invoke(false);
@@ -327,6 +415,16 @@ internal sealed unsafe class MainWindow : IDisposable
     private void OnBridgeStatusChanged()
     {
         BeginInvoke(RequestRepaint);
+    }
+
+    private void OnUpdateStateChanged(UpdateSnapshot snap)
+    {
+        BeginInvoke(() =>
+        {
+            _updateSnapshot = snap;
+            ClampScroll();
+            RequestRepaint();
+        });
     }
 
     private void UpdateWindowIcon(RouterStateSnapshot snap, bool forceVisibleCheck = true)
@@ -517,6 +615,15 @@ internal sealed unsafe class MainWindow : IDisposable
                 inst.HandleMouseWheel(delta);
                 return 0;
 
+            case Win32.WM_ACTIVATE:
+                if ((wParam & 0xFFFF) == Win32.WA_INACTIVE)
+                    inst.CancelHotkeyCapture();
+                break;
+
+            case Win32.WM_KILLFOCUS:
+                inst.CancelHotkeyCapture();
+                break;
+
             case 0x0100: // WM_KEYDOWN
                 if (wParam == 0x1B && inst._openDropdown != DropdownKind.None) // VK_ESCAPE
                 {
@@ -527,6 +634,7 @@ internal sealed unsafe class MainWindow : IDisposable
                 break;
 
             case Win32.WM_CLOSE:
+                inst.CancelHotkeyCapture();
                 inst._openDropdown = DropdownKind.None;
                 if (inst._settings.MinimizeToTrayOnClose)
                 {
@@ -644,6 +752,10 @@ internal sealed unsafe class MainWindow : IDisposable
         }
 
         var hit = FindHit(x, y);
+        if (_capturingTargetId != null && (hit == null || !string.Equals(hit.Id, _capturingHitId, StringComparison.Ordinal)))
+        {
+            CancelHotkeyCapture();
+        }
         if (hit != null)
         {
             hit.OnClick();
@@ -665,10 +777,22 @@ internal sealed unsafe class MainWindow : IDisposable
         RequestRepaint();
     }
 
+    private bool ShouldShowUpdateBar()
+    {
+        return !_updateSnapshot.Dismissed && _updateSnapshot.Phase is
+            UpdatePhase.Available or
+            UpdatePhase.Downloading or
+            UpdatePhase.ReadyToInstall or
+            UpdatePhase.Failed;
+    }
+
+    private int GetTopChromeHeight()
+        => S(62) + (ShouldShowUpdateBar() ? S(46) : 0);
+
     private void ClampScroll()
     {
-        int headerH = Theme.Scale(62, _dpi);
-        int viewH = Math.Max(1, _clientH - headerH);
+        int topH = GetTopChromeHeight();
+        int viewH = Math.Max(1, _clientH - topH);
         int maxScroll = Math.Max(0, _contentTotalH - viewH);
         _scrollY = Math.Clamp(_scrollY, 0, maxScroll);
     }
@@ -733,12 +857,16 @@ internal sealed unsafe class MainWindow : IDisposable
                     GdiPlus.GdipGraphicsClear(gfx, GdiPlus.Argb(Theme.BgWindow));
 
                     int headerH = S(62);
-                    _bodyClipTop = headerH;
-                    DrawScrollableBody(memDc, gfx, w, h, headerH);
+                    int barH = ShouldShowUpdateBar() ? S(46) : 0;
+                    int topChromeH = headerH + barH;
+                    _bodyClipTop = topChromeH;
+                    DrawScrollableBody(memDc, gfx, w, h, topChromeH);
                     _bodyClipTop = 0;
                     DrawHeader(memDc, gfx, w, headerH);
+                    if (barH > 0)
+                        DrawUpdateBannerBar(memDc, gfx, w, headerH, barH);
                     if (_activeTab == TabKind.Settings && _openDropdown != DropdownKind.None)
-                        DrawOpenDropdownOverlay(memDc, gfx, w, h, headerH);
+                        DrawOpenDropdownOverlay(memDc, gfx, w, h, topChromeH);
                 }
                 finally
                 {
@@ -808,6 +936,7 @@ internal sealed unsafe class MainWindow : IDisposable
         DrawTabButton(dc, gfx, "tab_dash", Strings.TabDashboard, tabGroupX + S(3), tabY + S(3), halfW, tabH - S(6),
             _activeTab == TabKind.Dashboard, () =>
             {
+                CancelHotkeyCapture();
                 _openDropdown = DropdownKind.None;
                 _activeTab = TabKind.Dashboard;
                 _scrollY = 0;
@@ -815,6 +944,7 @@ internal sealed unsafe class MainWindow : IDisposable
         DrawTabButton(dc, gfx, "tab_set", Strings.TabSettings, tabGroupX + S(3) + halfW, tabY + S(3), halfW, tabH - S(6),
             _activeTab == TabKind.Settings, () =>
             {
+                CancelHotkeyCapture();
                 _openDropdown = DropdownKind.None;
                 _activeTab = TabKind.Settings;
                 _scrollY = 0;
@@ -824,6 +954,182 @@ internal sealed unsafe class MainWindow : IDisposable
         DrawActionButton(dc, gfx, "btn_exit", Strings.BtnExit, exitX, tabY, exitW, tabH,
             Theme.BgCard, Theme.BgControlHover, Theme.TextSecondary, Theme.BorderSubtle,
             () => ExitRequested?.Invoke());
+    }
+
+    private void DrawUpdateBannerBar(nint dc, nint gfx, int w, int y, int barH)
+    {
+        var snap = _updateSnapshot;
+        int padX = S(22);
+
+        uint bgColor = snap.Phase switch
+        {
+            UpdatePhase.Available => Theme.AccentSoft,
+            UpdatePhase.Downloading => Theme.BgCardElevated,
+            UpdatePhase.ReadyToInstall => Theme.GreenSoft,
+            _ => Theme.RedSoft
+        };
+        uint lineColor = snap.Phase switch
+        {
+            UpdatePhase.ReadyToInstall => Theme.Green,
+            UpdatePhase.Failed => Theme.Red,
+            _ => Theme.Accent
+        };
+
+        GdiPlus.FillRoundedRect(gfx, 0, y, w, barH, 0, GdiPlus.Argb(bgColor));
+        if (snap.Phase == UpdatePhase.Available && string.Equals(_hoverId, "upd_bar_click", StringComparison.Ordinal))
+        {
+            GdiPlus.FillRoundedRect(gfx, 0, y, w, barH, 0, GdiPlus.Argb(Theme.Accent, 24));
+        }
+        GdiPlus.FillRoundedRect(gfx, 0, y + barH - 1, w, 1, 0, GdiPlus.Argb(lineColor, 130));
+
+        int btnH = S(28);
+        int btnY = y + (barH - btnH) / 2;
+
+        if (snap.Phase == UpdatePhase.Available)
+        {
+            _hitRegions.Add(new HitRegion(
+                new Win32.RECT { Left = 0, Top = y, Right = w, Bottom = y + barH },
+                "upd_bar_click",
+                () => _updateService.StartDownload()));
+
+            int disSz = S(24);
+            int disX = w - padX - disSz;
+            int dlW = Math.Clamp(MeasureTextWidth(dc, Strings.UpdateBtnDownload, 12, Win32.FW_SEMIBOLD) + S(26), S(96), S(148));
+            int dlX = disX - S(8) - dlW;
+
+            int badgeW = Math.Max(S(46), MeasureTextWidth(dc, Strings.UpdateBadgeNew, 10, Win32.FW_BOLD) + S(16));
+            int badgeH = S(20);
+            int badgeY = y + (barH - badgeH) / 2;
+            GdiPlus.FillRoundedRect(gfx, padX, badgeY, badgeW, badgeH, badgeH / 2f, GdiPlus.Argb(Theme.Accent));
+            DrawText(dc, Strings.UpdateBadgeNew, padX, badgeY, padX + badgeW, badgeY + badgeH, 10, Win32.FW_BOLD, Theme.OnAccent, centered: true);
+
+            string msg = Strings.UpdateAvailableBanner(snap.LatestVersion);
+            DrawText(dc, msg, padX + badgeW + S(10), y, dlX - S(12), y + barH, 12, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+
+            bool dlHovered = string.Equals(_hoverId, "upd_btn_dl", StringComparison.Ordinal);
+            GdiPlus.FillAndStrokeRoundedRect(gfx, dlX, btnY, dlW, btnH, SF(7),
+                GdiPlus.Argb(dlHovered ? Theme.AccentHover : Theme.Accent),
+                GdiPlus.Argb(Theme.Accent));
+            DrawText(dc, Strings.UpdateBtnDownload, dlX, btnY, dlX + dlW, btnY + btnH, 12, Win32.FW_SEMIBOLD, Theme.OnAccent, centered: true);
+            _hitRegions.Add(new HitRegion(
+                new Win32.RECT { Left = dlX, Top = btnY, Right = dlX + dlW, Bottom = btnY + btnH },
+                "upd_btn_dl",
+                () => _updateService.StartDownload()));
+
+            DrawIconButton(dc, gfx, "upd_btn_dismiss", SmallButtonGlyph.Close, disX, y + (barH - disSz) / 2, disSz, true,
+                () => _updateService.DismissBanner());
+        }
+        else if (snap.Phase == UpdatePhase.Downloading)
+        {
+            int cancelW = Math.Clamp(MeasureTextWidth(dc, Strings.UpdateBtnCancel, 12, Win32.FW_SEMIBOLD) + S(22), S(82), S(120));
+            int cancelX = w - padX - cancelW;
+            int progW = S(220);
+            int progH = S(8);
+            int progX = cancelX - S(14) - progW;
+            int progY = y + (barH - progH) / 2;
+
+            string text;
+            float ratio = 0f;
+            if (snap.TotalBytes > 0)
+            {
+                int pct = (int)Math.Clamp(snap.BytesDownloaded * 100L / snap.TotalBytes, 0L, 100L);
+                ratio = Math.Clamp((float)snap.BytesDownloaded / snap.TotalBytes, 0f, 1f);
+                string progressMb = $"{AppUpdateService.FormatMegabytes(snap.BytesDownloaded)} / {AppUpdateService.FormatMegabytes(snap.TotalBytes)} MB";
+                text = Strings.UpdateDownloadingText(snap.LatestVersion, pct, progressMb);
+            }
+            else
+            {
+                text = Strings.UpdateDownloadingIndetText(snap.LatestVersion, $"{AppUpdateService.FormatMegabytes(snap.BytesDownloaded)} MB");
+            }
+
+            DrawText(dc, text, padX, y, progX - S(14), y + barH, 12, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+
+            GdiPlus.FillRoundedRect(gfx, progX, progY, progW, progH, progH / 2f, GdiPlus.Argb(Theme.BgControl));
+            if (ratio > 0.005f)
+            {
+                float fillW = Math.Max(progH, progW * ratio);
+                GdiPlus.FillRoundedRect(gfx, progX, progY, fillW, progH, progH / 2f, GdiPlus.Argb(Theme.Accent));
+            }
+            else
+            {
+                float segW = progW * 0.28f;
+                float phase = (float)((Environment.TickCount64 % 1400) / 1400.0);
+                float segX = progX + (progW - segW) * phase;
+                GdiPlus.FillRoundedRect(gfx, segX, progY, segW, progH, progH / 2f, GdiPlus.Argb(Theme.Accent));
+            }
+
+            bool cancelHover = string.Equals(_hoverId, "upd_btn_cancel", StringComparison.Ordinal);
+            GdiPlus.FillAndStrokeRoundedRect(gfx, cancelX, btnY, cancelW, btnH, SF(7),
+                GdiPlus.Argb(cancelHover ? Theme.BgControlHover : Theme.BgControl),
+                GdiPlus.Argb(Theme.BorderStrong));
+            DrawText(dc, Strings.UpdateBtnCancel, cancelX, btnY, cancelX + cancelW, btnY + btnH, 12, Win32.FW_SEMIBOLD, Theme.TextPrimary, centered: true);
+            _hitRegions.Add(new HitRegion(
+                new Win32.RECT { Left = cancelX, Top = btnY, Right = cancelX + cancelW, Bottom = btnY + btnH },
+                "upd_btn_cancel",
+                () => _updateService.CancelDownload()));
+        }
+        else if (snap.Phase == UpdatePhase.ReadyToInstall)
+        {
+            int disSz = S(24);
+            int disX = w - padX - disSz;
+            int instW = Math.Clamp(MeasureTextWidth(dc, Strings.UpdateBtnInstall, 12, Win32.FW_SEMIBOLD) + S(28), S(162), S(230));
+            int instX = disX - S(8) - instW;
+
+            int dotSz = S(8);
+            FillCircleArgb(gfx, GdiPlus.Argb(Theme.Green), padX, y + (barH - dotSz) / 2f, dotSz);
+            DrawText(dc, Strings.UpdateReadyBanner(snap.LatestVersion), padX + dotSz + S(10), y, instX - S(12), y + barH,
+                12, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+
+            bool instHover = string.Equals(_hoverId, "upd_btn_install", StringComparison.Ordinal);
+            GdiPlus.FillAndStrokeRoundedRect(gfx, instX, btnY, instW, btnH, SF(7),
+                GdiPlus.Argb(Theme.Green, instHover ? (byte)255 : (byte)230),
+                GdiPlus.Argb(Theme.Green));
+            DrawText(dc, Strings.UpdateBtnInstall, instX, btnY, instX + instW, btnY + btnH, 12, Win32.FW_SEMIBOLD, Theme.OnAccent, centered: true);
+            _hitRegions.Add(new HitRegion(
+                new Win32.RECT { Left = instX, Top = btnY, Right = instX + instW, Bottom = btnY + btnH },
+                "upd_btn_install",
+                LaunchDownloadedUpdate));
+
+            DrawIconButton(dc, gfx, "upd_btn_dismiss", SmallButtonGlyph.Close, disX, y + (barH - disSz) / 2, disSz, true,
+                () => _updateService.DismissBanner());
+        }
+        else // Failed
+        {
+            int disSz = S(24);
+            int disX = w - padX - disSz;
+            int retryW = Math.Clamp(MeasureTextWidth(dc, Strings.UpdateBtnRetry, 12, Win32.FW_SEMIBOLD) + S(26), S(106), S(156));
+            int retryX = disX - S(8) - retryW;
+
+            int dotSz = S(8);
+            FillCircleArgb(gfx, GdiPlus.Argb(Theme.Red), padX, y + (barH - dotSz) / 2f, dotSz);
+            DrawText(dc, snap.ErrorMessage ?? Strings.UpdateFailedBanner, padX + dotSz + S(10), y, retryX - S(12), y + barH,
+                12, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+
+            bool retryHover = string.Equals(_hoverId, "upd_btn_retry", StringComparison.Ordinal);
+            GdiPlus.FillAndStrokeRoundedRect(gfx, retryX, btnY, retryW, btnH, SF(7),
+                GdiPlus.Argb(retryHover ? Theme.BgControlHover : Theme.BgCard),
+                GdiPlus.Argb(Theme.Red));
+            DrawText(dc, Strings.UpdateBtnRetry, retryX, btnY, retryX + retryW, btnY + btnH, 12, Win32.FW_SEMIBOLD, Theme.Red, centered: true);
+            _hitRegions.Add(new HitRegion(
+                new Win32.RECT { Left = retryX, Top = btnY, Right = retryX + retryW, Bottom = btnY + btnH },
+                "upd_btn_retry",
+                () => _updateService.StartDownload()));
+
+            DrawIconButton(dc, gfx, "upd_btn_dismiss", SmallButtonGlyph.Close, disX, y + (barH - disSz) / 2, disSz, true,
+                () => _updateService.DismissBanner());
+        }
+    }
+
+    private void LaunchDownloadedUpdate()
+    {
+        if (_updateService.TryLaunchInstaller(out string? err))
+        {
+            ExitRequested?.Invoke();
+        }
+        else if (!string.IsNullOrEmpty(err))
+        {
+            ShowStatusBanner(err, isError: true);
+        }
     }
 
     private void DrawTabButton(
@@ -874,6 +1180,8 @@ internal sealed unsafe class MainWindow : IDisposable
 
     private int DrawDashboardTab(nint dc, nint gfx, int x, int y, int w, int headerH)
     {
+        y = DrawStatusBannerIfActive(dc, gfx, x, y, w);
+
         // 1. ACTIVE TARGET CARD
         DrawText(dc, Strings.SecActiveTarget, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
         y += S(24);
@@ -1402,8 +1710,25 @@ internal sealed unsafe class MainWindow : IDisposable
         int downX = delX - S(6) - btnSz;
         int upX = downX - S(6) - btnSz;
 
+        string hkTargetId = $"app:{app.AppKey}";
+        string hkHitId = $"prio_hk_{app.AppKey}";
+        string hkClrHitId = $"prio_hk_clr_{app.AppKey}";
+        bool isCapturingThis = string.Equals(_capturingTargetId, hkTargetId, StringComparison.Ordinal);
+        string formattedHk = HotkeyHelper.FormatDisplay(app.Hotkey);
+        bool hasHk = !string.IsNullOrEmpty(formattedHk);
+        string hkText = isCapturingThis
+            ? (string.IsNullOrEmpty(_capturingPreview) ? Strings.HotkeyListening : _capturingPreview)
+            : (hasHk ? formattedHk : Strings.HotkeyAssignShort);
+
+        int clrSz = S(26);
+        int pillW = Math.Clamp(MeasureTextWidth(dc, hkText, 11, Win32.FW_SEMIBOLD) + S(20), S(86), S(168));
+        int clrX = upX - S(10) - clrSz;
+        int hkX = (hasHk && !isCapturingThis)
+            ? (clrX - S(4) - pillW)
+            : (upX - S(10) - pillW);
+
         int textX = icoX + icoSz + S(12);
-        int textRight = upX - S(12);
+        int textRight = hkX - S(12);
         DrawText(dc, app.DisplayName, textX, y + S(8), textRight, y + S(28), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
         string? browserKey = BrowserSiteScanner.ExtractBrowserKeyFromAppKey(app.AppKey);
         string exeSub = string.IsNullOrWhiteSpace(app.ExePath) ? app.AppKey : app.ExePath;
@@ -1413,6 +1738,17 @@ internal sealed unsafe class MainWindow : IDisposable
 
         if (y + rowH > headerH)
         {
+            DrawHotkeyPillButton(dc, gfx, hkHitId, hkText, hkX, btnY, pillW, btnSz,
+                isCapturing: isCapturingThis,
+                hasValue: hasHk,
+                () => StartHotkeyCapture(hkTargetId, hkHitId, hk => _stateStore.SetPriorityAppHotkey(app.AppKey, hk)));
+
+            if (hasHk && !isCapturingThis)
+            {
+                DrawIconButton(dc, gfx, hkClrHitId, SmallButtonGlyph.Close, clrX, y + (rowH - clrSz) / 2, clrSz, true,
+                    () => _stateStore.SetPriorityAppHotkey(app.AppKey, string.Empty), danger: true);
+            }
+
             DrawIconButton(dc, gfx, $"prio_up_{app.AppKey}", SmallButtonGlyph.Up, upX, btnY, btnSz, index > 0,
                 () => _stateStore.MovePriorityApp(app.AppKey, -1));
             DrawIconButton(dc, gfx, $"prio_dn_{app.AppKey}", SmallButtonGlyph.Down, downX, btnY, btnSz, index < total - 1,
@@ -1424,18 +1760,23 @@ internal sealed unsafe class MainWindow : IDisposable
         return y + rowH;
     }
 
+    private int DrawStatusBannerIfActive(nint dc, nint gfx, int x, int y, int w)
+    {
+        if (string.IsNullOrEmpty(_statusBanner) || Environment.TickCount64 > _statusBannerUntilTick)
+            return y;
+
+        int bannerH = S(38);
+        uint bFg = _statusBannerIsError ? Theme.Red : Theme.Green;
+        uint bBg = _statusBannerIsError ? Theme.RedSoft : Theme.GreenSoft;
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, bannerH, SF(8),
+            GdiPlus.Argb(bBg), GdiPlus.Argb(bFg, 160));
+        DrawText(dc, _statusBanner, x + S(14), y, x + w - S(14), y + bannerH, 12, Win32.FW_SEMIBOLD, bFg);
+        return y + bannerH + S(14);
+    }
+
     private int DrawSettingsTab(nint dc, nint gfx, int x, int y, int w, int headerH)
     {
-        if (!string.IsNullOrEmpty(_statusBanner) && Environment.TickCount64 <= _statusBannerUntilTick)
-        {
-            int bannerH = S(38);
-            uint bFg = _statusBannerIsError ? Theme.Red : Theme.Green;
-            uint bBg = _statusBannerIsError ? Theme.RedSoft : Theme.GreenSoft;
-            GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, bannerH, SF(8),
-                GdiPlus.Argb(bBg), GdiPlus.Argb(bFg, 160));
-            DrawText(dc, _statusBanner, x + S(14), y, x + w - S(14), y + bannerH, 12, Win32.FW_SEMIBOLD, bFg);
-            y += bannerH + S(14);
-        }
+        y = DrawStatusBannerIfActive(dc, gfx, x, y, w);
 
         // 0. APPEARANCE & LANGUAGE
         DrawText(dc, Strings.SecAppearance, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
@@ -1497,6 +1838,16 @@ internal sealed unsafe class MainWindow : IDisposable
             Strings.SetTopmostSub,
             _settings.AlwaysOnTop,
             () => _stateStore.UpdateSettings(s => s.AlwaysOnTop = !s.AlwaysOnTop));
+        y += S(8);
+
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_auto_update",
+            Strings.SetAutoUpdateTitle,
+            Strings.SetAutoUpdateSub,
+            _settings.AutoCheckUpdates,
+            () => _stateStore.UpdateSettings(s => s.AutoCheckUpdates = !s.AutoCheckUpdates));
+        y += S(8);
+
+        y = DrawUpdateCheckRow(dc, gfx, x, y, w, headerH);
 
         // 1.5 COMPANION BROWSER EXTENSION BRIDGE
         y += S(22);
@@ -1593,8 +1944,44 @@ internal sealed unsafe class MainWindow : IDisposable
             () => _stateStore.UpdateSettings(s => s.LongPressThresholdMs = Math.Max(150, s.LongPressThresholdMs - 50)),
             () => _stateStore.UpdateSettings(s => s.LongPressThresholdMs = Math.Min(1500, s.LongPressThresholdMs + 50)));
 
-        // 4. TOOLS & SHORTCUTS
+        // 3.5 GLOBAL SHORTCUTS
         y += S(22);
+        DrawText(dc, Strings.SecGlobalHotkeys, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+        y += S(24);
+
+        y = DrawHotkeySettingRow(dc, gfx, x, y, w, headerH, "global:toggle",
+            Strings.SetHkToggleTitle,
+            Strings.SetHkToggleSub,
+            _settings.HotkeyToggleWindow,
+            hk => _stateStore.SetGlobalHotkey(GlobalHotkeySlot.ToggleWindow, hk));
+        y += S(8);
+
+        y = DrawHotkeySettingRow(dc, gfx, x, y, w, headerH, "global:lock",
+            Strings.SetHkLockTitle,
+            Strings.SetHkLockSub,
+            _settings.HotkeyManualLock,
+            hk => _stateStore.SetGlobalHotkey(GlobalHotkeySlot.ManualLock, hk));
+        y += S(8);
+
+        y = DrawHotkeySettingRow(dc, gfx, x, y, w, headerH, "global:solo",
+            Strings.SetHkSoloTitle,
+            Strings.SetHkSoloSub,
+            _settings.HotkeySoloMode,
+            hk => _stateStore.SetGlobalHotkey(GlobalHotkeySlot.SoloMode, hk));
+        y += S(8);
+
+        y = DrawHotkeySettingRow(dc, gfx, x, y, w, headerH, "global:playpause",
+            Strings.SetHkPlayPauseTitle,
+            Strings.SetHkPlayPauseSub,
+            _settings.HotkeyPlayPause,
+            hk => _stateStore.SetGlobalHotkey(GlobalHotkeySlot.PlayPause, hk));
+        y += S(8);
+
+        DrawText(dc, Strings.HotkeyHint, x + S(4), y, x + w - S(4), y + S(18), 10, Win32.FW_NORMAL, Theme.TextMuted);
+        y += S(16);
+
+        // 4. TOOLS & SHORTCUTS
+        y += S(18);
         DrawText(dc, Strings.SecToolsShortcuts, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
         y += S(24);
 
@@ -1608,12 +1995,197 @@ internal sealed unsafe class MainWindow : IDisposable
         int ix = x + S(16);
         int ir = x + w - S(16);
         DrawText(dc, Strings.ShortcutSecondary, ix, y + S(12), ir, y + S(32), 12, Win32.FW_NORMAL, Theme.TextSecondary);
-        DrawText(dc, Strings.ShortcutToggles, ix, y + S(36), ir, y + S(56), 12, Win32.FW_NORMAL, Theme.TextSecondary);
+        DrawText(dc, Strings.FormatShortcutToggles(_settings.HotkeyToggleWindow, _settings.HotkeyManualLock, _settings.HotkeySoloMode),
+            ix, y + S(36), ir, y + S(56), 12, Win32.FW_NORMAL, Theme.TextSecondary);
         DrawText(dc, Strings.ShortcutTrayWheel, ix, y + S(60), ir, y + S(80), 12, Win32.FW_NORMAL, Theme.TextSecondary);
         DrawText(dc, $"{Strings.StateFileLabel}: {_stateStore.FilePath}",
             ix, y + S(92), ir, y + S(116), 11, Win32.FW_NORMAL, Theme.TextMuted);
 
         return y + infoH;
+    }
+
+    private int DrawHotkeySettingRow(
+        nint dc, nint gfx, int x, int y, int w, int headerH,
+        string targetId, string title, string subtitle, string currentHotkey, Action<string> onCommit)
+    {
+        int rowH = S(62);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+
+        int pad = S(16);
+        string hitId = $"hk_set_{targetId}";
+        string clrHitId = $"hk_clr_{targetId}";
+        bool isCapturingThis = string.Equals(_capturingTargetId, targetId, StringComparison.Ordinal);
+        string formatted = HotkeyHelper.FormatDisplay(currentHotkey, spaced: true);
+        bool hasValue = !string.IsNullOrEmpty(formatted);
+
+        string pillText = isCapturingThis
+            ? (string.IsNullOrEmpty(_capturingPreview) ? Strings.HotkeyListening : _capturingPreview)
+            : (hasValue ? formatted : Strings.HotkeyUnassigned);
+
+        int btnH = S(32);
+        int btnY = y + (rowH - btnH) / 2;
+        int clrSz = S(28);
+        int pillW = Math.Clamp(MeasureTextWidth(dc, pillText, 11, Win32.FW_SEMIBOLD) + S(28), S(142), S(200));
+
+        int clrX = x + w - pad - clrSz;
+        int pillX = (hasValue && !isCapturingThis)
+            ? (clrX - S(6) - pillW)
+            : (x + w - pad - pillW);
+
+        int textRight = pillX - S(16);
+        DrawText(dc, title, x + pad, y + S(10), textRight, y + S(31), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        DrawText(dc, subtitle, x + pad, y + S(32), textRight, y + S(52), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+
+        if (y + rowH > headerH)
+        {
+            DrawHotkeyPillButton(dc, gfx, hitId, pillText, pillX, btnY, pillW, btnH,
+                isCapturing: isCapturingThis,
+                hasValue: hasValue,
+                () => StartHotkeyCapture(targetId, hitId, onCommit));
+
+            if (hasValue && !isCapturingThis)
+            {
+                DrawIconButton(dc, gfx, clrHitId, SmallButtonGlyph.Close, clrX, y + (rowH - clrSz) / 2, clrSz, true,
+                    () => onCommit(string.Empty), danger: true);
+            }
+        }
+
+        return y + rowH;
+    }
+
+    private void DrawHotkeyPillButton(
+        nint dc, nint gfx, string id, string text,
+        int x, int y, int w, int h, bool isCapturing, bool hasValue, Action onClick)
+    {
+        bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+        uint bg = isCapturing
+            ? Theme.AccentSoft
+            : (hasValue ? (hovered ? Theme.BgControlHover : Theme.AccentSoft) : (hovered ? Theme.BgControlHover : Theme.BgControl));
+        uint border = isCapturing || hasValue ? Theme.Accent : Theme.BorderStrong;
+        uint fg = isCapturing || hasValue ? Theme.Accent : (hovered ? Theme.TextPrimary : Theme.TextSecondary);
+
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, h, SF(7),
+            GdiPlus.Argb(bg), GdiPlus.Argb(border, isCapturing || hasValue ? (byte)220 : (byte)255),
+            isCapturing ? 1.4f : 1f);
+        DrawText(dc, text, x + S(6), y, x + w - S(6), y + h, 11, Win32.FW_SEMIBOLD, fg, centered: true);
+        RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + w, Bottom = y + h }, id, onClick);
+    }
+
+    private int DrawUpdateCheckRow(nint dc, nint gfx, int x, int y, int w, int headerH)
+    {
+        int rowH = S(62);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
+
+        var snap = _updateSnapshot;
+        int pad = S(16);
+
+        string btnLabel;
+        uint btnBg;
+        uint btnBgHover;
+        uint btnFg;
+        uint btnBorder;
+        Action onBtnClick;
+
+        switch (snap.Phase)
+        {
+            case UpdatePhase.Checking:
+                btnLabel = Strings.BtnCheckingUpdates;
+                btnBg = Theme.BgControl;
+                btnBgHover = Theme.BgControl;
+                btnFg = Theme.TextSecondary;
+                btnBorder = Theme.BorderSubtle;
+                onBtnClick = () => { };
+                break;
+
+            case UpdatePhase.Available:
+                btnLabel = Strings.UpdateBtnDownload;
+                btnBg = Theme.AccentSoft;
+                btnBgHover = Theme.Accent;
+                btnFg = string.Equals(_hoverId, "set_upd_action", StringComparison.Ordinal) ? Theme.OnAccent : Theme.TextPrimary;
+                btnBorder = Theme.Accent;
+                onBtnClick = () => _updateService.StartDownload();
+                break;
+
+            case UpdatePhase.Downloading:
+                btnLabel = Strings.UpdateBtnCancel;
+                btnBg = Theme.BgControl;
+                btnBgHover = Theme.BgControlHover;
+                btnFg = Theme.TextPrimary;
+                btnBorder = Theme.BorderStrong;
+                onBtnClick = () => _updateService.CancelDownload();
+                break;
+
+            case UpdatePhase.ReadyToInstall:
+                btnLabel = Strings.UpdateBtnInstall;
+                btnBg = Theme.GreenSoft;
+                btnBgHover = Theme.Green;
+                btnFg = string.Equals(_hoverId, "set_upd_action", StringComparison.Ordinal) ? Theme.OnAccent : Theme.Green;
+                btnBorder = Theme.Green;
+                onBtnClick = LaunchDownloadedUpdate;
+                break;
+
+            default:
+                btnLabel = Strings.BtnCheckUpdates;
+                btnBg = Theme.BgControl;
+                btnBgHover = Theme.BgControlHover;
+                btnFg = Theme.TextPrimary;
+                btnBorder = Theme.BorderStrong;
+                onBtnClick = () => _ = _updateService.CheckForUpdatesAsync(silent: false);
+                break;
+        }
+
+        int btnH = S(32);
+        int btnY = y + (rowH - btnH) / 2;
+        int btnW = Math.Clamp(MeasureTextWidth(dc, btnLabel, 12, Win32.FW_SEMIBOLD) + S(28), S(124), S(196));
+        int btnX = x + w - pad - btnW;
+        int rightLimit = btnX - S(16);
+
+        string titleText = Strings.SetUpdateCheckTitle;
+        int titleW = MeasureTextWidth(dc, titleText, 13, Win32.FW_SEMIBOLD) + S(8);
+        int titleRight = Math.Min(rightLimit, x + pad + titleW);
+        DrawText(dc, titleText, x + pad, y + S(10), titleRight, y + S(31), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+
+        string verBadge = $"v{snap.CurrentVersion}";
+        int bx = titleRight + S(6);
+        int verPillW = MeasureTextWidth(dc, verBadge, 10, Win32.FW_SEMIBOLD) + S(18);
+        if (bx + verPillW <= rightLimit)
+        {
+            DrawPillBadge(dc, gfx, bx, y + S(10), verBadge, Theme.Accent, Theme.AccentSoft);
+        }
+
+        string subtitle = snap.Phase switch
+        {
+            UpdatePhase.Checking => Strings.SetUpdateSubChecking,
+            UpdatePhase.UpToDate => Strings.SetUpdateSubUpToDate(snap.CurrentVersion),
+            UpdatePhase.Available => Strings.SetUpdateSubAvailable(snap.LatestVersion),
+            UpdatePhase.Downloading => snap.TotalBytes > 0
+                ? Strings.UpdateDownloadingText(
+                    snap.LatestVersion,
+                    (int)Math.Clamp(snap.BytesDownloaded * 100L / snap.TotalBytes, 0L, 100L),
+                    $"{AppUpdateService.FormatMegabytes(snap.BytesDownloaded)} / {AppUpdateService.FormatMegabytes(snap.TotalBytes)} MB")
+                : Strings.UpdateDownloadingIndetText(snap.LatestVersion, $"{AppUpdateService.FormatMegabytes(snap.BytesDownloaded)} MB"),
+            UpdatePhase.ReadyToInstall => Strings.UpdateReadyBanner(snap.LatestVersion),
+            UpdatePhase.Failed => snap.ErrorMessage ?? Strings.SetUpdateSubFailed,
+            _ => Strings.SetUpdateSubCurrent(snap.CurrentVersion)
+        };
+        uint subFg = snap.Phase switch
+        {
+            UpdatePhase.Available => Theme.Accent,
+            UpdatePhase.ReadyToInstall or UpdatePhase.UpToDate => Theme.Green,
+            UpdatePhase.Failed => Theme.Red,
+            _ => Theme.TextSecondary
+        };
+        DrawText(dc, subtitle, x + pad, y + S(32), rightLimit, y + S(52), 11, Win32.FW_NORMAL, subFg);
+
+        if (y + rowH > headerH)
+        {
+            DrawActionButton(dc, gfx, "set_upd_action", btnLabel, btnX, btnY, btnW, btnH,
+                btnBg, btnBgHover, btnFg, btnBorder, onBtnClick);
+        }
+
+        return y + rowH;
     }
 
     private int DrawLanguageDropdownRow(nint dc, nint gfx, int x, int y, int w, int headerH)
@@ -1773,11 +2345,18 @@ internal sealed unsafe class MainWindow : IDisposable
             () => _openDropdown = DropdownKind.None,
             IsButton: false));
 
-        int menuW = Math.Max(S(216), _openDropdownAnchor.Right - _openDropdownAnchor.Left);
+        int menuW = _openDropdown == DropdownKind.TaskInstall
+            ? Math.Max(S(392), _openDropdownAnchor.Right - _openDropdownAnchor.Left)
+            : Math.Max(S(216), _openDropdownAnchor.Right - _openDropdownAnchor.Left);
         int menuX = Math.Clamp(_openDropdownAnchor.Right - menuW, S(12), Math.Max(S(12), w - menuW - S(12)));
-        int itemH = S(32);
+        int itemH = _openDropdown == DropdownKind.TaskInstall ? S(58) : S(32);
         int padV = S(6);
-        int itemCount = _openDropdown == DropdownKind.Language ? Strings.Languages.Length : Theme.Presets.Length;
+        int itemCount = _openDropdown switch
+        {
+            DropdownKind.Language => Strings.Languages.Length,
+            DropdownKind.TaskInstall => 2,
+            _ => Theme.Presets.Length
+        };
         int menuH = itemCount * itemH + padV * 2;
 
         int menuY = _openDropdownAnchor.Bottom + S(6);
@@ -1839,6 +2418,50 @@ internal sealed unsafe class MainWindow : IDisposable
                     }));
             }
         }
+        else if (_openDropdown == DropdownKind.TaskInstall)
+        {
+            DrawTaskInstallMenuItem(
+                dc, gfx, ix, menuY + padV, iw, itemH,
+                id: "dd_task_elevated",
+                dotColor: Theme.Green,
+                title: Strings.TaskOptElevatedTitle,
+                subtitle: Strings.TaskOptElevatedSub,
+                onClick: () =>
+                {
+                    _openDropdown = DropdownKind.None;
+                    if (_taskOpBusy) return;
+                    _taskOpBusy = true;
+                    _startupService.InstallScheduledTask(
+                        elevated: true,
+                        _settings.StartMinimized,
+                        (success, message) => BeginInvoke(() =>
+                        {
+                            _taskOpBusy = false;
+                            ShowStatusBanner(message, !success);
+                        }));
+                });
+
+            DrawTaskInstallMenuItem(
+                dc, gfx, ix, menuY + padV + itemH, iw, itemH,
+                id: "dd_task_normal",
+                dotColor: Theme.Accent,
+                title: Strings.TaskOptNormalTitle,
+                subtitle: Strings.TaskOptNormalSub,
+                onClick: () =>
+                {
+                    _openDropdown = DropdownKind.None;
+                    if (_taskOpBusy) return;
+                    _taskOpBusy = true;
+                    _startupService.InstallScheduledTask(
+                        elevated: false,
+                        _settings.StartMinimized,
+                        (success, message) => BeginInvoke(() =>
+                        {
+                            _taskOpBusy = false;
+                            ShowStatusBanner(message, !success);
+                        }));
+                });
+        }
         else
         {
             var presets = Theme.Presets;
@@ -1887,6 +2510,29 @@ internal sealed unsafe class MainWindow : IDisposable
         }
     }
 
+    private void DrawTaskInstallMenuItem(
+        nint dc, nint gfx, int ix, int iy, int iw, int itemH,
+        string id, uint dotColor, string title, string subtitle, Action onClick)
+    {
+        bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+        if (hovered)
+        {
+            GdiPlus.FillRoundedRect(gfx, ix, iy + S(1), iw, itemH - S(2), SF(7), GdiPlus.Argb(Theme.BgControlHover));
+        }
+
+        int dotSz = S(8);
+        FillCircleArgb(gfx, GdiPlus.Argb(dotColor), ix + S(10), iy + S(16), dotSz);
+        DrawText(dc, title, ix + S(26), iy + S(7), ix + iw - S(10), iy + S(28),
+            12, Win32.FW_SEMIBOLD, hovered ? Theme.Accent : Theme.TextPrimary);
+        DrawText(dc, subtitle, ix + S(26), iy + S(29), ix + iw - S(10), iy + S(49),
+            10, Win32.FW_NORMAL, Theme.TextSecondary);
+
+        _hitRegions.Add(new HitRegion(
+            new Win32.RECT { Left = ix, Top = iy, Right = ix + iw, Bottom = iy + itemH },
+            id,
+            onClick));
+    }
+
     private static void FillCircleArgb(nint gfx, uint argb, float x, float y, float d)
     {
         if (GdiPlus.GdipCreateSolidFill(argb, out nint br) == 0 && br != 0)
@@ -1914,6 +2560,7 @@ internal sealed unsafe class MainWindow : IDisposable
         int pad = S(16);
         bool isElev = _startupService.IsElevated;
         bool hasTask = _startupService.IsScheduledTaskInstalled;
+        bool isTaskElev = _startupService.IsScheduledTaskElevated;
 
         int btnH = S(32);
         int btnY = y + (rowH - btnH) / 2;
@@ -1941,29 +2588,53 @@ internal sealed unsafe class MainWindow : IDisposable
             }
         }
 
+        if (_openDropdown == DropdownKind.TaskInstall)
+        {
+            _openDropdownAnchor = new Win32.RECT { Left = taskBtnX, Top = btnY, Right = taskBtnX + taskBtnW, Bottom = btnY + btnH };
+        }
+
         if (y + rowH > headerH)
         {
             bool taskHovered = string.Equals(_hoverId, "set_sched_task", StringComparison.Ordinal);
-            DrawActionButton(dc, gfx, "set_sched_task",
-                _taskOpBusy ? Strings.BtnTaskBusy : (hasTask ? Strings.BtnTaskRemove : Strings.BtnTaskInstall),
-                taskBtnX, btnY, taskBtnW, btnH,
-                hasTask ? Theme.RedSoft : Theme.AccentSoft,
-                hasTask ? Theme.RedSoft : Theme.Accent,
-                hasTask ? Theme.Red : (taskHovered ? Theme.OnAccent : Theme.TextPrimary),
-                hasTask ? Theme.Red : Theme.Accent,
-                () =>
-                {
-                    if (_taskOpBusy) return;
-                    _taskOpBusy = true;
-                    _startupService.ToggleScheduledTask(
-                        hasTask,
-                        _settings.StartMinimized,
-                        (success, message) => BeginInvoke(() =>
+            if (hasTask || _taskOpBusy)
+            {
+                DrawActionButton(dc, gfx, "set_sched_task",
+                    _taskOpBusy ? Strings.BtnTaskBusy : Strings.BtnTaskRemove,
+                    taskBtnX, btnY, taskBtnW, btnH,
+                    hasTask ? Theme.RedSoft : Theme.AccentSoft,
+                    hasTask ? Theme.RedSoft : Theme.Accent,
+                    hasTask ? Theme.Red : Theme.TextPrimary,
+                    hasTask ? Theme.Red : Theme.Accent,
+                    () =>
+                    {
+                        if (_taskOpBusy || !hasTask) return;
+                        _taskOpBusy = true;
+                        _startupService.RemoveScheduledTask((success, message) => BeginInvoke(() =>
                         {
                             _taskOpBusy = false;
                             ShowStatusBanner(message, !success);
                         }));
-                });
+                    });
+            }
+            else
+            {
+                bool taskOpen = _openDropdown == DropdownKind.TaskInstall;
+                uint btnBg = taskOpen || taskHovered ? Theme.Accent : Theme.AccentSoft;
+                uint btnFg = taskOpen || taskHovered ? Theme.OnAccent : Theme.TextPrimary;
+                GdiPlus.FillAndStrokeRoundedRect(gfx, taskBtnX, btnY, taskBtnW, btnH, SF(7),
+                    GdiPlus.Argb(btnBg), GdiPlus.Argb(Theme.Accent));
+                DrawText(dc, Strings.BtnTaskInstall, taskBtnX + S(10), btnY, taskBtnX + taskBtnW - S(22), btnY + btnH,
+                    12, Win32.FW_SEMIBOLD, btnFg, centered: true);
+                DrawDropdownChevron(gfx, taskBtnX + taskBtnW - S(15), btnY + btnH / 2, taskOpen, btnFg);
+                RegisterScrollableHit(
+                    new Win32.RECT { Left = taskBtnX, Top = btnY, Right = taskBtnX + taskBtnW, Bottom = btnY + btnH },
+                    "set_sched_task",
+                    () =>
+                    {
+                        CancelHotkeyCapture();
+                        _openDropdown = _openDropdown == DropdownKind.TaskInstall ? DropdownKind.None : DropdownKind.TaskInstall;
+                    });
+            }
         }
 
         string titleText = Strings.ElevCardTitle;
@@ -1982,14 +2653,15 @@ internal sealed unsafe class MainWindow : IDisposable
                 isElev ? Theme.GreenSoft : Theme.AmberSoft) + S(6);
         }
 
-        string taskText = hasTask ? Strings.BadgeTaskInstalled : Strings.BadgeTaskMissing;
+        string taskText = hasTask
+            ? (isTaskElev ? Strings.BadgeTaskInstalledElevated : Strings.BadgeTaskInstalledNormal)
+            : Strings.BadgeTaskMissing;
+        uint taskPillFg = hasTask ? (isTaskElev ? Theme.Green : Theme.Accent) : Theme.TextSecondary;
+        uint taskPillBg = hasTask ? (isTaskElev ? Theme.GreenSoft : Theme.AccentSoft) : Theme.BgControl;
         int taskPillW = MeasureTextWidth(dc, taskText, 10, Win32.FW_SEMIBOLD) + S(20);
         if (bx + taskPillW <= rightLimit)
         {
-            DrawPillBadge(dc, gfx, bx, y + S(12),
-                taskText,
-                hasTask ? Theme.Green : Theme.TextSecondary,
-                hasTask ? Theme.GreenSoft : Theme.BgControl);
+            DrawPillBadge(dc, gfx, bx, y + S(12), taskText, taskPillFg, taskPillBg);
         }
 
         DrawText(dc, Strings.ElevCardSub,
@@ -2444,6 +3116,7 @@ internal sealed unsafe class MainWindow : IDisposable
         _stateStore.StateChanged -= OnStoreStateChanged;
         _startupService.StatusChanged -= OnStartupStatusChanged;
         _bridgeServer.SessionsChanged -= OnBridgeStatusChanged;
+        _updateService.StateChanged -= OnUpdateStateChanged;
         _guideWindow?.Dispose();
         _guideWindow = null;
 

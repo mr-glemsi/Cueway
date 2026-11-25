@@ -1,7 +1,7 @@
 ; Cueway — Inno Setup 7 Installer Script (Native AOT x64)
 
 #define MyAppName "Cueway"
-#define MyAppVersion "1.0.3"
+#define MyAppVersion "1.0.4"
 #define MyAppPublisher "Cueway"
 #define MyAppExeName "Cueway.exe"
 #define PublishDir "bin\Release\net10.0-windows10.0.22621.0\win-x64\publish"
@@ -71,6 +71,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--show"; Flags: nowait skipifnotsilent runasoriginaluser
 
 [Code]
 const

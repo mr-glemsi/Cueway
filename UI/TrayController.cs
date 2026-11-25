@@ -1,6 +1,9 @@
+using Cueway.Config;
+using Cueway.Input;
 using Cueway.Interop;
 using Cueway.Localization;
 using Cueway.Routing;
+using Cueway.Startup;
 
 namespace Cueway.UI;
 
@@ -14,9 +17,12 @@ internal sealed unsafe class TrayController : IDisposable
     private const uint MENU_TOGGLE_SOLO = 3;
     private const uint MENU_SETTINGS = 4;
     private const uint MENU_EXIT = 5;
+    private const uint MENU_UPDATE = 6;
 
     private readonly nint _hwndHost;
     private readonly DynamicIconRenderer _iconRenderer;
+    private readonly StateStore _stateStore;
+    private readonly AppUpdateService _updateService;
     private nint _currentTrayIcon;
     private bool _ownsTrayIcon;
     private bool _added;
@@ -32,14 +38,17 @@ internal sealed unsafe class TrayController : IDisposable
     public event Action? ShowMainWindowRequested;
     public event Action? ToggleMainWindowRequested;
     public event Action? OpenSettingsRequested;
+    public event Action? OpenUpdateRequested;
     public event Action? ToggleManualLockRequested;
     public event Action? ToggleSoloModeRequested;
     public event Action? ExitRequested;
 
-    public TrayController(nint hwndHost, DynamicIconRenderer iconRenderer)
+    public TrayController(nint hwndHost, DynamicIconRenderer iconRenderer, StateStore stateStore, AppUpdateService updateService)
     {
         _hwndHost = hwndHost;
         _iconRenderer = iconRenderer;
+        _stateStore = stateStore;
+        _updateService = updateService;
     }
 
     public void AddOrRestore(RouterStateSnapshot snapshot)
@@ -186,18 +195,31 @@ internal sealed unsafe class TrayController : IDisposable
 
         try
         {
-            Win32.AppendMenuW(hMenu, Win32.MF_STRING, MENU_SHOW, Strings.TrayMenuOpen);
+            var settings = _stateStore.GetSettingsSnapshot();
+            var updateSnap = _updateService.GetSnapshot();
+            if (updateSnap.Phase is UpdatePhase.Available or UpdatePhase.ReadyToInstall &&
+                !string.IsNullOrEmpty(updateSnap.LatestVersion))
+            {
+                Win32.AppendMenuW(hMenu, Win32.MF_STRING, MENU_UPDATE, Strings.TrayMenuUpdateAvailable(updateSnap.LatestVersion));
+                Win32.AppendMenuW(hMenu, Win32.MF_SEPARATOR, 0, null);
+            }
+
+            string openLabel = FormatMenuHotkey(Strings.TrayMenuOpen, settings.HotkeyToggleWindow);
+            string lockLabel = FormatMenuHotkey(Strings.TrayMenuLockBase, settings.HotkeyManualLock);
+            string soloLabel = FormatMenuHotkey(Strings.TrayMenuSoloBase, settings.HotkeySoloMode);
+
+            Win32.AppendMenuW(hMenu, Win32.MF_STRING, MENU_SHOW, openLabel);
             Win32.AppendMenuW(hMenu, Win32.MF_SEPARATOR, 0, null);
             Win32.AppendMenuW(
                 hMenu,
                 Win32.MF_STRING | (snapshot.IsManualLock ? Win32.MF_CHECKED : Win32.MF_UNCHECKED),
                 MENU_TOGGLE_LOCK,
-                Strings.TrayMenuLock);
+                lockLabel);
             Win32.AppendMenuW(
                 hMenu,
                 Win32.MF_STRING | (snapshot.SoloModeEnabled ? Win32.MF_CHECKED : Win32.MF_UNCHECKED),
                 MENU_TOGGLE_SOLO,
-                Strings.TrayMenuSolo);
+                soloLabel);
             Win32.AppendMenuW(hMenu, Win32.MF_STRING, MENU_SETTINGS, Strings.TrayMenuSettings);
             Win32.AppendMenuW(hMenu, Win32.MF_SEPARATOR, 0, null);
             Win32.AppendMenuW(hMenu, Win32.MF_STRING, MENU_EXIT, Strings.TrayMenuExit);
@@ -215,6 +237,9 @@ internal sealed unsafe class TrayController : IDisposable
 
             switch ((uint)cmd)
             {
+                case MENU_UPDATE:
+                    OpenUpdateRequested?.Invoke();
+                    break;
                 case MENU_SHOW:
                     ShowMainWindowRequested?.Invoke();
                     break;
@@ -236,6 +261,12 @@ internal sealed unsafe class TrayController : IDisposable
         {
             Win32.DestroyMenu(hMenu);
         }
+    }
+
+    private static string FormatMenuHotkey(string label, string hotkey)
+    {
+        string formatted = HotkeyHelper.FormatDisplay(hotkey);
+        return string.IsNullOrEmpty(formatted) ? label : $"{label} ({formatted})";
     }
 
     public void Dispose()

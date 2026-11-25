@@ -14,10 +14,12 @@ internal sealed class StartupService
     private const string TaskName = "Cueway";
 
     private volatile bool _isScheduledTaskInstalled;
+    private volatile bool _isScheduledTaskElevated;
     private readonly bool _isElevated;
 
     public bool IsElevated => _isElevated;
     public bool IsScheduledTaskInstalled => _isScheduledTaskInstalled;
+    public bool IsScheduledTaskElevated => _isScheduledTaskElevated;
     public bool IsStartupEnabled => IsRegistryStartupEnabled() || _isScheduledTaskInstalled;
 
     public event Action? StatusChanged;
@@ -75,11 +77,11 @@ internal sealed class StartupService
 
     public async Task RefreshScheduledTaskStatusAsync()
     {
-        bool installed = await Task.Run(() =>
+        var (installed, elevated) = await Task.Run(() =>
         {
             try
             {
-                var psi = new ProcessStartInfo("schtasks.exe", $"/Query /TN \"{TaskName}\"")
+                var psi = new ProcessStartInfo("schtasks.exe", $"/Query /TN \"{TaskName}\" /XML")
                 {
                     CreateNoWindow = true,
                     UseShellExecute = false,
@@ -87,19 +89,23 @@ internal sealed class StartupService
                     RedirectStandardError = true
                 };
                 using var p = Process.Start(psi);
-                if (p == null) return false;
+                if (p == null) return (false, false);
+                string xml = p.StandardOutput.ReadToEnd();
                 p.WaitForExit(3000);
-                return p.ExitCode == 0;
+                bool ok = p.ExitCode == 0;
+                bool isHighest = ok && xml.Contains("HighestAvailable", StringComparison.OrdinalIgnoreCase);
+                return (ok, isHighest);
             }
             catch
             {
-                return false;
+                return (false, false);
             }
         }).ConfigureAwait(false);
 
-        if (_isScheduledTaskInstalled != installed)
+        if (_isScheduledTaskInstalled != installed || _isScheduledTaskElevated != elevated)
         {
             _isScheduledTaskInstalled = installed;
+            _isScheduledTaskElevated = elevated;
             StatusChanged?.Invoke();
         }
     }
@@ -108,10 +114,10 @@ internal sealed class StartupService
     {
         if (enabled)
         {
-            if (_isScheduledTaskInstalled && _isElevated)
+            if (_isScheduledTaskInstalled && (!_isScheduledTaskElevated || _isElevated))
             {
-                // Update existing elevated task arguments seamlessly
-                _ = InstallScheduledTaskAsync(startMinimized);
+                // Update existing task arguments seamlessly when privilege allows silent update
+                _ = InstallScheduledTaskAsync(startMinimized, _isScheduledTaskElevated);
                 return true;
             }
 
@@ -140,9 +146,9 @@ internal sealed class StartupService
         {
             SetRegistryRun(true, startMinimized);
         }
-        if (_isScheduledTaskInstalled && _isElevated)
+        if (_isScheduledTaskInstalled && (!_isScheduledTaskElevated || _isElevated))
         {
-            _ = InstallScheduledTaskAsync(startMinimized);
+            _ = InstallScheduledTaskAsync(startMinimized, _isScheduledTaskElevated);
         }
     }
 
@@ -185,18 +191,25 @@ internal sealed class StartupService
         }
     }
 
-    public void ToggleScheduledTask(bool remove, bool startMinimized, Action<bool, string> onDone)
+    public void InstallScheduledTask(bool elevated, bool startMinimized, Action<bool, string> onDone)
     {
         _ = Task.Run(async () =>
         {
-            var res = remove
-                ? await RemoveScheduledTaskAsync().ConfigureAwait(false)
-                : await InstallScheduledTaskAsync(startMinimized).ConfigureAwait(false);
+            var res = await InstallScheduledTaskAsync(startMinimized, elevated).ConfigureAwait(false);
             onDone(res.Success, res.Message);
         });
     }
 
-    public async Task<(bool Success, string Message)> InstallScheduledTaskAsync(bool startMinimized)
+    public void RemoveScheduledTask(Action<bool, string> onDone)
+    {
+        _ = Task.Run(async () =>
+        {
+            var res = await RemoveScheduledTaskAsync().ConfigureAwait(false);
+            onDone(res.Success, res.Message);
+        });
+    }
+
+    public async Task<(bool Success, string Message)> InstallScheduledTaskAsync(bool startMinimized, bool elevated = true)
     {
         string? exe = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
@@ -213,12 +226,13 @@ internal sealed class StartupService
             userId = $@"{Environment.UserDomainName}\{Environment.UserName}";
         }
 
+        string runLevel = elevated ? "HighestAvailable" : "LeastPrivilege";
         string argsXml = startMinimized ? "<Arguments>--minimized</Arguments>" : string.Empty;
         string xml = $"""
             <?xml version="1.0" encoding="UTF-16"?>
             <Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
               <RegistrationInfo>
-                <Description>Cueway - Windows 11 Native AOT Media Router (HighestAvailable)</Description>
+                <Description>Cueway - Windows Media Router ({runLevel})</Description>
               </RegistrationInfo>
               <Triggers>
                 <LogonTrigger>
@@ -230,7 +244,7 @@ internal sealed class StartupService
                 <Principal id="Author">
                   <UserId>{SecurityElement.Escape(userId)}</UserId>
                   <LogonType>InteractiveToken</LogonType>
-                  <RunLevel>HighestAvailable</RunLevel>
+                  <RunLevel>{runLevel}</RunLevel>
                 </Principal>
               </Principals>
               <Settings>
@@ -269,20 +283,21 @@ internal sealed class StartupService
         try
         {
             await File.WriteAllTextAsync(tempXml, xml, Encoding.Unicode).ConfigureAwait(false);
-            int code = await RunSchtasksAsync($"/Create /TN \"{TaskName}\" /XML \"{tempXml}\" /F").ConfigureAwait(false);
+            int code = await RunSchtasksAsync($"/Create /TN \"{TaskName}\" /XML \"{tempXml}\" /F", requireElevation: elevated).ConfigureAwait(false);
             if (code == 0)
             {
-                // Avoid duplicate launch from HKCU Run when Task Scheduler handles elevated logon start
+                // Avoid duplicate launch from HKCU Run when Task Scheduler handles logon start
                 SetRegistryRun(false, false);
                 _isScheduledTaskInstalled = true;
+                _isScheduledTaskElevated = elevated;
                 StatusChanged?.Invoke();
-                return (true, Strings.MsgTaskInstalled);
+                return (true, elevated ? Strings.MsgTaskInstalledElevated : Strings.MsgTaskInstalledNormal);
             }
-            return (false, Strings.MsgTaskInstallFail);
+            return (false, elevated ? Strings.MsgTaskInstallFail : Strings.MsgTaskInstallFailNormal);
         }
         catch (Exception ex)
         {
-            return (false, $"{Strings.MsgTaskInstallFail} ({ex.Message})");
+            return (false, $"{(elevated ? Strings.MsgTaskInstallFail : Strings.MsgTaskInstallFailNormal)} ({ex.Message})");
         }
         finally
         {
@@ -294,10 +309,15 @@ internal sealed class StartupService
     {
         try
         {
-            int code = await RunSchtasksAsync($"/Delete /TN \"{TaskName}\" /F").ConfigureAwait(false);
+            int code = await RunSchtasksAsync($"/Delete /TN \"{TaskName}\" /F", requireElevation: _isScheduledTaskElevated).ConfigureAwait(false);
+            if (code != 0 && !_isScheduledTaskElevated && !_isElevated)
+            {
+                code = await RunSchtasksAsync($"/Delete /TN \"{TaskName}\" /F", requireElevation: true).ConfigureAwait(false);
+            }
             if (code == 0)
             {
                 _isScheduledTaskInstalled = false;
+                _isScheduledTaskElevated = false;
                 StatusChanged?.Invoke();
                 return (true, Strings.MsgTaskRemoved);
             }
@@ -310,16 +330,17 @@ internal sealed class StartupService
         }
     }
 
-    private async Task<int> RunSchtasksAsync(string arguments)
+    private async Task<int> RunSchtasksAsync(string arguments, bool requireElevation)
     {
         return await Task.Run(() =>
         {
+            bool useUac = requireElevation && !_isElevated;
             var psi = new ProcessStartInfo("schtasks.exe", arguments)
             {
-                UseShellExecute = !_isElevated,
-                Verb = _isElevated ? string.Empty : "runas",
+                UseShellExecute = useUac,
+                Verb = useUac ? "runas" : string.Empty,
                 WindowStyle = ProcessWindowStyle.Hidden,
-                CreateNoWindow = _isElevated
+                CreateNoWindow = !useUac
             };
             using var proc = Process.Start(psi);
             if (proc == null) return -1;
