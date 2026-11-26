@@ -129,23 +129,25 @@ internal static class Strings
     public static string StatusPlaying => T("Oynatılıyor", "Playing", "正在播放", "Reproduciendo", "Воспроизведение", "Wiedergabe", "Lecture", "再生中", "재생 중");
     public static string StatusPaused => T("Duraklatıldı", "Paused", "已暂停", "Pausado", "На паузе", "Pausiert", "En pause", "一時停止", "일시정지");
     public static string StatusMuted => T("Sessiz", "Muted", "已静音", "Silenciado", "Без звука", "Stumm", "Muet", "ミュート", "음소거");
+    public static string StatusClosed => T("Kapatıldı", "Closed", "已关闭", "Cerrado", "Закрыто", "Geschlossen", "Fermé", "終了", "닫힘");
     public static string ModeManualLock => T("Manuel Kilit", "Manual Lock", "手动锁定", "Bloqueo Manual", "Ручной замок", "Manuelle Sperre", "Verrou Manuel", "手動ロック", "수동 잠금");
     public static string ModeAuto => T("Otomatik Mod", "Auto Priority", "自动优先", "Modo Automático", "Автоприоритет", "Auto-Priorität", "Priorité Auto", "自動優先", "자동 우선순위");
     public static string MediaPlayingFallback => T("Medya oynatılıyor", "Playing media", "正在播放媒体", "Reproduciendo", "Воспроизведение", "Medienwiedergabe", "Lecture en cours", "メディアを再生中", "미디어 재생 중");
 
     // Dashboard Section Headings & Buttons
-    public static string SecNowPlaying => T("CANLI OYNATICI", "LIVE PLAYER", "实时播放器", "REPRODUCTOR EN VIVO", "АКТИВНЫЙ ПЛЕЕР", "LIVE-PLAYER", "LECTEUR EN DIRECT", "ライブプレーヤー", "실시간 플레이어");
-    public static string NoNowPlayingTitle => T("Aktif Oynatım Yok", "No Active Playback", "当前无播放内容", "Sin reproducción activa", "Нет активного воспроизведения", "Keine aktive Wiedergabe", "Aucune lecture active", "再生中のメディアなし", "활성 재생 없음");
+    public static string SecLivePlayer => T("CANLI OYNATICI", "LIVE PLAYER", "实时播放器", "REPRODUCTOR EN VIVO", "АКТИВНЫЙ ПЛЕЕР", "LIVE-PLAYER", "LECTEUR EN DIRECT", "ライブプレーヤー", "실시간 플레이어");
+    public static string SecNowPlaying => T("EN SON OYNATILAN", "LAST PLAYED", "最近播放", "ÚLTIMA REPRODUCCIÓN", "ПОСЛЕДНЕЕ ВОСПРОИЗВЕДЕНИЕ", "ZULETZT GESPIELT", "DERNIÈRE LECTURE", "最近の再生", "최근 재생");
+    public static string NoNowPlayingTitle => T("Henüz Oynatılan Medya Yok", "No Recent Playback", "暂无播放记录", "Sin reproducción reciente", "Пока ничего не воспроизводилось", "Noch keine Wiedergabe", "Aucune lecture récente", "再生履歴はまだありません", "최근 재생 기록 없음");
     public static string NoNowPlayingSub => T(
-        "Bir uygulama veya sekmede medya başladığında canlı oynatıcı burada görünür.",
-        "When any app or browser tab starts playing, the live player appears here.",
-        "当任意应用或标签页开始播放媒体时，实时播放器会显示在此处。",
-        "Cuando alguna aplicación o pestaña reproduzca algo, aparecerá aquí.",
-        "Когда приложение или вкладка начнёт воспроизведение, плеер появится здесь.",
-        "Sobald eine App oder ein Tab etwas abspielt, erscheint der Player hier.",
-        "Dès qu'une application ou un onglet lance une lecture, le lecteur apparaît ici.",
-        "アプリやタブで再生が始まると、ライブプレーヤーがここに表示されます。",
-        "앱이나 탭에서 재생을 시작하면 실시간 플레이어가 여기에 표시됩니다.");
+        "Bir uygulama veya sekmede medya oynatıldığında en son oynatılan burada görünür.",
+        "When any app or browser tab plays media, the most recently played item appears here.",
+        "当任意应用或标签页播放媒体时，最近播放的内容会显示在此处。",
+        "Cuando alguna aplicación o pestaña reproduzca algo, lo último reproducido aparecerá aquí.",
+        "Когда приложение или вкладка запустит медиа, последнее воспроизведение появится здесь.",
+        "Sobald eine App oder ein Tab Medien abspielt, erscheint der letzte Eintrag hier.",
+        "Dès qu'une application ou un onglet lit un média, le dernier élément lu apparaît ici.",
+        "アプリやタブでメディアを再生すると、最後に再生した項目がここに表示されます。",
+        "앱이나 탭에서 미디어를 재생하면 가장 최근에 재생한 항목이 여기에 표시됩니다.");
     public static string BadgePriorityTarget => T("ÖNCELİKLİ", "PRIORITY", "优先", "PRIORIDAD", "ПРИОРИТЕТ", "PRIORITÄT", "PRIORITÉ", "優先", "우선");
 
     public static string SecActiveTarget => T("AKTİF HEDEF", "ACTIVE TARGET", "当前目标", "DESTINO ACTIVO", "АКТИВНАЯ ЦЕЛЬ", "AKTIVES ZIEL", "CIBLE ACTIVE", "アクティブターゲット", "활성 대상");
@@ -245,17 +247,65 @@ internal static class Strings
         "Choisissez la palette pour l'interface, la barre de titre, le guide et l'OSD",
         "アプリ本体、タイトルバー、ガイド画面、OSD 通知の配色を選択します",
         "앱, 제목 표시줄, 가이드 창 및 OSD 알림에 사용할 색상 팔레트를 선택하세요");
-    public static string ThemeName(string themeId) => themeId.ToLowerInvariant() switch
+    public static string ThemeName(string themeId)
     {
-        "light" => T("Açık", "Light", "浅色", "Claro", "Светлая", "Hell", "Clair", "ライト", "라이트"),
-        "nord" => "Nord",
-        "emerald" => T("Zümrüt", "Emerald", "翡翠绿", "Esmeralda", "Изумруд", "Smaragd", "Émeraude", "エメラルド", "에메랄드"),
-        "amethyst" => T("Ametist", "Amethyst", "紫水晶", "Amatista", "Аметист", "Amethyst", "Améthyste", "アメジスト", "자수정"),
-        "amber" => T("Kehribar", "Amber", "琥珀金", "Ámbar", "Янтарь", "Bernstein", "Ambre", "アンバー", "앰버"),
-        "crimson" => T("Kızıl", "Crimson", "绯红", "Carmesí", "Рубин", "Karmesin", "Carmin", "クリムゾン", "크림슨"),
-        "sand" => T("Kum Açık", "Warm Sand", "暖沙浅", "Arena", "Песок", "Sand Hell", "Sable", "サンド", "샌드"),
-        _ => T("Koyu", "Dark", "深色", "Oscuro", "Тёмная", "Dunkel", "Sombre", "ダーク", "다크")
-    };
+        var custom = UI.Theme.FindById(themeId);
+        if (custom?.CustomName != null)
+            return custom.CustomName;
+
+        return themeId.ToLowerInvariant() switch
+        {
+            "light" => T("Açık", "Light", "浅色", "Claro", "Светлая", "Hell", "Clair", "ライト", "라이트"),
+            "nord" => "Nord",
+            "emerald" => T("Zümrüt", "Emerald", "翡翠绿", "Esmeralda", "Изумруд", "Smaragd", "Émeraude", "エメラルド", "에메랄드"),
+            "amethyst" => T("Ametist", "Amethyst", "紫水晶", "Amatista", "Аметист", "Amethyst", "Améthyste", "アメジスト", "자수정"),
+            "amber" => T("Kehribar", "Amber", "琥珀金", "Ámbar", "Янтарь", "Bernstein", "Ambre", "アンバー", "앰버"),
+            "crimson" => T("Kızıl", "Crimson", "绯红", "Carmesí", "Рубин", "Karmesin", "Carmin", "クリムゾン", "크림슨"),
+            "sand" => T("Kum Açık", "Warm Sand", "暖沙浅", "Arena", "Песок", "Sand Hell", "Sable", "サンド", "샌드"),
+            "midnight" => T("Gece Yarısı", "Midnight", "午夜黑", "Medianoche", "Полночь", "Mitternacht", "Minuit", "ミッドナイト", "미드나잇"),
+            "ocean" => T("Okyanus", "Deep Ocean", "深海蓝", "Océano", "Океан", "Ozean", "Océan", "オーシャン", "오션"),
+            "sakura" => T("Sakura", "Sakura", "樱花粉", "Sakura", "Сакура", "Sakura", "Sakura", "さくら", "사쿠라"),
+            "slate" => T("Buz Grisi", "Frost Slate", "冰霜灰", "Pizarra", "Сланец", "Schiefer Hell", "Ardoise", "スレート", "슬레이트"),
+            _ => T("Koyu", "Dark", "深色", "Oscuro", "Тёмная", "Dunkel", "Sombre", "ダーク", "다크")
+        };
+    }
+
+    public static string BtnCustomTheme => T("+ Özel", "+ Custom", "+ 自定义", "+ Personal", "+ Своя", "+ Eigene", "+ Perso", "+ カスタム", "+ 사용자");
+    public static string MenuCreateCustomTheme => T("+ Özel Tema Oluştur", "+ Create Custom Theme", "+ 创建自定义主题", "+ Crear tema", "+ Создать тему", "+ Eigenes Design", "+ Créer un thème", "+ カスタム作成", "+ 새 테마 만들기");
+    public static string ThemeStudioTitle => T("Özel Tema Stüdyosu", "Custom Theme Studio", "自定义主题工坊", "Estudio de Temas", "Студия тем", "Theme-Studio", "Studio de Thèmes", "テーマスタジオ", "테마 스튜디오");
+    public static string ThemeStudioSub => T("Renklerini seç, canlı önizle ve kaydet", "Pick your colors, preview live, and save", "挑选色彩、实时预览并保存", "Elige colores, previsualiza y guarda", "Выберите цвета, оцените и сохраните", "Farben wählen, live testen und speichern", "Choisissez vos couleurs et enregistrez", "色を選んでライブプレビュー＆保存", "색상을 고르고 실시간 미리보기 후 저장");
+    public static string ThemeFieldName => T("Tema Adı", "Theme Name", "主题名称", "Nombre", "Название", "Name", "Nom du thème", "テーマ名", "테마 이름");
+    public static string ThemeDefaultCustomName => T("Özel Tema", "Custom Theme", "自定义主题", "Tema propio", "Моя тема", "Eigenes Design", "Thème perso", "マイテーマ", "내 테마");
+    public static string ThemeFieldAccent => T("Ana Vurgu Rengi", "Accent Color", "强调色", "Color de acento", "Акцент", "Akzentfarbe", "Couleur d'accent", "アクセントカラー", "강조 색상");
+    public static string ThemeFieldBg => T("Arka Plan Rengi", "Background Color", "背景色", "Color de fondo", "Фон окна", "Hintergrund", "Arrière-plan", "背景色", "배경 색상");
+    public static string ThemeFieldCard => T("Kart Yüzey Rengi", "Card Surface Color", "卡片背景色", "Color de tarjeta", "Фон карточек", "Kartenfarbe", "Fond des cartes", "カード背景色", "카드 배경색");
+    public static string BtnPickColor => T("Seç...", "Pick...", "选色...", "Elegir...", "Выбор...", "Wählen...", "Choisir...", "選択...", "선택...");
+    public static string BtnAutoCard => T("Otomatik", "Auto", "自动", "Auto", "Авто", "Auto", "Auto", "自動", "자동");
+    public static string ThemePreviewHeading => T("CANLI ÖNİZLEME", "LIVE PREVIEW", "实时预览", "VISTA PREVIA", "ПРЕДПРОСМОТР", "LIVE-VORSCHAU", "APERÇU EN DIRECT", "プレビュー", "미리보기");
+    public static string BtnSaveTheme => T("Temayı Kaydet", "Save Theme", "保存主题", "Guardar tema", "Сохранить", "Speichern", "Enregistrer", "保存", "테마 저장");
+    public static string BtnDeleteTheme => T("Sil", "Delete", "删除", "Eliminar", "Удалить", "Löschen", "Supprimer", "削除", "삭제");
+    public static string BtnEditTheme => T("Düzenle", "Edit", "编辑", "Editar", "Изменить", "Bearbeiten", "Modifier", "編集", "편집");
+    public static string BtnCancel => T("İptal", "Cancel", "取消", "Cancelar", "Отмена", "Abbrechen", "Annuler", "キャンセル", "취소");
+    public static string MsgCustomThemeSaved(string name) => T(
+        $"\"{name}\" teması kaydedildi ve uygulandı.",
+        $"Theme \"{name}\" saved and applied.",
+        $"主题“{name}”已保存并应用。",
+        $"Tema \"{name}\" guardado y aplicado.",
+        $"Тема «{name}» сохранена и применена.",
+        $"Design \"{name}\" gespeichert und aktiviert.",
+        $"Thème « {name} » enregistré et appliqué.",
+        $"テーマ「{name}」を保存して適用しました。",
+        $"테마 \"{name}\" 저장 및 적용 완료.");
+    public static string MsgCustomThemeDeleted(string name) => T(
+        $"\"{name}\" özel teması silindi.",
+        $"Custom theme \"{name}\" deleted.",
+        $"自定义主题“{name}”已删除。",
+        $"Tema personalizado \"{name}\" eliminado.",
+        $"Тема «{name}» удалена.",
+        $"Design \"{name}\" gelöscht.",
+        $"Thème « {name} » supprimé.",
+        $"テーマ「{name}」を削除しました。",
+        $"사용자 테마 \"{name}\" 삭제됨.");
 
     public static string SecSystemStartup => T("SİSTEM VE BAŞLANGIÇ", "SYSTEM & STARTUP", "系统与启动", "SISTEMA E INICIO", "СИСТЕМА И ЗАПУСК", "SYSTEM & AUTOSTART", "SYSTÈME & DÉMARRAGE", "システムと起動", "시스템 및 시작");
     public static string SetStartupTitle => T("Windows ile Başlat", "Start with Windows", "开机自动启动", "Iniciar con Windows", "Запускать с Windows", "Mit Windows starten", "Démarrer avec Windows", "Windows 起動時に自動起動", "Windows 시작 시 자동 실행");

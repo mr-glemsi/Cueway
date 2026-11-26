@@ -55,37 +55,58 @@ internal sealed class StateStore
             RebuildCachesLocked();
         }
         Strings.SetLanguage(_state.Settings.Language);
+        UI.Theme.SetCustomThemes(_state.Settings.CustomThemes);
         UI.Theme.SetTheme(_state.Settings.Theme);
     }
 
     private AppState LoadInternal()
     {
-        try
+        bool fileExists = File.Exists(_filePath);
+        if (fileExists)
         {
-            if (File.Exists(_filePath))
+            for (int attempt = 0; attempt < 4; attempt++)
             {
-                string json = File.ReadAllText(_filePath);
-                var loaded = JsonSerializer.Deserialize(json, AppJsonContext.Default.AppState);
-                if (loaded != null)
+                try
                 {
-                    loaded.Settings ??= new AppSettings();
-                    loaded.PriorityApps ??= [];
-                    loaded.Settings.GameBlacklistExes ??= [];
-                    NormalizeSettings(loaded.Settings);
-                    foreach (var app in loaded.PriorityApps)
+                    using var fs = new FileStream(_filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var sr = new StreamReader(fs);
+                    string json = sr.ReadToEnd();
+                    var loaded = JsonSerializer.Deserialize(json, AppJsonContext.Default.AppState);
+                    if (loaded != null)
                     {
-                        app.Hotkey = HotkeyHelper.Normalize(app.Hotkey);
+                        loaded.Settings ??= new AppSettings();
+                        loaded.PriorityApps ??= [];
+                        loaded.Settings.GameBlacklistExes ??= [];
+                        loaded.Settings.CustomThemes ??= [];
+                        NormalizeSettings(loaded.Settings);
+                        foreach (var app in loaded.PriorityApps)
+                        {
+                            app.Hotkey = HotkeyHelper.Normalize(app.Hotkey);
+                        }
+                        return loaded;
                     }
-                    return loaded;
+                    break;
+                }
+                catch (IOException) when (attempt < 3)
+                {
+                    Thread.Sleep(50);
+                }
+                catch (IOException)
+                {
+                    // File is temporarily locked (e.g. during instance swap); do NOT overwrite user settings on disk
+                    var memFallback = new AppState();
+                    NormalizeSettings(memFallback.Settings);
+                    return memFallback;
+                }
+                catch
+                {
+                    break;
                 }
             }
         }
-        catch
-        {
-            // Fall back cleanly to fresh state if corrupted
-        }
 
         var fresh = new AppState();
+        NormalizeSettings(fresh.Settings);
         SaveInternal(fresh);
         return fresh;
     }
@@ -93,6 +114,9 @@ internal sealed class StateStore
     private static void NormalizeSettings(AppSettings s)
     {
         s.Language = Strings.NormalizeCode(s.Language);
+        s.CustomThemes ??= [];
+        SanitizeCustomThemes(s.CustomThemes);
+        UI.Theme.SetCustomThemes(s.CustomThemes);
         s.Theme = UI.Theme.NormalizeId(s.Theme);
         s.VolumeStepPercent = Math.Clamp(s.VolumeStepPercent, 1, 20);
         s.SeekSeconds = Math.Clamp(s.SeekSeconds, 1, 120);
@@ -149,7 +173,8 @@ internal sealed class StateStore
             HotkeyPlayPause = s.HotkeyPlayPause,
             HotkeyPromotePlaying = s.HotkeyPromotePlaying,
             MpvPipeName = s.MpvPipeName,
-            GameBlacklistExes = [.. s.GameBlacklistExes]
+            GameBlacklistExes = [.. s.GameBlacklistExes],
+            CustomThemes = [.. s.CustomThemes.Select(CloneCustomTheme)]
         };
 
         long nowTick = Environment.TickCount64;
@@ -195,6 +220,7 @@ internal sealed class StateStore
             mutator(_state.Settings);
             NormalizeSettings(_state.Settings);
             Strings.SetLanguage(_state.Settings.Language);
+            UI.Theme.SetCustomThemes(_state.Settings.CustomThemes);
             UI.Theme.SetTheme(_state.Settings.Theme);
             RebuildCachesLocked();
             SaveInternal(_state);
@@ -208,15 +234,19 @@ internal sealed class StateStore
         {
             string currentLang = _state.Settings.Language;
             string currentTheme = _state.Settings.Theme;
+            var customThemes = _state.Settings.CustomThemes.Select(CloneCustomTheme).ToList();
             _state.Settings = new AppSettings
             {
                 Language = Strings.NormalizeCode(currentLang),
-                Theme = UI.Theme.NormalizeId(currentTheme)
+                CustomThemes = customThemes,
+                Theme = currentTheme
             };
+            NormalizeSettings(_state.Settings);
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeyToggleWindow, exceptGlobalSlot: GlobalHotkeySlot.ToggleWindow);
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeyManualLock, exceptGlobalSlot: GlobalHotkeySlot.ManualLock);
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeySoloMode, exceptGlobalSlot: GlobalHotkeySlot.SoloMode);
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeyPromotePlaying, exceptGlobalSlot: GlobalHotkeySlot.PromotePlaying);
+            UI.Theme.SetCustomThemes(_state.Settings.CustomThemes);
             UI.Theme.SetTheme(_state.Settings.Theme);
             RebuildCachesLocked();
             SaveInternal(_state);
@@ -470,5 +500,139 @@ internal sealed class StateStore
             SaveInternal(_state);
         }
         StateChanged?.Invoke();
+    }
+
+    public CustomThemePreset SaveCustomTheme(string? existingId, string name, uint bgRgb, uint cardRgb, uint accentRgb, bool activate = true)
+    {
+        string cleanName = string.IsNullOrWhiteSpace(name) ? Strings.ThemeDefaultCustomName : name.Trim();
+        if (cleanName.Length > 28)
+            cleanName = cleanName[..28].Trim();
+        if (string.IsNullOrWhiteSpace(cleanName))
+            cleanName = Strings.ThemeDefaultCustomName;
+
+        string bgHex = UI.Theme.FormatHex(bgRgb);
+        string cardHex = UI.Theme.FormatHex(cardRgb);
+        string accentHex = UI.Theme.FormatHex(accentRgb);
+
+        CustomThemePreset saved;
+        lock (_lock)
+        {
+            _state.Settings.CustomThemes ??= [];
+            CustomThemePreset? target = null;
+            if (!string.IsNullOrWhiteSpace(existingId))
+            {
+                target = _state.Settings.CustomThemes.Find(c =>
+                    string.Equals(c.Id, existingId, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (target != null)
+            {
+                target.Name = cleanName;
+                target.BgHex = bgHex;
+                target.CardHex = cardHex;
+                target.AccentHex = accentHex;
+                saved = CloneCustomTheme(target);
+            }
+            else
+            {
+                string id = $"custom:{Guid.NewGuid().ToString("N")[..8]}";
+                var entry = new CustomThemePreset
+                {
+                    Id = id,
+                    Name = cleanName,
+                    BgHex = bgHex,
+                    CardHex = cardHex,
+                    AccentHex = accentHex
+                };
+                if (_state.Settings.CustomThemes.Count >= 20)
+                    _state.Settings.CustomThemes.RemoveAt(0);
+                _state.Settings.CustomThemes.Add(entry);
+                saved = CloneCustomTheme(entry);
+            }
+
+            if (activate)
+                _state.Settings.Theme = saved.Id;
+
+            NormalizeSettings(_state.Settings);
+            UI.Theme.SetCustomThemes(_state.Settings.CustomThemes);
+            UI.Theme.SetTheme(_state.Settings.Theme);
+            RebuildCachesLocked();
+            SaveInternal(_state);
+        }
+
+        StateChanged?.Invoke();
+        return saved;
+    }
+
+    public bool DeleteCustomTheme(string themeId)
+    {
+        if (string.IsNullOrWhiteSpace(themeId))
+            return false;
+
+        bool deleted = false;
+        lock (_lock)
+        {
+            _state.Settings.CustomThemes ??= [];
+            int count = _state.Settings.CustomThemes.RemoveAll(c =>
+                string.Equals(c.Id, themeId, StringComparison.OrdinalIgnoreCase));
+            if (count > 0)
+            {
+                deleted = true;
+                if (string.Equals(_state.Settings.Theme, themeId, StringComparison.OrdinalIgnoreCase))
+                    _state.Settings.Theme = "dark";
+
+                NormalizeSettings(_state.Settings);
+                UI.Theme.SetCustomThemes(_state.Settings.CustomThemes);
+                UI.Theme.SetTheme(_state.Settings.Theme);
+                RebuildCachesLocked();
+                SaveInternal(_state);
+            }
+        }
+
+        if (deleted)
+            StateChanged?.Invoke();
+        return deleted;
+    }
+
+    private static CustomThemePreset CloneCustomTheme(CustomThemePreset src) => new()
+    {
+        Id = src.Id,
+        Name = src.Name,
+        BgHex = src.BgHex,
+        CardHex = src.CardHex,
+        AccentHex = src.AccentHex
+    };
+
+    private static void SanitizeCustomThemes(List<CustomThemePreset> list)
+    {
+        var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = list.Count - 1; i >= 0; i--)
+        {
+            var item = list[i];
+            if (item == null || string.IsNullOrWhiteSpace(item.Id))
+            {
+                list.RemoveAt(i);
+                continue;
+            }
+            string id = item.Id.Trim();
+            if (!id.StartsWith("custom:", StringComparison.OrdinalIgnoreCase))
+                id = "custom:" + id;
+            if (!seenIds.Add(id))
+            {
+                list.RemoveAt(i);
+                continue;
+            }
+            item.Id = id;
+            string name = string.IsNullOrWhiteSpace(item.Name) ? "Custom" : item.Name.Trim();
+            item.Name = name.Length > 28 ? name[..28].Trim() : name;
+            uint bg = UI.Theme.TryParseHex(item.BgHex, out uint b) ? b : 0x13161Fu;
+            uint card = UI.Theme.TryParseHex(item.CardHex, out uint c) ? c : UI.Theme.SuggestCardColor(bg);
+            uint accent = UI.Theme.TryParseHex(item.AccentHex, out uint a) ? a : 0x6366F1u;
+            item.BgHex = UI.Theme.FormatHex(bg);
+            item.CardHex = UI.Theme.FormatHex(card);
+            item.AccentHex = UI.Theme.FormatHex(accent);
+        }
+        if (list.Count > 20)
+            list.RemoveRange(0, list.Count - 20);
     }
 }

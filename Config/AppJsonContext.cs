@@ -7,6 +7,8 @@ namespace Cueway.Config;
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(AppState))]
 [JsonSerializable(typeof(AppSettings))]
+[JsonSerializable(typeof(CustomThemePreset))]
+[JsonSerializable(typeof(List<CustomThemePreset>))]
 [JsonSerializable(typeof(DiscoveredApp))]
 [JsonSerializable(typeof(List<DiscoveredApp>))]
 [JsonSerializable(typeof(List<string>))]

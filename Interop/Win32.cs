@@ -16,6 +16,19 @@ internal static unsafe partial class Win32
     public const uint WS_POPUP = 0x80000000;
     public const uint WS_VISIBLE = 0x10000000;
     public const uint WS_CLIPCHILDREN = 0x02000000;
+    public const uint WS_CHILD = 0x40000000;
+    public const uint WS_TABSTOP = 0x00010000;
+    public const uint ES_AUTOHSCROLL = 0x0080;
+
+    public const uint WM_SETFONT = 0x0030;
+    public const uint WM_CTLCOLOREDIT = 0x0133;
+    public const uint EM_SETLIMITTEXT = 0x00C5;
+    public const uint CC_RGBINIT = 0x00000001;
+    public const uint CC_FULLOPEN = 0x00000002;
+    public const uint CC_ANYCOLOR = 0x00000100;
+    public const uint RDW_INVALIDATE = 0x0001;
+    public const uint RDW_UPDATENOW = 0x0100;
+    public const uint RDW_FRAME = 0x0400;
 
     public const uint WS_EX_APPWINDOW = 0x00040000;
     public const uint WS_EX_LAYERED = 0x00080000;
@@ -557,6 +570,10 @@ internal static unsafe partial class Win32
 
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool RedrawWindow(nint hWnd, RECT* lprcUpdate, nint hrgnUpdate, uint flags);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool SetForegroundWindow(nint hWnd);
 
     [LibraryImport("user32.dll")]
@@ -752,6 +769,29 @@ internal static unsafe partial class Win32
 
     [LibraryImport("gdi32.dll")]
     public static partial uint SetTextColor(nint hdc, uint color);
+
+    [LibraryImport("gdi32.dll")]
+    public static partial uint SetBkColor(nint hdc, uint color);
+
+    [LibraryImport("gdi32.dll")]
+    public static partial nint CreateSolidBrush(uint color);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct CHOOSECOLORW
+    {
+        public uint lStructSize;
+        public nint hwndOwner;
+        public nint hInstance;
+        public uint rgbResult;
+        public uint* lpCustColors;
+        public uint Flags;
+        public nint lCustData;
+        public nint lpfnHook;
+        public char* lpTemplateName;
+    }
+
+    [LibraryImport("comdlg32.dll")]
+    public static partial int ChooseColorW(CHOOSECOLORW* lpcc);
 
     [LibraryImport("gdi32.dll", StringMarshalling = StringMarshalling.Utf16)]
     public static partial nint CreateFontW(
@@ -1357,5 +1397,45 @@ internal static unsafe partial class Win32
 
         nint lParam = (nint)(appCommand << 16);
         return SendMessageTimeoutW(hwnd, WM_APPCOMMAND, (nuint)hwnd, lParam, SMTO_ABORTIFHUNG, 250, out _) != 0;
+    }
+
+    private static readonly uint[] _customPickerColors =
+    [
+        0x181311, 0x201C28, 0x362316, 0x4D3021,
+        0xF99C4F, 0xF8BD38, 0x99D334, 0x24BFFB,
+        0x5E3FF4, 0xFAA78B, 0xB672F4, 0xEE760F,
+        0xF5F5F5, 0xA3A3A3, 0x474747, 0x101010
+    ];
+
+    public static bool TryPickColor(nint ownerHwnd, uint initialRgb, out uint pickedRgb)
+    {
+        uint r = (initialRgb >> 16) & 0xFF;
+        uint g = (initialRgb >> 8) & 0xFF;
+        uint b = initialRgb & 0xFF;
+        uint initialColorRef = r | (g << 8) | (b << 16);
+
+        fixed (uint* pCust = _customPickerColors)
+        {
+            var cc = new CHOOSECOLORW
+            {
+                lStructSize = (uint)sizeof(CHOOSECOLORW),
+                hwndOwner = ownerHwnd,
+                rgbResult = initialColorRef,
+                lpCustColors = pCust,
+                Flags = CC_RGBINIT | CC_FULLOPEN | CC_ANYCOLOR
+            };
+            if (ChooseColorW(&cc) != 0)
+            {
+                uint cr = cc.rgbResult;
+                uint pr = cr & 0xFF;
+                uint pg = (cr >> 8) & 0xFF;
+                uint pb = (cr >> 16) & 0xFF;
+                pickedRgb = (pr << 16) | (pg << 8) | pb;
+                return true;
+            }
+        }
+
+        pickedRgb = initialRgb;
+        return false;
     }
 }

@@ -19,13 +19,23 @@ public sealed class AppSettings
     public bool TimelineScrubbingEnabled { get; set; } = true;
     public int SeekSeconds { get; set; } = 10;
     public int LongPressThresholdMs { get; set; } = 400;
-    public string HotkeyToggleWindow { get; set; } = "Alt+C";
-    public string HotkeyManualLock { get; set; } = "Alt+M";
-    public string HotkeySoloMode { get; set; } = "Alt+S";
+    public string HotkeyToggleWindow { get; set; } = string.Empty;
+    public string HotkeyManualLock { get; set; } = string.Empty;
+    public string HotkeySoloMode { get; set; } = string.Empty;
     public string HotkeyPlayPause { get; set; } = string.Empty;
-    public string HotkeyPromotePlaying { get; set; } = "Alt+P";
+    public string HotkeyPromotePlaying { get; set; } = string.Empty;
     public string MpvPipeName { get; set; } = "mpvsocket";
     public List<string> GameBlacklistExes { get; set; } = [];
+    public List<CustomThemePreset> CustomThemes { get; set; } = [];
+}
+
+public sealed class CustomThemePreset
+{
+    public string Id { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string BgHex { get; set; } = "#13161F";
+    public string CardHex { get; set; } = "#1C212E";
+    public string AccentHex { get; set; } = "#6366F1";
 }
 
 public sealed class DiscoveredApp

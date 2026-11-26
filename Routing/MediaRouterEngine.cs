@@ -20,6 +20,7 @@ internal sealed class RouterStateSnapshot
 {
     public required MediaSessionInfo? ActiveTarget { get; init; }
     public MediaSessionInfo? NowPlayingTarget { get; init; }
+    public bool IsNowPlayingClosed { get; init; }
     public required MediaSessionInfo? SecondaryTarget { get; init; }
     public required List<MediaSessionInfo> Sessions { get; init; }
     public required bool IsManualLock { get; init; }
@@ -39,6 +40,9 @@ internal sealed class MediaRouterEngine : IDisposable
     private string? _lockedSessionId;
     private string? _lockedAppKey;
     private string? _explicitPromoteAppKey;
+    private string? _lastPlayedSessionId;
+    private string? _lastPlayedAppKey;
+    private MediaSessionInfo? _lastPlayedSnapshot;
     private bool _gameGuardActive;
     private bool _soloWasActive;
 
@@ -51,6 +55,7 @@ internal sealed class MediaRouterEngine : IDisposable
     {
         ActiveTarget = null,
         NowPlayingTarget = null,
+        IsNowPlayingClosed = false,
         SecondaryTarget = null,
         Sessions = [],
         IsManualLock = false,
@@ -126,6 +131,37 @@ internal sealed class MediaRouterEngine : IDisposable
             var activeTarget = lockedSession ?? SelectAutoTarget(sessions, gameActive);
             var secondaryTarget = SelectSecondaryTarget(sessions, activeTarget);
             var nowPlayingTarget = SelectNowPlayingTarget(sessions, activeTarget);
+            bool nowPlayingClosed = false;
+            if (nowPlayingTarget != null)
+            {
+                _lastPlayedSessionId = nowPlayingTarget.SessionId;
+                _lastPlayedAppKey = nowPlayingTarget.AppKey;
+                _lastPlayedSnapshot = nowPlayingTarget;
+            }
+            else
+            {
+                MediaSessionInfo? lastPlayed = null;
+                if (!string.IsNullOrEmpty(_lastPlayedSessionId))
+                    lastPlayed = sessions.Find(s => string.Equals(s.SessionId, _lastPlayedSessionId, StringComparison.Ordinal));
+                if (lastPlayed == null && !string.IsNullOrEmpty(_lastPlayedAppKey))
+                {
+                    lastPlayed = sessions.Find(s => !s.IsPassiveTab && string.Equals(s.AppKey, _lastPlayedAppKey, StringComparison.OrdinalIgnoreCase));
+                    if (lastPlayed != null)
+                        _lastPlayedSessionId = lastPlayed.SessionId;
+                }
+
+                if (lastPlayed != null)
+                {
+                    nowPlayingTarget = lastPlayed;
+                    _lastPlayedSnapshot = lastPlayed;
+                }
+                else if (_lastPlayedSnapshot != null)
+                {
+                    nowPlayingTarget = CreateClosedSnapshot(_lastPlayedSnapshot);
+                    nowPlayingClosed = true;
+                    _lastPlayedSessionId = null;
+                }
+            }
 
             sessions.Sort((a, b) =>
             {
@@ -166,6 +202,7 @@ internal sealed class MediaRouterEngine : IDisposable
             {
                 ActiveTarget = activeTarget,
                 NowPlayingTarget = nowPlayingTarget,
+                IsNowPlayingClosed = nowPlayingClosed,
                 SecondaryTarget = secondaryTarget,
                 Sessions = sessions,
                 IsManualLock = lockedSession != null,
@@ -195,6 +232,7 @@ internal sealed class MediaRouterEngine : IDisposable
         if (ReferenceEquals(a, b))
             return true;
         if (a.IsManualLock != b.IsManualLock ||
+            a.IsNowPlayingClosed != b.IsNowPlayingClosed ||
             a.SoloModeEnabled != b.SoloModeEnabled ||
             a.GameGuardActive != b.GameGuardActive)
             return false;
@@ -369,6 +407,26 @@ internal sealed class MediaRouterEngine : IDisposable
         }
         return best;
     }
+
+    private static MediaSessionInfo CreateClosedSnapshot(MediaSessionInfo src) => new()
+    {
+        SessionId = src.SessionId,
+        AppKey = src.AppKey,
+        SiteKey = src.SiteKey,
+        DisplayName = src.DisplayName,
+        ExePath = src.ExePath,
+        ProcessIds = [],
+        Title = src.Title,
+        Artist = src.Artist,
+        IsPlaying = false,
+        IsEffectivelyPlaying = false,
+        IsBrowser = src.IsBrowser,
+        IsVideoLikely = src.IsVideoLikely,
+        IsMuted = src.IsMuted,
+        Volume = src.Volume,
+        Source = src.Source,
+        IsPassiveTab = true
+    };
 
     private static bool IsBetterTarget(
         MediaSessionInfo cand,
