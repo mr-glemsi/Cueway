@@ -1,5 +1,5 @@
 (() => {
-  const WMR_VERSION = 4;
+  const WMR_VERSION = 5;
   if (window.__wmrVersion === WMR_VERSION) return;
   try { window.__wmrCleanup?.(); } catch {}
   window.__wmrVersion = WMR_VERSION;
@@ -131,7 +131,25 @@
     if (!el || !el.isConnected) return false;
     const hasSrc = Boolean(el.currentSrc || el.src || el.srcObject);
     const dur = Number.isFinite(el.duration) ? el.duration : 0;
-    return hasSrc && (el.readyState > 0 || dur > 0 || !el.paused);
+    if (!(hasSrc && (el.readyState > 0 || dur > 0 || !el.paused))) return false;
+
+    if (el.ended && el.paused && !isDedicatedWatchUrl()) return false;
+
+    const host = normalizedHost();
+    if (host.includes("youtube.com") && host !== "music.youtube.com" && !isDedicatedWatchUrl() && el.paused) {
+      if (el.closest("[hidden]")) return false;
+      const miniplayer = el.closest("ytd-miniplayer");
+      if (miniplayer && !document.querySelector("ytd-miniplayer[active]")) return false;
+      if (!document.hidden) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) return false;
+      }
+      if (el !== lastActiveEl || (lastMediaSnapshot && lastMediaSnapshot.url !== sanitizeUrl())) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   function pickPrimaryMediaElement(forceShadowScan = false) {
@@ -401,7 +419,7 @@
       if (lastMediaSnapshot && lastMediaSnapshot.host === host) {
         const now = Date.now();
         if (!missingSince) missingSince = now;
-        if (document.hidden || isDedicatedWatchUrl() || now - missingSince < 4500) {
+        if (lastMediaSnapshot.url === cleanUrl && now - missingSince < 1500) {
           return {
             ...lastMediaSnapshot,
             hasMedia: true,
@@ -414,6 +432,7 @@
         }
         lastMediaSnapshot = null;
         hadMediaOnHost = "";
+        missingSince = 0;
       }
       return { hasMedia: false, url: cleanUrl };
     }
@@ -587,11 +606,35 @@
     }
   }
 
+  function handlePageHide() {
+    if (window.__wmrVersion !== WMR_VERSION) return;
+    lastMediaSnapshot = null;
+    hadMediaOnHost = "";
+    missingSince = 0;
+    lastActiveEl = null;
+    lastSerialized = "";
+    try {
+      const res = api.runtime.sendMessage({
+        type: "media_state",
+        state: { hasMedia: false, url: sanitizeUrl() }
+      });
+      if (res && typeof res.catch === "function") res.catch(() => {});
+    } catch {}
+  }
+
+  function handleNavChange() {
+    if (window.__wmrVersion !== WMR_VERSION) return;
+    scheduleReport(true);
+  }
+
   const events = ["play", "playing", "pause", "ended", "volumechange", "loadedmetadata", "emptied"];
   for (const evt of events) {
     document.addEventListener(evt, handleMediaEvent, true);
   }
   document.addEventListener("visibilitychange", handleVisibilityChange, true);
+  window.addEventListener("pagehide", handlePageHide, true);
+  window.addEventListener("popstate", handleNavChange, true);
+  window.addEventListener("yt-navigate-finish", handleNavChange, true);
 
   const titleEl = document.querySelector("title");
   if (titleEl && typeof MutationObserver !== "undefined") {
@@ -627,6 +670,9 @@
       document.removeEventListener(evt, handleMediaEvent, true);
     }
     document.removeEventListener("visibilitychange", handleVisibilityChange, true);
+    window.removeEventListener("pagehide", handlePageHide, true);
+    window.removeEventListener("popstate", handleNavChange, true);
+    window.removeEventListener("yt-navigate-finish", handleNavChange, true);
     try { api.runtime.onMessage.removeListener(onRuntimeMessage); } catch {}
   };
 

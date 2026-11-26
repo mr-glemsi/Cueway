@@ -222,6 +222,20 @@ internal sealed class BrowserBridgeServer : IDisposable
         }
     }
 
+    public HashSet<string> GetConnectedBrowsersSnapshot()
+    {
+        lock (_connLock)
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var conn in _connections.Values)
+            {
+                if (!string.IsNullOrWhiteSpace(conn.BrowserKey))
+                    set.Add(conn.BrowserKey.Trim().ToLowerInvariant());
+            }
+            return set;
+        }
+    }
+
     public bool? TryGetTabIsPlaying(string connectionId, int tabId)
     {
         lock (_connLock)

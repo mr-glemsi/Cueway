@@ -23,6 +23,7 @@ public sealed class AppSettings
     public string HotkeyManualLock { get; set; } = "Alt+M";
     public string HotkeySoloMode { get; set; } = "Alt+S";
     public string HotkeyPlayPause { get; set; } = string.Empty;
+    public string HotkeyPromotePlaying { get; set; } = "Alt+P";
     public string MpvPipeName { get; set; } = "mpvsocket";
     public List<string> GameBlacklistExes { get; set; } = [];
 }

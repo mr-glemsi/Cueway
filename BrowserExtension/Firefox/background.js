@@ -61,7 +61,35 @@ async function injectContentScript(tabId) {
   }
 }
 
+async function pruneClosedTabs() {
+  if (tabStates.size === 0) return;
+  let allTabs = [];
+  try {
+    allTabs = await api.tabs.query({});
+  } catch {
+    return;
+  }
+
+  const liveIds = new Set();
+  for (const t of allTabs) {
+    if (t?.id && !t.discarded && typeof t.url === "string" &&
+        (t.url.startsWith("http://") || t.url.startsWith("https://"))) {
+      liveIds.add(t.id);
+    }
+  }
+
+  let removed = false;
+  for (const id of Array.from(tabStates.keys())) {
+    if (!liveIds.has(id)) {
+      tabStates.delete(id);
+      removed = true;
+    }
+  }
+  if (removed) scheduleFlush();
+}
+
 async function scanAndInjectTabs(forceInject = false) {
+  await pruneClosedTabs();
   let tabs = [];
   try {
     tabs = await api.tabs.query({ url: ["http://*/*", "https://*/*"] });
@@ -292,7 +320,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         duration: Number(st.duration) || 0,
         currentTime: Number(st.currentTime) || 0
       });
-    } else if (tabStates.has(tabId) && (!sender.tab.active || st?.keepSticky)) {
+    } else if (tabStates.has(tabId) && st?.keepSticky) {
       const existing = tabStates.get(tabId);
       existing.isPlaying = false;
       existing.isPaused = true;
@@ -341,18 +369,36 @@ api.tabs.onRemoved.addListener((tabId) => {
 });
 
 api.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.discarded === true && tabStates.has(tabId)) {
+    tabStates.delete(tabId);
+    scheduleFlush();
+    return;
+  }
+
   if (changeInfo.url && tabStates.has(tabId)) {
-    const cur = tabStates.get(tabId);
-    const oldHost = normHost(cur?.url);
-    const newHost = normHost(changeInfo.url);
-    if (oldHost && newHost && oldHost !== newHost) {
+    const newUrl = changeInfo.url;
+    if (!newUrl.startsWith("http://") && !newUrl.startsWith("https://")) {
       tabStates.delete(tabId);
       scheduleFlush();
+    } else {
+      const cur = tabStates.get(tabId);
+      const oldHost = normHost(cur?.url);
+      const newHost = normHost(newUrl);
+      if (oldHost && newHost && oldHost !== newHost) {
+        tabStates.delete(tabId);
+        scheduleFlush();
+      } else {
+        api.tabs.sendMessage(tabId, { type: "query_state" }).catch(() => {});
+      }
     }
   }
 
   const tabUrl = tab?.url || "";
   const isHttp = tabUrl.startsWith("http://") || tabUrl.startsWith("https://");
+
+  if (changeInfo.status === "complete" && tabStates.has(tabId) && isHttp) {
+    api.tabs.sendMessage(tabId, { type: "query_state" }).catch(() => {});
+  }
 
   if (changeInfo.audible === true) {
     if (tabStates.has(tabId)) {
@@ -406,6 +452,7 @@ if (api.alarms) {
   api.alarms.create("wmr_keepalive", { periodInMinutes: 0.5 });
   api.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === "wmr_keepalive") {
+      pruneClosedTabs();
       if (!ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)) {
         connect();
       } else if (ws.readyState === WebSocket.OPEN) {

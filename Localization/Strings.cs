@@ -134,6 +134,20 @@ internal static class Strings
     public static string MediaPlayingFallback => T("Medya oynatılıyor", "Playing media", "正在播放媒体", "Reproduciendo", "Воспроизведение", "Medienwiedergabe", "Lecture en cours", "メディアを再生中", "미디어 재생 중");
 
     // Dashboard Section Headings & Buttons
+    public static string SecNowPlaying => T("CANLI OYNATICI", "LIVE PLAYER", "实时播放器", "REPRODUCTOR EN VIVO", "АКТИВНЫЙ ПЛЕЕР", "LIVE-PLAYER", "LECTEUR EN DIRECT", "ライブプレーヤー", "실시간 플레이어");
+    public static string NoNowPlayingTitle => T("Aktif Oynatım Yok", "No Active Playback", "当前无播放内容", "Sin reproducción activa", "Нет активного воспроизведения", "Keine aktive Wiedergabe", "Aucune lecture active", "再生中のメディアなし", "활성 재생 없음");
+    public static string NoNowPlayingSub => T(
+        "Bir uygulama veya sekmede medya başladığında canlı oynatıcı burada görünür.",
+        "When any app or browser tab starts playing, the live player appears here.",
+        "当任意应用或标签页开始播放媒体时，实时播放器会显示在此处。",
+        "Cuando alguna aplicación o pestaña reproduzca algo, aparecerá aquí.",
+        "Когда приложение или вкладка начнёт воспроизведение, плеер появится здесь.",
+        "Sobald eine App oder ein Tab etwas abspielt, erscheint der Player hier.",
+        "Dès qu'une application ou un onglet lance une lecture, le lecteur apparaît ici.",
+        "アプリやタブで再生が始まると、ライブプレーヤーがここに表示されます。",
+        "앱이나 탭에서 재생을 시작하면 실시간 플레이어가 여기에 표시됩니다.");
+    public static string BadgePriorityTarget => T("ÖNCELİKLİ", "PRIORITY", "优先", "PRIORIDAD", "ПРИОРИТЕТ", "PRIORITÄT", "PRIORITÉ", "優先", "우선");
+
     public static string SecActiveTarget => T("AKTİF HEDEF", "ACTIVE TARGET", "当前目标", "DESTINO ACTIVO", "АКТИВНАЯ ЦЕЛЬ", "AKTIVES ZIEL", "CIBLE ACTIVE", "アクティブターゲット", "활성 대상");
     public static string NoActiveTargetTitle => T("Aktif Hedef Yok", "No Active Target", "无活动目标", "Sin destino activo", "Нет активной цели", "Kein aktives Ziel", "Aucune cible active", "アクティブな対象なし", "활성 대상 없음");
     public static string NoActiveTargetSub => T(
@@ -520,6 +534,26 @@ internal static class Strings
         "Attribuez une touche unique (ex. Fin, F8, P) ou une combinaison",
         "メディアキーがないキーボード向けに単一キー（End、F8、Pなど）または組み合わせを設定",
         "미디어 키가 없는 키보드용 단일 키(예: End, F8, P) 또는 조합 지정");
+    public static string SetHkPromotePlayingTitle => T(
+        "Oynayan Uygulamayı Önceliklendir",
+        "Prioritize Playing App",
+        "优先当前播放应用",
+        "Priorizar app en reproducción",
+        "Приоритет для играющего приложения",
+        "Spielende App priorisieren",
+        "Prioriser l'application en lecture",
+        "再生中のアプリを最優先にする",
+        "재생 중인 앱 우선순위 지정");
+    public static string SetHkPromotePlayingSub => T(
+        "O anda çalan uygulamayı veya sekmeyi öncelik sırasının en üstüne alır",
+        "Moves the currently playing app or tab to top priority",
+        "将当前正在播放的应用或标签页移至最高优先级",
+        "Mueve la app o pestaña en reproducción a la máxima prioridad",
+        "Перемещает играющее приложение или вкладку в начало списка приоритетов",
+        "Setzt die aktuell spielende App oder den Tab auf höchste Priorität",
+        "Place l'application ou l'onglet en cours de lecture en tête des priorités",
+        "現在再生中のアプリやタブを最優先にします",
+        "현재 재생 중인 앱이나 탭을 최우선 순위로 올립니다");
     public static string HotkeyAssignShort => T("+ Kısayol", "+ Hotkey", "+ 快捷键", "+ Atajo", "+ Клавиша", "+ Kürzel", "+ Raccourci", "+ キー設定", "+ 단축키");
     public static string HotkeyUnassigned => T("Atanmadı", "Not set", "未设置", "Sin asignar", "Не задано", "Nicht belegt", "Non défini", "未設定", "미지정");
     public static string HotkeyListening => T("Tuşa basın...", "Press keys...", "请按键...", "Pulsa teclas...", "Нажмите...", "Taste drücken...", "Appuyez...", "キー入力待ち...", "키를 누르세요...");

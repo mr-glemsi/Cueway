@@ -140,12 +140,28 @@ internal sealed class MediaSessionManager : IDisposable
             var bridgeByBrowser = new Dictionary<string, List<MediaSessionInfo>>(StringComparer.OrdinalIgnoreCase);
             bool mpvSeenViaSmtc = false;
 
+            bool hasFirefoxProc = procsByName.ContainsKey("firefox");
+            bool hasZenProc = procsByName.ContainsKey("zen");
+            var rawConnectedBrowsers = _bridgeServer.GetConnectedBrowsersSnapshot();
+            var connectedBridgeBrowsers = new HashSet<string>(rawConnectedBrowsers.Count, StringComparer.OrdinalIgnoreCase);
+            foreach (string rawBrowserKey in rawConnectedBrowsers)
+            {
+                string bk = rawBrowserKey;
+                if (bk == "firefox" && !hasFirefoxProc && hasZenProc)
+                    bk = "zen";
+                else if (bk == "opera" &&
+                         !procsByName.ContainsKey("opera") &&
+                         procsByName.ContainsKey("opera_gx"))
+                    bk = "opera_gx";
+
+                if (procsByName.TryGetValue(bk, out var bProcs) && bProcs.Count > 0)
+                    connectedBridgeBrowsers.Add(bk);
+            }
+
             // 1. Companion browser extension sessions (each media tab is an independent live session)
             var bridgeTabs = _bridgeServer.GetAllTabsSnapshot();
             if (bridgeTabs.Count > 0)
             {
-                bool hasFirefoxProc = procsByName.ContainsKey("firefox");
-                bool hasZenProc = procsByName.ContainsKey("zen");
                 var seenBridgeIds = new Dictionary<string, int>(StringComparer.Ordinal);
 
                 foreach (var rec in bridgeTabs)
@@ -295,6 +311,8 @@ internal sealed class MediaSessionManager : IDisposable
 
                         if (resolved.IsBrowser)
                         {
+                            bool bridgeConnectedForBrowser = connectedBridgeBrowsers.Contains(resolved.AppKey);
+
                             // Skip expensive UIA/profile tab scanning when BrowserBridge already covers this browser & tab/site
                             if (bridgeByBrowser.TryGetValue(resolved.AppKey, out var bSessions) && bSessions.Count > 0)
                             {
@@ -307,8 +325,17 @@ internal sealed class MediaSessionManager : IDisposable
                                      (b.Title.Contains(title, StringComparison.OrdinalIgnoreCase) ||
                                       title.Contains(b.Title, StringComparison.OrdinalIgnoreCase))));
 
-                                if (quickCovered || (!quickSite.HasValue && (!isPlaying || string.IsNullOrWhiteSpace(title))))
+                                if (quickCovered ||
+                                    (bridgeConnectedForBrowser && !isPlaying) ||
+                                    (!quickSite.HasValue && (!isPlaying || string.IsNullOrWhiteSpace(title))))
+                                {
                                     continue;
+                                }
+                            }
+                            else if (bridgeConnectedForBrowser && !isPlaying)
+                            {
+                                // Extension is connected for this browser and reports zero live media tabs; ignore stale paused Windows SMTC entries
+                                continue;
                             }
 
                             IReadOnlyList<RunningProcessInfo> browserProcs = procsByName.TryGetValue(resolved.AppKey, out var bProcsList)
@@ -334,8 +361,12 @@ internal sealed class MediaSessionManager : IDisposable
                                      (b.Title.Contains(title, StringComparison.OrdinalIgnoreCase) ||
                                       title.Contains(b.Title, StringComparison.OrdinalIgnoreCase))));
 
-                                if (covered || (string.IsNullOrEmpty(siteKey) && (!isPlaying || string.IsNullOrWhiteSpace(title))))
+                                if (covered ||
+                                    (bridgeConnectedForBrowser && !isPlaying) ||
+                                    (string.IsNullOrEmpty(siteKey) && (!isPlaying || string.IsNullOrWhiteSpace(title))))
+                                {
                                     continue;
+                                }
                             }
                         }
 
@@ -403,7 +434,7 @@ internal sealed class MediaSessionManager : IDisposable
             }
 
             // Retain recently played multi-site browser tabs when Companion Extension isn't connected for that browser
-            AppendRetainedSmtcBrowserTabs(collected, bridgeByBrowser, procsByName, visibleWindows, audioByPid);
+            AppendRetainedSmtcBrowserTabs(collected, bridgeByBrowser, connectedBridgeBrowsers, procsByName, visibleWindows, audioByPid);
 
             // Optional mpv Named Pipe IPC integration (only query pipe when an mpv/mpvnet process is running)
             if (!mpvSeenViaSmtc)
@@ -456,7 +487,7 @@ internal sealed class MediaSessionManager : IDisposable
             }
 
             // 4. Universal WASAPI Audio Session Discovery (catches apps without SMTC such as Stremio, VLC, etc.)
-            CollectAudioFallbackSessions(collected, procSnapshot, visibleWindows, audioByPid);
+            CollectAudioFallbackSessions(collected, connectedBridgeBrowsers, procSnapshot, visibleWindows, audioByPid);
 
             lock (_sessionsLock)
             {
@@ -478,6 +509,7 @@ internal sealed class MediaSessionManager : IDisposable
     private void AppendRetainedSmtcBrowserTabs(
         List<MediaSessionInfo> collected,
         Dictionary<string, List<MediaSessionInfo>> bridgeByBrowser,
+        HashSet<string> connectedBridgeBrowsers,
         Dictionary<string, List<RunningProcessInfo>> procsByName,
         IReadOnlyList<Win32.VisibleWindowInfo> visibleWindows,
         Dictionary<uint, AudioProcessState> audioByPid)
@@ -490,14 +522,15 @@ internal sealed class MediaSessionManager : IDisposable
             if (_recentSmtcBrowserTabs.Count == 0)
                 return;
 
-            // If BrowserBridge is actively supplying tabs for a browser, prune passive SMTC tab cache for that browser
-            if (bridgeByBrowser.Count > 0)
+            // If BrowserBridge is connected or supplying tabs for a browser, prune passive SMTC tab cache for that browser
+            if (bridgeByBrowser.Count > 0 || connectedBridgeBrowsers.Count > 0)
             {
                 List<string>? bridgedKeys = null;
                 foreach (string k in _recentSmtcBrowserTabs.Keys)
                 {
                     string? bk = BrowserSiteScanner.ExtractBrowserKeyFromAppKey(k);
-                    if (!string.IsNullOrEmpty(bk) && bridgeByBrowser.ContainsKey(bk))
+                    if (!string.IsNullOrEmpty(bk) &&
+                        (bridgeByBrowser.ContainsKey(bk) || connectedBridgeBrowsers.Contains(bk)))
                         (bridgedKeys ??= []).Add(k);
                 }
                 if (bridgedKeys != null)
@@ -519,7 +552,7 @@ internal sealed class MediaSessionManager : IDisposable
 
         foreach (var (key, cached, lastSeen) in candidates)
         {
-            if (now - lastSeen > 600_000)
+            if (now - lastSeen > 120_000)
             {
                 (toRemove ??= []).Add(key);
                 continue;
@@ -541,7 +574,7 @@ internal sealed class MediaSessionManager : IDisposable
                 continue;
             }
 
-            if (now - lastSeen > 25_000 &&
+            if (now - lastSeen > 3_000 &&
                 !BrowserSiteScanner.IsSiteTabStillOpen(browserKey, cached.SiteKey, browserProcs, visibleWindows))
             {
                 (toRemove ??= []).Add(key);
@@ -601,6 +634,7 @@ internal sealed class MediaSessionManager : IDisposable
 
     private void CollectAudioFallbackSessions(
         List<MediaSessionInfo> collected,
+        HashSet<string> connectedBridgeBrowsers,
         IReadOnlyList<RunningProcessInfo> procSnapshot,
         IReadOnlyList<Win32.VisibleWindowInfo> visibleWindows,
         Dictionary<uint, AudioProcessState> audioByPid)
@@ -632,7 +666,10 @@ internal sealed class MediaSessionManager : IDisposable
             return;
 
         var coveredPids = new HashSet<int>(collected.Count * 2);
-        var coveredKeys = new HashSet<string>(collected.Count * 2, StringComparer.OrdinalIgnoreCase);
+        var coveredKeys = new HashSet<string>(collected.Count * 2 + connectedBridgeBrowsers.Count, StringComparer.OrdinalIgnoreCase);
+
+        foreach (string bridgedBrowser in connectedBridgeBrowsers)
+            coveredKeys.Add(bridgedBrowser);
 
         foreach (var existing in collected)
         {
@@ -735,10 +772,13 @@ internal sealed class MediaSessionManager : IDisposable
 
             nint mainHwnd = Win32.FindMainWindowInSnapshot(visibleWindows, groupPids, null, out string matchedWinTitle);
             bool recentlyHeard = lastHeardTick > 0 && (now - lastHeardTick) <= 600_000;
+            bool isBrowser = ProcessResolver.IsBrowserProcessName(groupKey);
 
-            bool shouldAdmit = isKnownMedia
-                ? (hasActiveSession || recentlyHeard || mainHwnd != 0)
-                : (mainHwnd != 0 && (hasPeakNow || recentlyHeard));
+            bool shouldAdmit = isBrowser
+                ? (hasPeakNow || (lastPeakTick > 0 && (now - lastPeakTick) <= 4_000))
+                : (isKnownMedia
+                    ? (hasActiveSession || recentlyHeard || mainHwnd != 0)
+                    : (mainHwnd != 0 && (hasPeakNow || recentlyHeard)));
             if (!shouldAdmit)
                 continue;
 
@@ -756,7 +796,6 @@ internal sealed class MediaSessionManager : IDisposable
                 : (groupProcs.Select(p => p.MainWindowTitle).FirstOrDefault(t => !string.IsNullOrWhiteSpace(t)) ?? string.Empty);
             string title = CleanAppWindowTitle(rawTitle, displayName);
 
-            bool isBrowser = ProcessResolver.IsBrowserProcessName(groupKey);
             bool isVideoLikely = KnownVideoExes.Contains(groupKey) || isBrowser;
 
             var info = new MediaSessionInfo

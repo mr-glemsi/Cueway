@@ -9,7 +9,8 @@ internal enum GlobalHotkeySlot
     ToggleWindow = 0,
     ManualLock = 1,
     SoloMode = 2,
-    PlayPause = 3
+    PlayPause = 3,
+    PromotePlaying = 4
 }
 
 internal sealed class StateStore
@@ -100,6 +101,7 @@ internal sealed class StateStore
         s.HotkeyManualLock = HotkeyHelper.Normalize(s.HotkeyManualLock);
         s.HotkeySoloMode = HotkeyHelper.Normalize(s.HotkeySoloMode);
         s.HotkeyPlayPause = HotkeyHelper.Normalize(s.HotkeyPlayPause, allowAnySingleKey: true);
+        s.HotkeyPromotePlaying = HotkeyHelper.Normalize(s.HotkeyPromotePlaying, allowAnySingleKey: true);
         if (string.IsNullOrWhiteSpace(s.MpvPipeName))
             s.MpvPipeName = "mpvsocket";
     }
@@ -145,6 +147,7 @@ internal sealed class StateStore
             HotkeyManualLock = s.HotkeyManualLock,
             HotkeySoloMode = s.HotkeySoloMode,
             HotkeyPlayPause = s.HotkeyPlayPause,
+            HotkeyPromotePlaying = s.HotkeyPromotePlaying,
             MpvPipeName = s.MpvPipeName,
             GameBlacklistExes = [.. s.GameBlacklistExes]
         };
@@ -213,6 +216,7 @@ internal sealed class StateStore
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeyToggleWindow, exceptGlobalSlot: GlobalHotkeySlot.ToggleWindow);
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeyManualLock, exceptGlobalSlot: GlobalHotkeySlot.ManualLock);
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeySoloMode, exceptGlobalSlot: GlobalHotkeySlot.SoloMode);
+            ClearDuplicateHotkeyLocked(_state.Settings.HotkeyPromotePlaying, exceptGlobalSlot: GlobalHotkeySlot.PromotePlaying);
             UI.Theme.SetTheme(_state.Settings.Theme);
             RebuildCachesLocked();
             SaveInternal(_state);
@@ -331,7 +335,9 @@ internal sealed class StateStore
 
     public bool SetGlobalHotkey(GlobalHotkeySlot slot, string hotkey)
     {
-        string normalized = HotkeyHelper.Normalize(hotkey, allowAnySingleKey: slot == GlobalHotkeySlot.PlayPause);
+        string normalized = HotkeyHelper.Normalize(
+            hotkey,
+            allowAnySingleKey: slot is GlobalHotkeySlot.PlayPause or GlobalHotkeySlot.PromotePlaying);
         lock (_lock)
         {
             ClearDuplicateHotkeyLocked(normalized, exceptGlobalSlot: slot);
@@ -348,6 +354,9 @@ internal sealed class StateStore
                     break;
                 case GlobalHotkeySlot.PlayPause:
                     _state.Settings.HotkeyPlayPause = normalized;
+                    break;
+                case GlobalHotkeySlot.PromotePlaying:
+                    _state.Settings.HotkeyPromotePlaying = normalized;
                     break;
             }
             RebuildCachesLocked();
@@ -415,6 +424,10 @@ internal sealed class StateStore
         if (exceptGlobalSlot != GlobalHotkeySlot.PlayPause &&
             string.Equals(_state.Settings.HotkeyPlayPause, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
             _state.Settings.HotkeyPlayPause = string.Empty;
+
+        if (exceptGlobalSlot != GlobalHotkeySlot.PromotePlaying &&
+            string.Equals(_state.Settings.HotkeyPromotePlaying, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
+            _state.Settings.HotkeyPromotePlaying = string.Empty;
 
         foreach (var other in _state.PriorityApps)
         {

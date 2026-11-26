@@ -15,6 +15,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
         HotkeyBinding ManualLock,
         HotkeyBinding SoloMode,
         HotkeyBinding PlayPause,
+        HotkeyBinding PromotePlaying,
         AppHotkeyEntry[] AppHotkeys);
 
     private const nuint TIMER_WATCHDOG = 9001;
@@ -58,7 +59,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
     private volatile bool _mediaHookEnabled = true;
     private volatile bool _timelineScrubbingEnabled = true;
     private volatile int _longPressThresholdMs = 400;
-    private volatile HotkeySnapshot _hotkeys = new(default, default, default, default, []);
+    private volatile HotkeySnapshot _hotkeys = new(default, default, default, default, default, []);
 
     public event Action? ToggleWindowRequested;
     public bool IsCapturingHotkey => _onCaptureResult != null;
@@ -86,6 +87,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
         HotkeyHelper.TryParse(s.HotkeyManualLock, out var manualLock);
         HotkeyHelper.TryParse(s.HotkeySoloMode, out var soloMode);
         HotkeyHelper.TryParse(s.HotkeyPlayPause, out var playPause, allowAnySingleKey: true);
+        HotkeyHelper.TryParse(s.HotkeyPromotePlaying, out var promotePlaying, allowAnySingleKey: true);
 
         var appEntries = new List<AppHotkeyEntry>();
         foreach (var app in apps)
@@ -94,7 +96,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                 appEntries.Add(new AppHotkeyEntry(appBinding, app.AppKey));
         }
 
-        _hotkeys = new HotkeySnapshot(toggleWin, manualLock, soloMode, playPause, [.. appEntries]);
+        _hotkeys = new HotkeySnapshot(toggleWin, manualLock, soloMode, playPause, promotePlaying, [.. appEntries]);
     }
 
     public void BeginHotkeyCapture(
@@ -229,7 +231,8 @@ internal sealed unsafe class KeyboardHookService : IDisposable
             // and for the PlayPause shortcut while keeping the guard for other shortcuts.
             bool allowInjected = isMediaKey ||
                                  inst.IsCapturingHotkey ||
-                                 (!inst._hotkeys.PlayPause.IsEmpty && inst._hotkeys.PlayPause.VkCode == kb.vkCode);
+                                 (!inst._hotkeys.PlayPause.IsEmpty && inst._hotkeys.PlayPause.VkCode == kb.vkCode) ||
+                                 (!inst._hotkeys.PromotePlaying.IsEmpty && inst._hotkeys.PromotePlaying.VkCode == kb.vkCode);
 
             if (!isInjected || allowInjected)
             {
@@ -305,6 +308,13 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                 {
                     if (_heldCustomVks.Add(vkCode))
                         _ = Task.Run(() => _engine.DispatchMediaActionAsync(MediaActionKind.PlayPause, secondary: false));
+                    return true;
+                }
+
+                if (!snap.PromotePlaying.IsEmpty && snap.PromotePlaying.VkCode == vkCode && snap.PromotePlaying.Modifiers == mods)
+                {
+                    if (_heldCustomVks.Add(vkCode))
+                        _ = Task.Run(() => _engine.PromoteNowPlayingToTop());
                     return true;
                 }
 

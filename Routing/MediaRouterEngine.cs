@@ -19,6 +19,7 @@ internal sealed record OsdMessage(string AppName, string Subtitle, string? ExePa
 internal sealed class RouterStateSnapshot
 {
     public required MediaSessionInfo? ActiveTarget { get; init; }
+    public MediaSessionInfo? NowPlayingTarget { get; init; }
     public required MediaSessionInfo? SecondaryTarget { get; init; }
     public required List<MediaSessionInfo> Sessions { get; init; }
     public required bool IsManualLock { get; init; }
@@ -49,6 +50,7 @@ internal sealed class MediaRouterEngine : IDisposable
     private RouterStateSnapshot _snapshot = new()
     {
         ActiveTarget = null,
+        NowPlayingTarget = null,
         SecondaryTarget = null,
         Sessions = [],
         IsManualLock = false,
@@ -123,6 +125,29 @@ internal sealed class MediaRouterEngine : IDisposable
 
             var activeTarget = lockedSession ?? SelectAutoTarget(sessions, gameActive);
             var secondaryTarget = SelectSecondaryTarget(sessions, activeTarget);
+            var nowPlayingTarget = SelectNowPlayingTarget(sessions, activeTarget);
+
+            sessions.Sort((a, b) =>
+            {
+                bool aIsTarget = activeTarget != null && string.Equals(a.SessionId, activeTarget.SessionId, StringComparison.Ordinal);
+                bool bIsTarget = activeTarget != null && string.Equals(b.SessionId, activeTarget.SessionId, StringComparison.Ordinal);
+                if (aIsTarget != bIsTarget) return aIsTarget ? -1 : 1;
+
+                int c = a.IsPassiveTab.CompareTo(b.IsPassiveTab);
+                if (c != 0) return c;
+
+                int prioA = _stateStore.GetPriorityIndex(a.AppKey);
+                int prioB = _stateStore.GetPriorityIndex(b.AppKey);
+                if (prioA != prioB) return prioA.CompareTo(prioB);
+
+                c = b.IsEffectivelyPlaying.CompareTo(a.IsEffectivelyPlaying);
+                if (c != 0) return c;
+
+                c = b.IsPlaying.CompareTo(a.IsPlaying);
+                if (c != 0) return c;
+
+                return string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase);
+            });
 
             // Auto-Pause / Auto-Resume engine
             if (settings.AutoPauseEnabled && lockedSession == null)
@@ -140,6 +165,7 @@ internal sealed class MediaRouterEngine : IDisposable
             nextSnapshot = new RouterStateSnapshot
             {
                 ActiveTarget = activeTarget,
+                NowPlayingTarget = nowPlayingTarget,
                 SecondaryTarget = secondaryTarget,
                 Sessions = sessions,
                 IsManualLock = lockedSession != null,
@@ -174,6 +200,7 @@ internal sealed class MediaRouterEngine : IDisposable
             return false;
 
         if (!SessionEquivalent(a.ActiveTarget, b.ActiveTarget) ||
+            !SessionEquivalent(a.NowPlayingTarget, b.NowPlayingTarget) ||
             !SessionEquivalent(a.SecondaryTarget, b.SecondaryTarget))
             return false;
 
@@ -272,6 +299,69 @@ internal sealed class MediaRouterEngine : IDisposable
 
             int prio = _stateStore.GetPriorityIndex(s.AppKey);
             if (best == null || IsBetterTarget(s, prio, best, bestPrio, preferNonBrowser: false))
+            {
+                best = s;
+                bestPrio = prio;
+            }
+        }
+        return best;
+    }
+
+    private MediaSessionInfo? SelectNowPlayingTarget(List<MediaSessionInfo> sessions, MediaSessionInfo? activeTarget)
+    {
+        if (activeTarget != null && activeTarget.IsEffectivelyPlaying)
+            return activeTarget;
+
+        MediaSessionInfo? best = null;
+        int bestPrio = int.MaxValue;
+        for (int i = 0; i < sessions.Count; i++)
+        {
+            var s = sessions[i];
+            if (s.IsPassiveTab || (!s.IsPlaying && !s.IsEffectivelyPlaying))
+                continue;
+
+            int prio = _stateStore.GetPriorityIndex(s.AppKey);
+            if (best == null)
+            {
+                best = s;
+                bestPrio = prio;
+                continue;
+            }
+
+            int c = s.IsEffectivelyPlaying.CompareTo(best.IsEffectivelyPlaying);
+            if (c != 0)
+            {
+                if (c > 0)
+                {
+                    best = s;
+                    bestPrio = prio;
+                }
+                continue;
+            }
+
+            if (prio != bestPrio)
+            {
+                if (prio < bestPrio)
+                {
+                    best = s;
+                    bestPrio = prio;
+                }
+                continue;
+            }
+
+            bool sIsActive = activeTarget != null && string.Equals(s.SessionId, activeTarget.SessionId, StringComparison.Ordinal);
+            bool bestIsActive = activeTarget != null && string.Equals(best.SessionId, activeTarget.SessionId, StringComparison.Ordinal);
+            if (sIsActive != bestIsActive)
+            {
+                if (sIsActive)
+                {
+                    best = s;
+                    bestPrio = prio;
+                }
+                continue;
+            }
+
+            if (!s.IsBrowser && best.IsBrowser)
             {
                 best = s;
                 bestPrio = prio;
@@ -545,6 +635,20 @@ internal sealed class MediaRouterEngine : IDisposable
         NotifyOsd(displayName, Strings.OsdPromotedTop, exePath, appKey: appKey);
     }
 
+    public void PromoteNowPlayingToTop()
+    {
+        var snap = GetSnapshot();
+        var playing = snap.NowPlayingTarget;
+        if (playing == null)
+        {
+            NotifyOsd("Cueway", Strings.NoNowPlayingTitle, null, isWarning: true);
+            return;
+        }
+
+        _stateStore.RecordDiscoveredApp(playing.AppKey, playing.DisplayName, playing.ExePath);
+        PromoteAppToTop(playing.AppKey);
+    }
+
     public void ToggleSoloMode()
     {
         bool nextSolo = false;
@@ -682,6 +786,68 @@ internal sealed class MediaRouterEngine : IDisposable
                 ? actionText
                 : $"{actionText} • {target.FormattedMediaTitle}";
             NotifyOsd(prefix + target.DisplayName, mediaLine, target.ExePath, appKey: target.AppKey);
+        }
+    }
+
+    public async Task DispatchMediaActionToSessionAsync(string sessionId, MediaActionKind action)
+    {
+        var snap = GetSnapshot();
+        var target = snap.Sessions.Find(s => string.Equals(s.SessionId, sessionId, StringComparison.Ordinal));
+        if (target == null)
+            return;
+
+        var settings = _stateStore.GetSettingsSnapshot();
+        bool ok = false;
+        string actionText = string.Empty;
+
+        switch (action)
+        {
+            case MediaActionKind.PlayPause:
+                bool? livePlaying = _sessionManager.TryGetLiveIsPlaying(target.SessionId);
+                bool isPlaying = livePlaying ?? (target.IsPlaying || target.IsEffectivelyPlaying);
+                if (isPlaying)
+                {
+                    lock (_lock)
+                    {
+                        _autoPausedBy.Remove(target.SessionId);
+                    }
+                    ok = await _sessionManager.PauseAsync(target.SessionId);
+                    actionText = Strings.OsdActionPaused;
+                }
+                else
+                {
+                    ok = await _sessionManager.PlayAsync(target.SessionId);
+                    actionText = Strings.OsdActionPlaying;
+                }
+                break;
+
+            case MediaActionKind.Next:
+                ok = await _sessionManager.NextAsync(target.SessionId);
+                actionText = Strings.OsdActionNext;
+                break;
+
+            case MediaActionKind.Previous:
+                ok = await _sessionManager.PreviousAsync(target.SessionId);
+                actionText = Strings.OsdActionPrev;
+                break;
+
+            case MediaActionKind.SeekForward:
+                ok = await _sessionManager.SeekAsync(target.SessionId, settings.SeekSeconds);
+                actionText = Strings.OsdSeekForward(settings.SeekSeconds);
+                break;
+
+            case MediaActionKind.SeekBackward:
+                ok = await _sessionManager.SeekAsync(target.SessionId, -settings.SeekSeconds);
+                actionText = Strings.OsdSeekBackward(settings.SeekSeconds);
+                break;
+        }
+
+        if (ok)
+        {
+            string mediaLine = string.IsNullOrWhiteSpace(target.Title)
+                ? actionText
+                : $"{actionText} • {target.FormattedMediaTitle}";
+            NotifyOsd(target.DisplayName, mediaLine, target.ExePath, appKey: target.AppKey);
         }
     }
 

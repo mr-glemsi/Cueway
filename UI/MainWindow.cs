@@ -1406,11 +1406,11 @@ internal sealed unsafe class MainWindow : IDisposable
     {
         y = DrawStatusBannerIfActive(dc, gfx, x, y, w);
 
-        // 1. ACTIVE TARGET CARD
-        DrawText(dc, Strings.SecActiveTarget, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+        // 1. NOW PLAYING CARD
+        DrawText(dc, Strings.SecNowPlaying, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
         y += S(24);
 
-        y = DrawActiveTargetCard(dc, gfx, x, y, w, headerH);
+        y = DrawNowPlayingCard(dc, gfx, x, y, w, headerH);
         y += S(22);
 
         // 2. LIVE MEDIA SESSIONS
@@ -1522,28 +1522,34 @@ internal sealed unsafe class MainWindow : IDisposable
         return y;
     }
 
-    private int DrawActiveTargetCard(nint dc, nint gfx, int x, int y, int w, int headerH)
+    private int DrawNowPlayingCard(nint dc, nint gfx, int x, int y, int w, int headerH)
     {
         int cardH = S(122);
-        var target = _snapshot.ActiveTarget;
-        bool isManual = _snapshot.IsManualLock;
-        bool focusHovered = target != null && string.Equals(_hoverId, "act_focus", StringComparison.Ordinal);
-        uint borderColor = target == null
+        var playing = _snapshot.NowPlayingTarget;
+        bool isLocked = playing != null &&
+                        _snapshot.IsManualLock &&
+                        _snapshot.ActiveTarget != null &&
+                        string.Equals(_snapshot.ActiveTarget.SessionId, playing.SessionId, StringComparison.Ordinal);
+        bool isPriorityTarget = playing != null &&
+                                _snapshot.ActiveTarget != null &&
+                                string.Equals(_snapshot.ActiveTarget.SessionId, playing.SessionId, StringComparison.Ordinal);
+        bool focusHovered = playing != null && string.Equals(_hoverId, "act_focus", StringComparison.Ordinal);
+        uint borderColor = playing == null
             ? Theme.BorderSubtle
-            : (isManual ? Theme.Amber : Theme.Accent);
+            : (isLocked ? Theme.Amber : Theme.Green);
 
         GdiPlus.FillAndStrokeRoundedRect(
             gfx, x, y, w, cardH, SF(12),
             GdiPlus.Argb(Theme.BgCardElevated),
-            GdiPlus.Argb(borderColor, target == null ? (byte)255 : (byte)190),
+            GdiPlus.Argb(borderColor, playing == null ? (byte)255 : (byte)195),
             1.4f);
 
-        float targetGlow = target != null && string.Equals(_highlightTargetSessionId, target.SessionId, StringComparison.Ordinal)
+        float targetGlow = playing != null && string.Equals(_highlightTargetSessionId, playing.SessionId, StringComparison.Ordinal)
             ? GetHighlightIntensity(_highlightTargetStartTick, Environment.TickCount64)
             : 0f;
         if (targetGlow > 0.01f)
         {
-            DrawCardGlow(gfx, x, y, w, cardH, SF(12), isManual ? Theme.Amber : Theme.Accent, targetGlow);
+            DrawCardGlow(gfx, x, y, w, cardH, SF(12), isLocked ? Theme.Amber : Theme.Green, targetGlow);
         }
 
         int pad = S(18);
@@ -1552,15 +1558,15 @@ internal sealed unsafe class MainWindow : IDisposable
         GdiPlus.FillAndStrokeRoundedRect(gfx, x + pad, iconBoxY, iconBox, iconBox, SF(12),
             GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(focusHovered ? Theme.Accent : Theme.BorderSubtle));
 
-        if (target == null)
+        if (playing == null)
         {
-            DrawText(dc, Strings.NoActiveTargetTitle, x + pad + iconBox + S(16), y + S(28), x + w - pad, y + S(54), 16, Win32.FW_SEMIBOLD, Theme.TextPrimary);
-            DrawText(dc, Strings.NoActiveTargetSub,
+            DrawText(dc, Strings.NoNowPlayingTitle, x + pad + iconBox + S(16), y + S(28), x + w - pad, y + S(54), 16, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+            DrawText(dc, Strings.NoNowPlayingSub,
                 x + pad + iconBox + S(16), y + S(58), x + w - pad, y + S(88), 12, Win32.FW_NORMAL, Theme.TextSecondary);
             return y + cardH;
         }
 
-        nint hIcon = _iconRenderer.GetIconForApp(target.AppKey, target.ExePath);
+        nint hIcon = _iconRenderer.GetIconForApp(playing.AppKey, playing.ExePath);
         int icoSz = S(36);
         if (hIcon != 0)
         {
@@ -1582,27 +1588,26 @@ internal sealed unsafe class MainWindow : IDisposable
             RegisterScrollableHit(
                 new Win32.RECT { Left = x, Top = y, Right = prevX - S(8), Bottom = y + cardH },
                 "act_focus",
-                () => _ = _engine.FocusSessionAsync(target.SessionId));
+                () => _ = _engine.FocusSessionAsync(playing.SessionId));
 
-            bool anyPlaying = target.IsPlaying || _snapshot.Sessions.Any(s => s.IsPlaying || s.IsEffectivelyPlaying);
             DrawTransportButton(dc, gfx, "act_prev", TransportGlyph.Previous, prevX, ctrlY, btnSz,
-                () => _ = _engine.DispatchMediaActionAsync(MediaActionKind.Previous));
-            DrawTransportButton(dc, gfx, "act_play", anyPlaying ? TransportGlyph.Pause : TransportGlyph.Play, playX, ctrlY, btnSz,
-                () => _ = _engine.DispatchMediaActionAsync(MediaActionKind.PlayPause), accent: true);
+                () => _ = _engine.DispatchMediaActionToSessionAsync(playing.SessionId, MediaActionKind.Previous));
+            DrawTransportButton(dc, gfx, "act_play", playing.IsPlaying ? TransportGlyph.Pause : TransportGlyph.Play, playX, ctrlY, btnSz,
+                () => _ = _engine.DispatchMediaActionToSessionAsync(playing.SessionId, MediaActionKind.PlayPause), accent: true);
             DrawTransportButton(dc, gfx, "act_next", TransportGlyph.Next, nextX, ctrlY, btnSz,
-                () => _ = _engine.DispatchMediaActionAsync(MediaActionKind.Next));
+                () => _ = _engine.DispatchMediaActionToSessionAsync(playing.SessionId, MediaActionKind.Next));
 
             DrawActionButton(
                 dc, gfx, "act_lock",
-                isManual ? Strings.BtnUnlock : Strings.BtnLock,
+                isLocked ? Strings.BtnUnlock : Strings.BtnLock,
                 lockX, ctrlY, lockW, btnSz,
-                isManual ? Theme.AmberSoft : Theme.BgControl,
-                isManual ? Theme.AmberSoft : Theme.BgControlHover,
-                isManual ? Theme.Amber : Theme.TextPrimary,
-                isManual ? Theme.Amber : Theme.BorderStrong,
-                () => _engine.ToggleManualLockOnActiveOrSelected());
+                isLocked ? Theme.AmberSoft : Theme.BgControl,
+                isLocked ? Theme.AmberSoft : Theme.BgControlHover,
+                isLocked ? Theme.Amber : Theme.TextPrimary,
+                isLocked ? Theme.Amber : Theme.BorderStrong,
+                () => _engine.ToggleManualLockOnActiveOrSelected(playing.SessionId));
 
-            DrawVolumeControls(dc, gfx, "act_vol", target.SessionId, target.Volume, target.IsMuted,
+            DrawVolumeControls(dc, gfx, "act_vol", playing.SessionId, playing.Volume, playing.IsMuted,
                 prevX, y + S(72), ctrlRight - prevX, S(28), headerH);
         }
 
@@ -1610,40 +1615,43 @@ internal sealed unsafe class MainWindow : IDisposable
         int textX = x + pad + iconBox + S(16);
         int textRight = prevX - S(14);
         int arrowSz = S(13);
-        int titleW = MeasureTextWidth(dc, target.DisplayName, 16, Win32.FW_BOLD) + S(6);
+        int titleW = MeasureTextWidth(dc, playing.DisplayName, 16, Win32.FW_BOLD) + S(6);
         int nameMaxRight = Math.Min(textRight - arrowSz - S(6), textX + titleW);
 
-        DrawText(dc, target.DisplayName, textX, y + S(20), nameMaxRight, y + S(46), 16, Win32.FW_BOLD,
+        DrawText(dc, playing.DisplayName, textX, y + S(20), nameMaxRight, y + S(46), 16, Win32.FW_BOLD,
             focusHovered ? Theme.Accent : Theme.TextPrimary);
 
         DrawFocusArrowGlyph(gfx, nameMaxRight + S(2), y + S(26), arrowSz, focusHovered ? Theme.Accent : Theme.TextMuted);
 
         int bx = nameMaxRight + arrowSz + S(10);
-        (string statusText, uint statusFg, uint statusBg) = target.IsEffectivelyPlaying
+        (string statusText, uint statusFg, uint statusBg) = playing.IsEffectivelyPlaying
             ? (Strings.StatusPlaying, Theme.Green, Theme.GreenSoft)
-            : (target.IsMuted || target.Volume <= 0.005f ? (Strings.StatusMuted, Theme.Red, Theme.RedSoft) : (Strings.StatusPaused, Theme.TextSecondary, Theme.BgControl));
-        int statusPillW = MeasureTextWidth(dc, statusText, 10, Win32.FW_SEMIBOLD) + S(20);
+            : (Strings.StatusMuted, Theme.Red, Theme.RedSoft);
+        int statusPillW = Math.Max(S(54), MeasureTextWidth(dc, statusText, 10, Win32.FW_SEMIBOLD) + S(20));
         if (bx + statusPillW <= textRight)
         {
             bx += DrawPillBadge(dc, gfx, bx, y + S(22), statusText, statusFg, statusBg) + S(6);
         }
 
-        string modeText = isManual ? Strings.ModeManualLock : Strings.ModeAuto;
-        int modePillW = MeasureTextWidth(dc, modeText, 10, Win32.FW_SEMIBOLD) + S(20);
-        if (bx + modePillW <= textRight)
+        if (isLocked || isPriorityTarget)
         {
-            DrawPillBadge(dc, gfx, bx, y + S(22),
-                modeText,
-                isManual ? Theme.Amber : Theme.Accent,
-                isManual ? Theme.AmberSoft : Theme.AccentSoft);
+            string badgeText = isLocked ? Strings.ModeManualLock : Strings.BadgePriorityTarget;
+            int badgePillW = Math.Max(S(54), MeasureTextWidth(dc, badgeText, 10, Win32.FW_SEMIBOLD) + S(20));
+            if (bx + badgePillW <= textRight)
+            {
+                DrawPillBadge(dc, gfx, bx, y + S(22),
+                    badgeText,
+                    isLocked ? Theme.Amber : Theme.Accent,
+                    isLocked ? Theme.AmberSoft : Theme.AccentSoft);
+            }
         }
 
-        string mediaLine = target.FormattedMediaTitle;
+        string mediaLine = playing.FormattedMediaTitle;
         DrawText(dc, mediaLine, textX, y + S(50), textRight, y + S(72), 13, Win32.FW_MEDIUM, Theme.TextSecondary);
 
-        int volPct = target.IsMuted ? 0 : (int)MathF.Round(target.Volume * 100f);
+        int volPct = playing.IsMuted ? 0 : (int)MathF.Round(playing.Volume * 100f);
         string volDisplay = Strings.FormatPercent(volPct);
-        string sourceLabel = target.Source switch
+        string sourceLabel = playing.Source switch
         {
             SessionSource.MpvIpc => "mpv IPC",
             SessionSource.BrowserBridge => Strings.SourceBrowserBridge,
@@ -1651,7 +1659,7 @@ internal sealed unsafe class MainWindow : IDisposable
             _ => "SMTC"
         };
         string metaLine = $"{Strings.MetaSourcePrefix}: {sourceLabel}  •  {Strings.MetaVolumePrefix}: {volDisplay}"
-                          + (target.IsVideoLikely ? $"  •  {Strings.MetaVideoScrubReady}" : "");
+                          + (playing.IsVideoLikely ? $"  •  {Strings.MetaVideoScrubReady}" : "");
         DrawText(dc, metaLine, textX, y + S(76), textRight, y + S(98), 11, Win32.FW_NORMAL, Theme.TextMuted);
 
         return y + cardH;
@@ -1672,18 +1680,30 @@ internal sealed unsafe class MainWindow : IDisposable
                                     string.Equals(_hoverId, lockBtnId, StringComparison.Ordinal) ||
                                     (_hoverId != null && _hoverId.StartsWith(volPrefix, StringComparison.Ordinal));
 
-        uint bg = isTarget ? Theme.BgCardElevated : (anyRowControlHovered ? Theme.BgCardHover : Theme.BgCard);
-        uint border = isLocked ? Theme.Amber : (focusHovered || isTarget ? Theme.Accent : Theme.BorderSubtle);
+        uint priorityColor = isLocked ? Theme.Amber : Theme.Accent;
+        uint bg = isTarget
+            ? BlendRgb(Theme.BgCardElevated, priorityColor, Theme.IsLight ? 0.08f : 0.13f)
+            : (anyRowControlHovered ? Theme.BgCardHover : Theme.BgCard);
+        uint border = isTarget
+            ? priorityColor
+            : (focusHovered ? Theme.Accent : Theme.BorderSubtle);
 
         GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
-            GdiPlus.Argb(bg), GdiPlus.Argb(border, isTarget || focusHovered ? (byte)195 : (byte)255), isTarget ? 1.2f : 1f);
+            GdiPlus.Argb(bg),
+            GdiPlus.Argb(border, isTarget ? (byte)235 : (focusHovered ? (byte)195 : (byte)255)),
+            isTarget ? 1.8f : 1f);
+
+        if (isTarget)
+        {
+            GdiPlus.FillRoundedRect(gfx, x + S(4), y + S(10), S(3), rowH - S(20), SF(2), GdiPlus.Argb(priorityColor, 245));
+        }
 
         float rowGlow = isTarget && string.Equals(_highlightTargetSessionId, session.SessionId, StringComparison.Ordinal)
             ? GetHighlightIntensity(_highlightTargetStartTick, Environment.TickCount64)
             : 0f;
         if (rowGlow > 0.01f)
         {
-            DrawCardGlow(gfx, x, y, w, rowH, SF(10), isLocked ? Theme.Amber : Theme.Accent, rowGlow);
+            DrawCardGlow(gfx, x, y, w, rowH, SF(10), priorityColor, rowGlow);
         }
 
         int pad = S(14);
@@ -1723,15 +1743,30 @@ internal sealed unsafe class MainWindow : IDisposable
         string tag = session.IsVideoLikely ? $" • {Strings.TagVideo}" : "";
         string headerText = session.DisplayName + tag;
 
+        string prioText = isLocked ? Strings.BtnLocked : Strings.BadgePriorityTarget;
+        int prioPillW = isTarget
+            ? Math.Max(S(54), MeasureTextWidth(dc, prioText, 10, Win32.FW_SEMIBOLD) + S(20))
+            : 0;
         int arrowSz = S(11);
+        int reserveRight = arrowSz + S(4) + (isTarget ? prioPillW + S(8) : 0);
         int titleMeasured = MeasureTextWidth(dc, headerText, 13, Win32.FW_SEMIBOLD) + S(4);
-        int titleDrawRight = Math.Min(textRight - arrowSz - S(4), textX + titleMeasured);
+        int titleDrawRight = Math.Min(textRight - reserveRight, textX + titleMeasured);
 
-        DrawText(dc, headerText, textX, y + S(11), textRight - arrowSz - S(4), y + S(31), 13, Win32.FW_SEMIBOLD,
+        DrawText(dc, headerText, textX, y + S(11), textRight - reserveRight, y + S(31), 13, Win32.FW_SEMIBOLD,
             focusHovered ? Theme.Accent : Theme.TextPrimary);
         if (titleDrawRight + arrowSz + S(2) <= textRight)
         {
             DrawFocusArrowGlyph(gfx, titleDrawRight + S(2), y + S(16), arrowSz, focusHovered ? Theme.Accent : Theme.TextMuted);
+        }
+        if (isTarget)
+        {
+            int pillX = titleDrawRight + arrowSz + S(8);
+            if (pillX + prioPillW <= textRight)
+            {
+                DrawPillBadge(dc, gfx, pillX, y + S(10), prioText,
+                    isLocked ? Theme.Amber : Theme.Accent,
+                    isLocked ? Theme.AmberSoft : Theme.AccentSoft);
+            }
         }
 
         DrawText(dc, session.FormattedMediaTitle, textX, y + S(33), textRight, y + S(53), 12, Win32.FW_NORMAL, Theme.TextSecondary);
@@ -2281,6 +2316,14 @@ internal sealed unsafe class MainWindow : IDisposable
             Strings.SetHkPlayPauseSub,
             _settings.HotkeyPlayPause,
             hk => _stateStore.SetGlobalHotkey(GlobalHotkeySlot.PlayPause, hk),
+            allowAnySingleKey: true);
+        y += S(8);
+
+        y = DrawHotkeySettingRow(dc, gfx, x, y, w, headerH, "global:promote_playing",
+            Strings.SetHkPromotePlayingTitle,
+            Strings.SetHkPromotePlayingSub,
+            _settings.HotkeyPromotePlaying,
+            hk => _stateStore.SetGlobalHotkey(GlobalHotkeySlot.PromotePlaying, hk),
             allowAnySingleKey: true);
         y += S(8);
 
@@ -3262,6 +3305,21 @@ internal sealed unsafe class MainWindow : IDisposable
         {
             GdiPlus.GdipDeletePath(path);
         }
+    }
+
+    private static uint BlendRgb(uint baseRgb, uint tintRgb, float amount)
+    {
+        float t = Math.Clamp(amount, 0f, 1f);
+        uint r1 = (baseRgb >> 16) & 0xFF;
+        uint g1 = (baseRgb >> 8) & 0xFF;
+        uint b1 = baseRgb & 0xFF;
+        uint r2 = (tintRgb >> 16) & 0xFF;
+        uint g2 = (tintRgb >> 8) & 0xFF;
+        uint b2 = tintRgb & 0xFF;
+        uint r = (uint)MathF.Round(r1 + (r2 - r1) * t);
+        uint g = (uint)MathF.Round(g1 + (g2 - g1) * t);
+        uint b = (uint)MathF.Round(b1 + (b2 - b1) * t);
+        return (r << 16) | (g << 8) | b;
     }
 
     private void DrawCardGlow(nint gfx, float x, float y, float w, float h, float radius, uint colorRgb, float intensity)
