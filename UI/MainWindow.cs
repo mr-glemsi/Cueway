@@ -100,14 +100,6 @@ internal sealed unsafe class MainWindow : IDisposable
     private readonly List<HitRegion> _hitRegions = [];
     private readonly List<SliderRegion> _sliderRegions = [];
     private readonly Dictionary<(int PtSize, int Weight, string Face, uint Dpi), nint> _fontCache = new();
-    private string? _lastWinIconAppKey;
-    private string? _lastWinIconExePath;
-    private bool _lastWinIconPlaying;
-    private bool _lastWinIconMuted;
-    private bool _lastWinIconSolo;
-    private string? _lastWinIconThemeId;
-    private bool _windowIconInitialized;
-    private bool _windowIconDirty;
     private string? _draggingSliderId;
     private string? _draggingSessionId;
     private int _dragTrackLeft;
@@ -307,7 +299,7 @@ internal sealed unsafe class MainWindow : IDisposable
             ApplyDwmTheme();
             ApplyAlwaysOnTop(_settings.AlwaysOnTop);
             Win32.WTSRegisterSessionNotification(_hwnd, Win32.NOTIFY_FOR_THIS_SESSION);
-            UpdateWindowIcon(_snapshot);
+            ApplyBrandWindowIcon();
         }
     }
 
@@ -395,9 +387,6 @@ internal sealed unsafe class MainWindow : IDisposable
             Win32.ShowWindow(_hwnd, Win32.SW_RESTORE);
         else
             Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
-
-        if (_windowIconDirty)
-            UpdateWindowIcon(_snapshot, forceVisibleCheck: false);
 
         Win32.SetForegroundWindow(_hwnd);
         VisibilityChanged?.Invoke(true);
@@ -555,7 +544,6 @@ internal sealed unsafe class MainWindow : IDisposable
             if (!Win32.IsWindowVisible(_hwnd))
             {
                 _uiDataDirty = true;
-                UpdateWindowIcon(snap);
                 return;
             }
             _priorityApps = _stateStore.GetPriorityAppsSnapshot();
@@ -566,7 +554,6 @@ internal sealed unsafe class MainWindow : IDisposable
             {
                 TriggerTargetChangeFeedback(snap.ActiveTarget.SessionId);
             }
-            UpdateWindowIcon(snap);
             RequestRepaint();
         });
     }
@@ -595,7 +582,6 @@ internal sealed unsafe class MainWindow : IDisposable
             SyncDwmThemeIfNeeded();
             if (themeChanged)
             {
-                UpdateWindowIcon(_snapshot);
                 _guideWindow?.RefreshLocalizationAndTheme();
                 _themeEditorWindow?.RefreshLocalizationAndTheme();
             }
@@ -635,38 +621,12 @@ internal sealed unsafe class MainWindow : IDisposable
         });
     }
 
-    private void UpdateWindowIcon(RouterStateSnapshot snap, bool forceVisibleCheck = true)
+    private void ApplyBrandWindowIcon()
     {
         if (_hwnd == 0) return;
 
-        if (forceVisibleCheck && _windowIconInitialized && !Win32.IsWindowVisible(_hwnd))
-        {
-            _windowIconDirty = true;
-            return;
-        }
-
-        var target = snap.ActiveTarget;
-        string? appKey = target?.AppKey;
-        string? exePath = target?.ExePath;
-        bool isPlaying = target?.IsPlaying ?? false;
-        bool isMuted = target?.IsMuted ?? false;
-        bool soloMode = snap.SoloModeEnabled;
-        string themeId = Theme.CurrentId;
-
-        if (_windowIconInitialized &&
-            _lastWinIconPlaying == isPlaying &&
-            _lastWinIconMuted == isMuted &&
-            _lastWinIconSolo == soloMode &&
-            string.Equals(_lastWinIconAppKey, appKey, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(_lastWinIconExePath, exePath, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(_lastWinIconThemeId, themeId, StringComparison.OrdinalIgnoreCase))
-        {
-            _windowIconDirty = false;
-            return;
-        }
-
-        nint big = _iconRenderer.CreateCompositeIcon(appKey, exePath, isPlaying, isMuted, soloMode, size: 48);
-        nint small = _iconRenderer.CreateCompositeIcon(appKey, exePath, isPlaying, isMuted, soloMode, size: 32);
+        nint big = _iconRenderer.CreateBrandIcon(48);
+        nint small = _iconRenderer.CreateBrandIcon(32);
 
         if (big != 0)
         {
@@ -680,15 +640,52 @@ internal sealed unsafe class MainWindow : IDisposable
             if (_windowSmallIcon != 0) Win32.DestroyIcon(_windowSmallIcon);
             _windowSmallIcon = small;
         }
+    }
 
-        _lastWinIconAppKey = appKey;
-        _lastWinIconExePath = exePath;
-        _lastWinIconPlaying = isPlaying;
-        _lastWinIconMuted = isMuted;
-        _lastWinIconSolo = soloMode;
-        _lastWinIconThemeId = themeId;
-        _windowIconInitialized = true;
-        _windowIconDirty = false;
+    private void DrawAppIconOrMonogram(
+        nint dc,
+        nint gfx,
+        string? appKey,
+        string? exePath,
+        string? displayName,
+        int x,
+        int y,
+        int size,
+        float radius)
+    {
+        nint hIcon = _iconRenderer.GetIconForApp(appKey, exePath);
+        if (hIcon != 0)
+        {
+            Win32.DrawIconEx(dc, x, y, hIcon, size, size, 0, 0, Win32.DI_NORMAL);
+            return;
+        }
+
+        GdiPlus.FillAndStrokeRoundedRect(
+            gfx,
+            x,
+            y,
+            size,
+            size,
+            radius,
+            GdiPlus.Argb(Theme.AccentSoft),
+            GdiPlus.Argb(Theme.Accent, 95),
+            1f);
+
+        string glyph = "♪";
+        if (!string.IsNullOrWhiteSpace(displayName))
+        {
+            foreach (char ch in displayName.Trim())
+            {
+                if (char.IsLetterOrDigit(ch))
+                {
+                    glyph = char.ToUpperInvariant(ch).ToString();
+                    break;
+                }
+            }
+        }
+
+        int ptSize = Math.Max(9, (int)MathF.Round(size / (_dpi / 96f) * 0.44f));
+        DrawText(dc, glyph, x, y, x + size, y + size, ptSize, Win32.FW_BOLD, Theme.Accent, centered: true);
     }
 
     private void RequestRepaint()
@@ -1155,11 +1152,10 @@ internal sealed unsafe class MainWindow : IDisposable
         GdiPlus.FillRoundedRect(gfx, 0, headerH - 1, w, 1, 0, GdiPlus.Argb(Theme.BorderSubtle));
 
         int padX = S(22);
-        // Header icon
-        var target = _snapshot.ActiveTarget;
-        nint titleIcon = _iconRenderer.GetIconForApp(target?.AppKey, target?.ExePath);
+        // Header icon (always Cueway brand mark)
         int iconSz = S(22);
         int iconY = (headerH - iconSz) / 2;
+        nint titleIcon = _iconRenderer.GetBrandIcon(iconSz);
         if (titleIcon != 0)
         {
             Win32.DrawIconEx(dc, padX, iconY, titleIcon, iconSz, iconSz, 0, 0, Win32.DI_NORMAL);
@@ -1620,12 +1616,9 @@ internal sealed unsafe class MainWindow : IDisposable
             GdiPlus.FillAndStrokeRoundedRect(gfx, cx + pad, icoY, icoBox, icoBox, SF(9),
                 GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(focusHovered ? Theme.Accent : Theme.BorderSubtle));
 
-            nint hIcon = _iconRenderer.GetIconForApp(s.AppKey, s.ExePath);
             int icoSz = S(22);
-            if (hIcon != 0)
-            {
-                Win32.DrawIconEx(dc, cx + pad + (icoBox - icoSz) / 2, icoY + (icoBox - icoSz) / 2, hIcon, icoSz, icoSz, 0, 0, Win32.DI_NORMAL);
-            }
+            DrawAppIconOrMonogram(dc, gfx, s.AppKey, s.ExePath, s.DisplayName,
+                cx + pad + (icoBox - icoSz) / 2, icoY + (icoBox - icoSz) / 2, icoSz, SF(6));
 
             // Transport controls: [Prev][Pause][Next] on wide 2-card layout, single [Pause] on 3 cards or compact widths
             bool showFullTransport = count == 2 && cw >= S(330);
@@ -1770,12 +1763,9 @@ internal sealed unsafe class MainWindow : IDisposable
             return y + cardH;
         }
 
-        nint hIcon = _iconRenderer.GetIconForApp(playing.AppKey, playing.ExePath);
         int icoSz = S(36);
-        if (hIcon != 0)
-        {
-            Win32.DrawIconEx(dc, x + pad + (iconBox - icoSz) / 2, iconBoxY + (iconBox - icoSz) / 2, hIcon, icoSz, icoSz, 0, 0, Win32.DI_NORMAL);
-        }
+        DrawAppIconOrMonogram(dc, gfx, playing.AppKey, playing.ExePath, playing.DisplayName,
+            x + pad + (iconBox - icoSz) / 2, iconBoxY + (iconBox - icoSz) / 2, icoSz, SF(8));
 
         int ctrlRight = x + w - pad;
         int textRight;
@@ -1938,15 +1928,8 @@ internal sealed unsafe class MainWindow : IDisposable
 
         int pad = S(14);
         int icoSz = S(28);
-        nint hIcon = _iconRenderer.GetIconForApp(session.AppKey, session.ExePath);
-        if (hIcon != 0)
-        {
-            Win32.DrawIconEx(dc, x + pad, y + (rowH - icoSz) / 2, hIcon, icoSz, icoSz, 0, 0, Win32.DI_NORMAL);
-        }
-        else
-        {
-            GdiPlus.FillRoundedRect(gfx, x + pad, y + (rowH - icoSz) / 2, icoSz, icoSz, SF(7), GdiPlus.Argb(Theme.BgControl));
-        }
+        DrawAppIconOrMonogram(dc, gfx, session.AppKey, session.ExePath, session.DisplayName,
+            x + pad, y + (rowH - icoSz) / 2, icoSz, SF(7));
 
         int btnW = S(92);
         int btnH = S(30);
@@ -2240,15 +2223,8 @@ internal sealed unsafe class MainWindow : IDisposable
 
         int icoX = x + pad + rankW + S(10);
         int icoSz = S(24);
-        nint hIcon = _iconRenderer.GetIconForApp(app.AppKey, app.ExePath);
-        if (hIcon != 0)
-        {
-            Win32.DrawIconEx(dc, icoX, drawY + (rowH - icoSz) / 2, hIcon, icoSz, icoSz, 0, 0, Win32.DI_NORMAL);
-        }
-        else
-        {
-            GdiPlus.FillRoundedRect(gfx, icoX, drawY + (rowH - icoSz) / 2, icoSz, icoSz, SF(6), GdiPlus.Argb(Theme.BgControl));
-        }
+        DrawAppIconOrMonogram(dc, gfx, app.AppKey, app.ExePath, app.DisplayName,
+            icoX, drawY + (rowH - icoSz) / 2, icoSz, SF(6));
 
         int btnSz = S(28);
         int btnY = drawY + (rowH - btnSz) / 2;

@@ -9,6 +9,7 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
     private readonly object _cacheLock = new();
     private readonly Dictionary<string, nint> _exeIconCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, nint> _siteIconCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<int, nint> _brandIconCache = new();
 
     public nint GetIconForApp(string? appKey, string? exePath)
     {
@@ -41,18 +42,6 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
             if (count > 0 && large != 0)
             {
                 hIcon = large;
-            }
-            else
-            {
-                var shfi = new Win32.SHFILEINFOW();
-                nint res = Win32.SHGetFileInfoW(
-                    exePath,
-                    0,
-                    &shfi,
-                    (uint)sizeof(Win32.SHFILEINFOW),
-                    Win32.SHGFI_ICON | Win32.SHGFI_LARGEICON);
-                if (res != 0 && shfi.hIcon != 0)
-                    hIcon = shfi.hIcon;
             }
         }
 
@@ -112,8 +101,80 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
     }
 
     /// <summary>
-    /// Creates a composite HICON containing either the active target's icon with a crisp status badge
-    /// or the Cueway Concept #4 active-tab emblem when idle.
+    /// Creates an owned HICON containing the Cueway brand icon loaded from the embedded application icon resource
+    /// (falling back to the vector emblem if unavailable).
+    /// Caller owns the returned HICON and must release it with Win32.DestroyIcon.
+    /// </summary>
+    public nint CreateBrandIcon(int size = 48)
+    {
+        nint hInst = Win32.GetModuleHandleW(null);
+        if (hInst != 0)
+        {
+            nint hLoaded = Win32.LoadImageW(hInst, Win32.IDI_APPLICATION, Win32.IMAGE_ICON, size, size, Win32.LR_DEFAULTCOLOR);
+            if (hLoaded != 0)
+                return hLoaded;
+        }
+
+        int stride = size * 4;
+        byte* pixels = (byte*)NativeMemory.AllocZeroed((nuint)(stride * size));
+        nint gdipBitmap = 0;
+        nint graphics = 0;
+
+        try
+        {
+            if (GdiPlus.GdipCreateBitmapFromScan0(size, size, stride, GdiPlus.PixelFormat32bppPARGB, (nint)pixels, out gdipBitmap) != 0 || gdipBitmap == 0)
+                return 0;
+
+            if (GdiPlus.GdipGetImageGraphicsContext(gdipBitmap, out graphics) != 0 || graphics == 0)
+                return 0;
+
+            GdiPlus.GdipSetSmoothingMode(graphics, GdiPlus.SmoothingModeAntiAlias);
+            GdiPlus.GdipSetPixelOffsetMode(graphics, GdiPlus.PixelOffsetModeHighQuality);
+            GdiPlus.GdipSetInterpolationMode(graphics, GdiPlus.InterpolationModeHighQualityBicubic);
+            GdiPlus.GdipGraphicsClear(graphics, 0x00000000);
+
+            DrawConcept4Emblem(graphics, size, 0xFF6B2C);
+
+            if (GdiPlus.GdipCreateHICONFromBitmap(gdipBitmap, out nint hIconOut) == 0)
+                return hIconOut;
+
+            return 0;
+        }
+        finally
+        {
+            if (graphics != 0) GdiPlus.GdipDeleteGraphics(graphics);
+            if (gdipBitmap != 0) GdiPlus.GdipDisposeImage(gdipBitmap);
+            NativeMemory.Free(pixels);
+        }
+    }
+
+    public nint GetBrandIcon(int size = 32)
+    {
+        lock (_cacheLock)
+        {
+            if (_brandIconCache.TryGetValue(size, out nint cached))
+                return cached;
+        }
+
+        nint hIcon = CreateBrandIcon(size);
+        if (hIcon == 0)
+            return 0;
+
+        lock (_cacheLock)
+        {
+            if (_brandIconCache.TryGetValue(size, out nint existing))
+            {
+                Win32.DestroyIcon(hIcon);
+                return existing;
+            }
+            _brandIconCache[size] = hIcon;
+            return hIcon;
+        }
+    }
+
+    /// <summary>
+    /// Creates a composite HICON containing either the active target's icon inside a framed Cueway tile
+    /// with a status badge, or the Cueway Concept #4 active-tab emblem when idle or iconless.
     /// Caller owns the returned HICON and must release it with Win32.DestroyIcon.
     /// </summary>
     public nint CreateCompositeIcon(string? appKey, string? exePath, bool isPlaying, bool isMuted, bool soloMode, int size = 32)
@@ -141,34 +202,76 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
             nint appIcon = GetIconForApp(appKey, exePath);
             if (appIcon != 0 && GdiPlus.GdipCreateBitmapFromHICON(appIcon, out appBitmap) == 0 && appBitmap != 0)
             {
-                int iconSize = (int)MathF.Round(25f * scale);
-                int iconX = (int)MathF.Round(2f * scale);
+                uint badgeRgb;
+                uint frameBorderRgb;
+                if (isMuted)
+                {
+                    badgeRgb = Theme.Red;
+                    frameBorderRgb = Theme.Red;
+                }
+                else if (soloMode && isPlaying)
+                {
+                    badgeRgb = Theme.Amber;
+                    frameBorderRgb = Theme.Amber;
+                }
+                else if (isPlaying)
+                {
+                    badgeRgb = Theme.Green;
+                    frameBorderRgb = Theme.Green;
+                }
+                else
+                {
+                    badgeRgb = 0x6B7280;
+                    frameBorderRgb = 0xFF6B2C;
+                }
+
+                GdiPlus.FillAndStrokeRoundedRect(
+                    graphics,
+                    1.2f * scale,
+                    1.2f * scale,
+                    29.6f * scale,
+                    29.6f * scale,
+                    7.5f * scale,
+                    GdiPlus.Argb(0x101116, 255),
+                    GdiPlus.Argb(frameBorderRgb, 255),
+                    2.4f * scale);
+
+                int iconSize = (int)MathF.Round(18f * scale);
+                int iconX = (size - iconSize) / 2;
                 int iconY = (size - iconSize) / 2;
                 GdiPlus.GdipDrawImageRectI(graphics, appBitmap, iconX, iconY, iconSize, iconSize);
 
-                uint badgeRgb;
-                if (isMuted)
-                    badgeRgb = Theme.Red;
-                else if (soloMode && isPlaying)
-                    badgeRgb = Theme.Amber;
-                else if (isPlaying)
-                    badgeRgb = Theme.Green;
-                else
-                    badgeRgb = 0x6B7280;
-
-                float badgeD = 10f * scale;
-                float ringPad = 1.6f * scale;
-                float bx = size - badgeD - 1.5f * scale;
-                float by = size - badgeD - 1.5f * scale;
-                FillCircle(graphics, GdiPlus.Argb(0x16181D, 255), bx - ringPad, by - ringPad, badgeD + ringPad * 2f);
+                float badgeD = 8.5f * scale;
+                float ringPad = 1.5f * scale;
+                float bx = size - badgeD - 1.0f * scale;
+                float by = size - badgeD - 1.0f * scale;
+                FillCircle(graphics, GdiPlus.Argb(0x101116, 255), bx - ringPad, by - ringPad, badgeD + ringPad * 2f);
                 FillCircle(graphics, GdiPlus.Argb(badgeRgb, 255), bx, by, badgeD);
             }
             else
             {
-                uint stripRgb = isMuted
-                    ? Theme.Red
-                    : (soloMode && isPlaying ? Theme.Amber : 0xEA580C);
-                DrawConcept4Emblem(graphics, size, stripRgb);
+                nint brandIcon = GetBrandIcon(size);
+                if (brandIcon != 0 && GdiPlus.GdipCreateBitmapFromHICON(brandIcon, out appBitmap) == 0 && appBitmap != 0)
+                {
+                    GdiPlus.GdipDrawImageRectI(graphics, appBitmap, 0, 0, size, size);
+                    if (isMuted || isPlaying)
+                    {
+                        uint badgeRgb = isMuted ? Theme.Red : (soloMode ? Theme.Amber : Theme.Green);
+                        float badgeD = 8.5f * scale;
+                        float ringPad = 1.5f * scale;
+                        float bx = size - badgeD - 1.0f * scale;
+                        float by = size - badgeD - 1.0f * scale;
+                        FillCircle(graphics, GdiPlus.Argb(0x101116, 255), bx - ringPad, by - ringPad, badgeD + ringPad * 2f);
+                        FillCircle(graphics, GdiPlus.Argb(badgeRgb, 255), bx, by, badgeD);
+                    }
+                }
+                else
+                {
+                    uint stripRgb = isMuted
+                        ? Theme.Red
+                        : (soloMode && isPlaying ? Theme.Amber : (isPlaying ? Theme.Green : 0xFF6B2C));
+                    DrawConcept4Emblem(graphics, size, stripRgb);
+                }
             }
 
             if (GdiPlus.GdipCreateHICONFromBitmap(gdipBitmap, out nint hIconOut) == 0)
@@ -490,6 +593,12 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
                 if (icon != 0) Win32.DestroyIcon(icon);
             }
             _siteIconCache.Clear();
+
+            foreach (nint icon in _brandIconCache.Values)
+            {
+                if (icon != 0) Win32.DestroyIcon(icon);
+            }
+            _brandIconCache.Clear();
         }
     }
 }

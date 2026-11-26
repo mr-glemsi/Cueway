@@ -195,6 +195,8 @@ internal static unsafe partial class Win32
     public const nint IDC_ARROW = 32512;
     public const nint IDC_HAND = 32649;
     public const nint IDI_APPLICATION = 32512;
+    public const uint IMAGE_ICON = 1;
+    public const uint LR_DEFAULTCOLOR = 0x0000;
 
     // SHGetFileInfo
     public const uint SHGFI_ICON = 0x000000100;
@@ -673,6 +675,9 @@ internal static unsafe partial class Win32
 
     [LibraryImport("user32.dll")]
     public static partial nint LoadIconW(nint hInstance, nint lpIconName);
+
+    [LibraryImport("user32.dll", SetLastError = true)]
+    public static partial nint LoadImageW(nint hInst, nint name, uint type, int cx, int cy, uint fuLoad);
 
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
