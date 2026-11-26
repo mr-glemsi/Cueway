@@ -1,7 +1,7 @@
 ; Cueway — Inno Setup 7 Installer Script (Native AOT x64)
 
 #define MyAppName "Cueway"
-#define MyAppVersion "1.0.7"
+#define MyAppVersion "1.0.8"
 #define MyAppPublisher "Cueway"
 #define MyAppExeName "Cueway.exe"
 #define PublishDir "bin\Release\net10.0-windows10.0.22621.0\win-x64\publish"

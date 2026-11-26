@@ -136,6 +136,16 @@ internal static class Strings
 
     // Dashboard Section Headings & Buttons
     public static string SecLivePlayer => T("CANLI OYNATICI", "LIVE PLAYER", "实时播放器", "REPRODUCTOR EN VIVO", "АКТИВНЫЙ ПЛЕЕР", "LIVE-PLAYER", "LECTEUR EN DIRECT", "ライブプレーヤー", "실시간 플레이어");
+    public static string SecLivePlayersCount(int count) => T(
+        $"CANLI OYNATICILAR ({count})",
+        $"LIVE PLAYERS ({count})",
+        $"实时播放器 ({count})",
+        $"REPRODUCTORES EN VIVO ({count})",
+        $"АКТИВНЫЕ ПЛЕЕРЫ ({count})",
+        $"LIVE-PLAYER ({count})",
+        $"LECTEURS EN DIRECT ({count})",
+        $"ライブプレーヤー ({count})",
+        $"실시간 플레이어 ({count})");
     public static string SecNowPlaying => T("EN SON OYNATILAN", "LAST PLAYED", "最近播放", "ÚLTIMA REPRODUCCIÓN", "ПОСЛЕДНЕЕ ВОСПРОИЗВЕДЕНИЕ", "ZULETZT GESPIELT", "DERNIÈRE LECTURE", "最近の再生", "최근 재생");
     public static string NoNowPlayingTitle => T("Henüz Oynatılan Medya Yok", "No Recent Playback", "暂无播放记录", "Sin reproducción reciente", "Пока ничего не воспроизводилось", "Noch keine Wiedergabe", "Aucune lecture récente", "再生履歴はまだありません", "최근 재생 기록 없음");
     public static string NoNowPlayingSub => T(

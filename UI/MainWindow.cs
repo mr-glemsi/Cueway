@@ -1445,14 +1445,24 @@ internal sealed unsafe class MainWindow : IDisposable
     {
         y = DrawStatusBannerIfActive(dc, gfx, x, y, w);
 
-        // 1. LIVE PLAYER / LAST PLAYED CARD
-        bool isLivePlaying = _snapshot.NowPlayingTarget != null &&
-                             !_snapshot.IsNowPlayingClosed &&
-                             _snapshot.NowPlayingTarget.IsPlaying;
-        DrawText(dc, isLivePlaying ? Strings.SecLivePlayer : Strings.SecNowPlaying, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
-        y += S(24);
-
-        y = DrawNowPlayingCard(dc, gfx, x, y, w, headerH);
+        // 1. LIVE PLAYER / MULTI LIVE PLAYERS / LAST PLAYED CARD
+        int playingCount = _snapshot.NowPlayingSessions.Count;
+        if (playingCount >= 2)
+        {
+            int shownCount = Math.Min(playingCount, 3);
+            DrawText(dc, Strings.SecLivePlayersCount(shownCount), x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+            y += S(24);
+            y = DrawMultiLivePlayerCards(dc, gfx, x, y, w, headerH, _snapshot.NowPlayingSessions);
+        }
+        else
+        {
+            bool isLivePlaying = _snapshot.NowPlayingTarget != null &&
+                                 !_snapshot.IsNowPlayingClosed &&
+                                 _snapshot.NowPlayingTarget.IsPlaying;
+            DrawText(dc, isLivePlaying ? Strings.SecLivePlayer : Strings.SecNowPlaying, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
+            y += S(24);
+            y = DrawNowPlayingCard(dc, gfx, x, y, w, headerH);
+        }
         y += S(22);
 
         // 2. LIVE MEDIA SESSIONS
@@ -1562,6 +1572,152 @@ internal sealed unsafe class MainWindow : IDisposable
         }
 
         return y;
+    }
+
+    private int DrawMultiLivePlayerCards(
+        nint dc, nint gfx, int x, int y, int w, int headerH, IReadOnlyList<MediaSessionInfo> players)
+    {
+        int count = Math.Min(players.Count, 3);
+        int gap = S(10);
+        int cardH = S(106);
+        int baseColW = (w - gap * (count - 1)) / count;
+        long now = Environment.TickCount64;
+
+        for (int i = 0; i < count; i++)
+        {
+            int cx = x + i * (baseColW + gap);
+            int cw = (i == count - 1) ? (x + w - cx) : baseColW;
+            var s = players[i];
+
+            bool isPriority = _snapshot.ActiveTarget != null &&
+                              string.Equals(_snapshot.ActiveTarget.SessionId, s.SessionId, StringComparison.Ordinal);
+            bool isLocked = _snapshot.IsManualLock && isPriority;
+            string focusId = $"multi_focus_{s.SessionId}";
+            bool focusHovered = string.Equals(_hoverId, focusId, StringComparison.Ordinal);
+
+            uint borderRgb = isLocked ? Theme.Amber : (isPriority ? Theme.Accent : Theme.Green);
+            uint cardBg = isPriority
+                ? Theme.BlendRgb(Theme.BgCardElevated, borderRgb, Theme.IsLight ? 0.06f : 0.10f)
+                : Theme.BgCardElevated;
+
+            GdiPlus.FillAndStrokeRoundedRect(
+                gfx, cx, y, cw, cardH, SF(11),
+                GdiPlus.Argb(cardBg),
+                GdiPlus.Argb(borderRgb, isPriority ? (byte)225 : (byte)175),
+                isPriority ? 1.6f : 1.2f);
+
+            float cardGlow = isPriority && string.Equals(_highlightTargetSessionId, s.SessionId, StringComparison.Ordinal)
+                ? GetHighlightIntensity(_highlightTargetStartTick, now)
+                : 0f;
+            if (cardGlow > 0.01f)
+            {
+                DrawCardGlow(gfx, cx, y, cw, cardH, SF(11), borderRgb, cardGlow);
+            }
+
+            int pad = S(12);
+            int icoBox = S(34);
+            int icoY = y + S(12);
+            GdiPlus.FillAndStrokeRoundedRect(gfx, cx + pad, icoY, icoBox, icoBox, SF(9),
+                GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(focusHovered ? Theme.Accent : Theme.BorderSubtle));
+
+            nint hIcon = _iconRenderer.GetIconForApp(s.AppKey, s.ExePath);
+            int icoSz = S(22);
+            if (hIcon != 0)
+            {
+                Win32.DrawIconEx(dc, cx + pad + (icoBox - icoSz) / 2, icoY + (icoBox - icoSz) / 2, hIcon, icoSz, icoSz, 0, 0, Win32.DI_NORMAL);
+            }
+
+            // Transport controls: [Prev][Pause][Next] on wide 2-card layout, single [Pause] on 3 cards or compact widths
+            bool showFullTransport = count == 2 && cw >= S(330);
+            int ctrlLeft;
+            if (showFullTransport)
+            {
+                int btnSz = S(28);
+                int btnY = y + S(14);
+                int nextX = cx + cw - pad - btnSz;
+                int playX = nextX - S(4) - btnSz;
+                int prevX = playX - S(4) - btnSz;
+                ctrlLeft = prevX;
+
+                if (y + cardH > headerH)
+                {
+                    var captured = s;
+                    DrawTransportButton(dc, gfx, $"multi_prev_{s.SessionId}", TransportGlyph.Previous, prevX, btnY, btnSz,
+                        () => _ = _engine.DispatchMediaActionToSessionAsync(captured.SessionId, MediaActionKind.Previous));
+                    DrawTransportButton(dc, gfx, $"multi_play_{s.SessionId}", TransportGlyph.Pause, playX, btnY, btnSz,
+                        () => _ = _engine.DispatchMediaActionToSessionAsync(captured.SessionId, MediaActionKind.PlayPause), accent: true);
+                    DrawTransportButton(dc, gfx, $"multi_next_{s.SessionId}", TransportGlyph.Next, nextX, btnY, btnSz,
+                        () => _ = _engine.DispatchMediaActionToSessionAsync(captured.SessionId, MediaActionKind.Next));
+                }
+            }
+            else
+            {
+                int btnSz = S(30);
+                int btnX = cx + cw - pad - btnSz;
+                int btnY = y + S(13);
+                ctrlLeft = btnX;
+
+                if (y + cardH > headerH)
+                {
+                    var captured = s;
+                    DrawTransportButton(dc, gfx, $"multi_play_{s.SessionId}", TransportGlyph.Pause, btnX, btnY, btnSz,
+                        () => _ = _engine.DispatchMediaActionToSessionAsync(captured.SessionId, MediaActionKind.PlayPause), accent: true);
+                }
+            }
+
+            int textX = cx + pad + icoBox + S(10);
+            int textRight = ctrlLeft - S(8);
+            string badgeText = isLocked ? Strings.BtnLocked : "#1";
+            int badgePillW = isPriority
+                ? Math.Max(S(26), MeasureTextWidth(dc, badgeText, 9, Win32.FW_BOLD) + S(12))
+                : 0;
+            int arrowSz = S(10);
+            int reserveRight = arrowSz + S(4) + (isPriority ? badgePillW + S(6) : 0);
+            int titleW = MeasureTextWidth(dc, s.DisplayName, 13, Win32.FW_BOLD) + S(4);
+            int nameMaxRight = Math.Min(textRight - reserveRight, textX + titleW);
+
+            DrawText(dc, s.DisplayName, textX, y + S(11), textRight - reserveRight, y + S(30), 13, Win32.FW_BOLD,
+                focusHovered ? Theme.Accent : Theme.TextPrimary);
+
+            if (nameMaxRight + arrowSz + S(2) <= textRight)
+            {
+                DrawFocusArrowGlyph(gfx, nameMaxRight + S(2), y + S(16), arrowSz, focusHovered ? Theme.Accent : Theme.TextMuted);
+            }
+
+            if (isPriority)
+            {
+                int badgeX = nameMaxRight + arrowSz + S(6);
+                if (badgeX + badgePillW <= textRight)
+                {
+                    int badgeH = S(18);
+                    int badgeY = y + S(12);
+                    GdiPlus.FillRoundedRect(gfx, badgeX, badgeY, badgePillW, badgeH, badgeH / 2f,
+                        GdiPlus.Argb(isLocked ? Theme.AmberSoft : Theme.AccentSoft));
+                    DrawText(dc, badgeText, badgeX, badgeY, badgeX + badgePillW, badgeY + badgeH,
+                        9, Win32.FW_BOLD, isLocked ? Theme.Amber : Theme.Accent, centered: true);
+                }
+            }
+
+            DrawText(dc, s.FormattedMediaTitle, textX, y + S(31), textRight, y + S(49), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+
+            // Subtle divider + bottom volume slider
+            GdiPlus.FillRoundedRect(gfx, cx + pad, y + S(58), cw - pad * 2, Math.Max(1, S(1)), 0f,
+                GdiPlus.Argb(Theme.BorderSubtle, 140));
+
+            if (y + cardH > headerH)
+            {
+                var captured = s;
+                RegisterScrollableHit(
+                    new Win32.RECT { Left = cx, Top = y, Right = ctrlLeft - S(4), Bottom = y + S(58) },
+                    focusId,
+                    () => _ = _engine.FocusSessionAsync(captured.SessionId));
+
+                DrawVolumeControls(dc, gfx, $"multi_vol_{s.SessionId}", s.SessionId, s.Volume, s.IsMuted,
+                    cx + pad, y + S(66), cw - pad * 2, S(28), headerH);
+            }
+        }
+
+        return y + cardH;
     }
 
     private int DrawNowPlayingCard(nint dc, nint gfx, int x, int y, int w, int headerH)

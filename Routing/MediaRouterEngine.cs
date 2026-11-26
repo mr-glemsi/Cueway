@@ -20,6 +20,7 @@ internal sealed class RouterStateSnapshot
 {
     public required MediaSessionInfo? ActiveTarget { get; init; }
     public MediaSessionInfo? NowPlayingTarget { get; init; }
+    public List<MediaSessionInfo> NowPlayingSessions { get; init; } = [];
     public bool IsNowPlayingClosed { get; init; }
     public required MediaSessionInfo? SecondaryTarget { get; init; }
     public required List<MediaSessionInfo> Sessions { get; init; }
@@ -55,6 +56,7 @@ internal sealed class MediaRouterEngine : IDisposable
     {
         ActiveTarget = null,
         NowPlayingTarget = null,
+        NowPlayingSessions = [],
         IsNowPlayingClosed = false,
         SecondaryTarget = null,
         Sessions = [],
@@ -185,6 +187,14 @@ internal sealed class MediaRouterEngine : IDisposable
                 return string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase);
             });
 
+            var nowPlayingSessions = new List<MediaSessionInfo>(3);
+            for (int i = 0; i < sessions.Count && nowPlayingSessions.Count < 3; i++)
+            {
+                var s = sessions[i];
+                if (!s.IsPassiveTab && s.IsEffectivelyPlaying)
+                    nowPlayingSessions.Add(s);
+            }
+
             // Auto-Pause / Auto-Resume engine
             if (settings.AutoPauseEnabled && lockedSession == null)
             {
@@ -202,6 +212,7 @@ internal sealed class MediaRouterEngine : IDisposable
             {
                 ActiveTarget = activeTarget,
                 NowPlayingTarget = nowPlayingTarget,
+                NowPlayingSessions = nowPlayingSessions,
                 IsNowPlayingClosed = nowPlayingClosed,
                 SecondaryTarget = secondaryTarget,
                 Sessions = sessions,
@@ -241,6 +252,15 @@ internal sealed class MediaRouterEngine : IDisposable
             !SessionEquivalent(a.NowPlayingTarget, b.NowPlayingTarget) ||
             !SessionEquivalent(a.SecondaryTarget, b.SecondaryTarget))
             return false;
+
+        if (a.NowPlayingSessions.Count != b.NowPlayingSessions.Count)
+            return false;
+
+        for (int i = 0; i < a.NowPlayingSessions.Count; i++)
+        {
+            if (!SessionEquivalent(a.NowPlayingSessions[i], b.NowPlayingSessions[i]))
+                return false;
+        }
 
         if (a.Sessions.Count != b.Sessions.Count)
             return false;
