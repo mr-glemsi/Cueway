@@ -3803,8 +3803,8 @@ internal sealed unsafe class MainWindow : IDisposable
 
     private nint GetOrCreateFont(int ptSize, int weight)
     {
-        string face = Strings.PreferredFontName;
-        var key = (ptSize, weight, face, _dpi);
+        var (face, actualWeight) = Strings.ResolveFont(weight);
+        var key = (ptSize, actualWeight, face, _dpi);
         if (_fontCache.TryGetValue(key, out nint cached) && cached != 0)
             return cached;
 
@@ -3812,7 +3812,7 @@ internal sealed unsafe class MainWindow : IDisposable
             ClearFontCache();
 
         nint created = Win32.CreateFontW(
-            -S(ptSize), 0, 0, 0, weight, 0, 0, 0,
+            -S(ptSize), 0, 0, 0, actualWeight, 0, 0, 0,
             1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, face);
         if (created != 0)
             _fontCache[key] = created;

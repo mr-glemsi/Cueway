@@ -157,9 +157,10 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
             Win32.DeleteObject(_editFont);
             _editFont = 0;
         }
+        var (editFace, editWeight) = Strings.ResolveFont(Win32.FW_SEMIBOLD);
         _editFont = Win32.CreateFontW(
-            -S(13), 0, 0, 0, Win32.FW_SEMIBOLD, 0, 0, 0,
-            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, Strings.PreferredFontName);
+            -S(13), 0, 0, 0, editWeight, 0, 0, 0,
+            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, editFace);
         if (_editFont != 0)
         {
             Win32.SendMessageW(_editHwnd, Win32.WM_SETFONT, (nuint)_editFont, 1);
@@ -769,14 +770,15 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
 
     private nint GetOrCreateFont(int ptSize, int weight)
     {
-        var key = (ptSize, weight, Strings.PreferredFontName, _dpi);
+        var (face, actualWeight) = Strings.ResolveFont(weight);
+        var key = (ptSize, actualWeight, face, _dpi);
         if (_fontCache.TryGetValue(key, out nint cached) && cached != 0)
             return cached;
 
         if (_fontCache.Count >= 32) ClearFontCache();
         nint created = Win32.CreateFontW(
-            -S(ptSize), 0, 0, 0, weight, 0, 0, 0,
-            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, Strings.PreferredFontName);
+            -S(ptSize), 0, 0, 0, actualWeight, 0, 0, 0,
+            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, face);
         if (created != 0)
             _fontCache[key] = created;
         return created;

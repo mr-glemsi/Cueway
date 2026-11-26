@@ -17,6 +17,7 @@ internal readonly record struct LanguageOption(AppLanguage Language, string Code
 
 internal static class Strings
 {
+    private static readonly bool IsWindows11OrLater = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000);
     private static volatile int _current = (int)AppLanguage.Tr;
 
     public static AppLanguage Current => (AppLanguage)_current;
@@ -40,6 +41,20 @@ internal static class Strings
         AppLanguage.Ja => "Yu Gothic UI",
         AppLanguage.Ko => "Malgun Gothic",
         _ => "Segoe UI"
+    };
+
+    public static (string FaceName, int Weight) ResolveFont(int requestedWeight) => Current switch
+    {
+        AppLanguage.Zh => ("Microsoft YaHei UI", requestedWeight),
+        AppLanguage.Ja => requestedWeight is >= 500 and < 700
+            ? ("Yu Gothic UI Semibold", 600)
+            : ("Yu Gothic UI", requestedWeight),
+        AppLanguage.Ko => ("Malgun Gothic", requestedWeight),
+        _ => requestedWeight >= 700
+            ? (IsWindows11OrLater ? "Segoe UI Variable Text" : "Segoe UI Semibold", IsWindows11OrLater ? 700 : 600)
+            : requestedWeight >= 500
+                ? ("Segoe UI Semibold", 600)
+                : ("Segoe UI", 400)
     };
 
     public static readonly LanguageOption[] Languages =

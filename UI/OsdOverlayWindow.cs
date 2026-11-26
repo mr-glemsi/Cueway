@@ -229,22 +229,23 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
 
     private void EnsureFonts(uint dpi)
     {
-        string face = Strings.PreferredFontName;
+        var (titleFace, titleWeight) = Strings.ResolveFont(Win32.FW_SEMIBOLD);
+        var (subFace, subWeight) = Strings.ResolveFont(Win32.FW_NORMAL);
         if (_fontTitle != 0 && _fontSub != 0 && _fontDpi == dpi &&
-            string.Equals(_fontFace, face, StringComparison.Ordinal))
+            string.Equals(_fontFace, titleFace, StringComparison.Ordinal))
         {
             return;
         }
 
         ReleaseFonts();
         _fontTitle = Win32.CreateFontW(
-            -Theme.Scale(14, dpi), 0, 0, 0, Win32.FW_SEMIBOLD, 0, 0, 0,
-            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, face);
+            -Theme.Scale(14, dpi), 0, 0, 0, titleWeight, 0, 0, 0,
+            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, titleFace);
         _fontSub = Win32.CreateFontW(
-            -Theme.Scale(12, dpi), 0, 0, 0, Win32.FW_NORMAL, 0, 0, 0,
-            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, face);
+            -Theme.Scale(12, dpi), 0, 0, 0, subWeight, 0, 0, 0,
+            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, subFace);
         _fontDpi = dpi;
-        _fontFace = face;
+        _fontFace = titleFace;
     }
 
     private void ReleaseFonts()
