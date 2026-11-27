@@ -93,6 +93,7 @@ internal sealed class BrowserBridgeServer : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
+            try { Client.Client.Shutdown(SocketShutdown.Both); } catch { }
             try { Stream.Dispose(); } catch { }
             try { Client.Dispose(); } catch { }
             try { WriteLock.Dispose(); } catch { }
@@ -140,6 +141,7 @@ internal sealed class BrowserBridgeServer : IDisposable
             try
             {
                 listener = new TcpListener(IPAddress.Loopback, _port);
+                listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
                 listener.Start(16);
 
                 lock (_lifecycleLock)

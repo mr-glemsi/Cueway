@@ -56,6 +56,7 @@ internal static unsafe class Program
 
             using var mainWindow = new MainWindow(stateStore, sessionManager, engine, iconRenderer, startupService, bridgeServer, updateService);
             using var tray = new TrayController(mainWindow.Handle, iconRenderer, stateStore, updateService);
+            using var flyout = new TrayFlyoutWindow(stateStore, engine, iconRenderer, () => tray.TryGetIconRect());
             using var osd = new OsdOverlayWindow(iconRenderer);
             using var keyboardHook = new KeyboardHookService(mainWindow.Handle, stateStore, engine);
             mainWindow.ConfigureKeyboardHook(keyboardHook);
@@ -88,6 +89,8 @@ internal static unsafe class Program
             mainWindow.VisibilityChanged += visible =>
             {
                 isWindowVisible = visible;
+                if (visible)
+                    flyout.Hide();
                 UpdatePollTimer();
             };
 
@@ -120,10 +123,28 @@ internal static unsafe class Program
                     trayWheelHook.OnSystemWakeOrUnlock();
                 });
 
-            tray.ShowMainWindowRequested += () => mainWindow.ShowAndFocus();
-            tray.ToggleMainWindowRequested += () => mainWindow.ToggleVisibility();
-            tray.OpenSettingsRequested += () => mainWindow.ShowAndFocus(settingsTab: true);
-            tray.OpenUpdateRequested += () => mainWindow.ShowAndFocus();
+            tray.ToggleFlyoutRequested += () =>
+            {
+                _ = sessionManager.RefreshAsync();
+                flyout.Toggle();
+            };
+            tray.ShowMainWindowRequested += () =>
+            {
+                flyout.Hide();
+                mainWindow.ShowAndFocus();
+            };
+            tray.OpenSettingsRequested += () =>
+            {
+                flyout.Hide();
+                mainWindow.ShowAndFocus(settingsTab: true);
+            };
+            tray.OpenUpdateRequested += () =>
+            {
+                flyout.Hide();
+                mainWindow.ShowAndFocus();
+            };
+            flyout.OpenDashboardRequested += () => mainWindow.ShowAndFocus(settingsTab: false);
+            flyout.OpenSettingsRequested += () => mainWindow.ShowAndFocus(settingsTab: true);
             tray.ToggleManualLockRequested += () => engine.ToggleManualLockOnActiveOrSelected();
             tray.ToggleSoloModeRequested += () => engine.ToggleSoloMode();
             tray.ExitRequested += ShutdownApp;
@@ -147,6 +168,7 @@ internal static unsafe class Program
                     {
                         tray.ForceRefresh(engine.GetSnapshot());
                         mainWindow.RefreshVisuals();
+                        flyout.RefreshVisuals();
                     });
                 }
             };

@@ -10,7 +10,10 @@ internal enum GlobalHotkeySlot
     ManualLock = 1,
     SoloMode = 2,
     PlayPause = 3,
-    PromotePlaying = 4
+    PromotePlaying = 4,
+    VolumeUp = 5,
+    VolumeDown = 6,
+    VolumeMute = 7
 }
 
 internal sealed class StateStore
@@ -21,6 +24,7 @@ internal sealed class StateStore
     private volatile AppSettings _cachedSettingsSnapshot = new();
     private volatile Dictionary<string, int> _priorityIndexCache = new(StringComparer.OrdinalIgnoreCase);
     private volatile Dictionary<string, (string DisplayName, string ExePath, long LastSeenTick)> _discoveredFastCache = new(StringComparer.OrdinalIgnoreCase);
+    private volatile HashSet<string> _ignoredAppKeysCache = new(StringComparer.OrdinalIgnoreCase);
 
     public event Action? StateChanged;
 
@@ -77,6 +81,7 @@ internal sealed class StateStore
                         loaded.Settings ??= new AppSettings();
                         loaded.PriorityApps ??= [];
                         loaded.Settings.GameBlacklistExes ??= [];
+                        loaded.Settings.IgnoredApps ??= [];
                         loaded.Settings.CustomThemes ??= [];
                         NormalizeSettings(loaded.Settings);
                         foreach (var app in loaded.PriorityApps)
@@ -106,6 +111,7 @@ internal sealed class StateStore
         }
 
         var fresh = new AppState();
+        fresh.Settings.LastSeenVersion = Startup.AppUpdateService.GetCurrentAppVersion();
         NormalizeSettings(fresh.Settings);
         SaveInternal(fresh);
         return fresh;
@@ -114,11 +120,13 @@ internal sealed class StateStore
     private static void NormalizeSettings(AppSettings s)
     {
         s.Language = Strings.NormalizeCode(s.Language);
+        s.LastSeenVersion = (s.LastSeenVersion ?? string.Empty).Trim();
         s.CustomThemes ??= [];
         SanitizeCustomThemes(s.CustomThemes);
         UI.Theme.SetCustomThemes(s.CustomThemes);
         s.Theme = UI.Theme.NormalizeId(s.Theme);
         s.VolumeStepPercent = Math.Clamp(s.VolumeStepPercent, 1, 20);
+        s.DuckVolumePercent = Math.Clamp(s.DuckVolumePercent, 5, 80);
         s.SeekSeconds = Math.Clamp(s.SeekSeconds, 1, 120);
         s.LongPressThresholdMs = Math.Clamp(s.LongPressThresholdMs, 150, 1500);
         s.HotkeyToggleWindow = HotkeyHelper.Normalize(s.HotkeyToggleWindow);
@@ -126,6 +134,11 @@ internal sealed class StateStore
         s.HotkeySoloMode = HotkeyHelper.Normalize(s.HotkeySoloMode);
         s.HotkeyPlayPause = HotkeyHelper.Normalize(s.HotkeyPlayPause, allowAnySingleKey: true);
         s.HotkeyPromotePlaying = HotkeyHelper.Normalize(s.HotkeyPromotePlaying, allowAnySingleKey: true);
+        s.HotkeyVolumeUp = HotkeyHelper.Normalize(s.HotkeyVolumeUp);
+        s.HotkeyVolumeDown = HotkeyHelper.Normalize(s.HotkeyVolumeDown);
+        s.HotkeyVolumeMute = HotkeyHelper.Normalize(s.HotkeyVolumeMute);
+        s.IgnoredApps ??= [];
+        SanitizeIgnoredApps(s.IgnoredApps);
         if (string.IsNullOrWhiteSpace(s.MpvPipeName))
             s.MpvPipeName = "mpvsocket";
     }
@@ -156,11 +169,14 @@ internal sealed class StateStore
             MinimizeToTrayOnClose = s.MinimizeToTrayOnClose,
             AlwaysOnTop = s.AlwaysOnTop,
             AutoCheckUpdates = s.AutoCheckUpdates,
+            LastSeenVersion = s.LastSeenVersion,
             MediaHookEnabled = s.MediaHookEnabled,
             TrayWheelVolumeEnabled = s.TrayWheelVolumeEnabled,
             VolumeStepPercent = s.VolumeStepPercent,
             OsdEnabled = s.OsdEnabled,
             AutoPauseEnabled = s.AutoPauseEnabled,
+            AutoDuckingEnabled = s.AutoDuckingEnabled,
+            DuckVolumePercent = s.DuckVolumePercent,
             HeadphoneGuardEnabled = s.HeadphoneGuardEnabled,
             SoloModeEnabled = s.SoloModeEnabled,
             GameFullscreenGuardEnabled = s.GameFullscreenGuardEnabled,
@@ -172,10 +188,22 @@ internal sealed class StateStore
             HotkeySoloMode = s.HotkeySoloMode,
             HotkeyPlayPause = s.HotkeyPlayPause,
             HotkeyPromotePlaying = s.HotkeyPromotePlaying,
+            HotkeyVolumeUp = s.HotkeyVolumeUp,
+            HotkeyVolumeDown = s.HotkeyVolumeDown,
+            HotkeyVolumeMute = s.HotkeyVolumeMute,
             MpvPipeName = s.MpvPipeName,
             GameBlacklistExes = [.. s.GameBlacklistExes],
+            IgnoredApps = [.. s.IgnoredApps.Select(CloneIgnoredApp)],
             CustomThemes = [.. s.CustomThemes.Select(CloneCustomTheme)]
         };
+
+        var ignoredSet = new HashSet<string>(s.IgnoredApps.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in s.IgnoredApps)
+        {
+            if (!string.IsNullOrWhiteSpace(entry.AppKey))
+                ignoredSet.Add(entry.AppKey);
+        }
+        _ignoredAppKeysCache = ignoredSet;
 
         long nowTick = Environment.TickCount64;
         var prio = new Dictionary<string, int>(_state.PriorityApps.Count, StringComparer.OrdinalIgnoreCase);
@@ -235,10 +263,13 @@ internal sealed class StateStore
             string currentLang = _state.Settings.Language;
             string currentTheme = _state.Settings.Theme;
             var customThemes = _state.Settings.CustomThemes.Select(CloneCustomTheme).ToList();
+            var ignoredApps = _state.Settings.IgnoredApps.Select(CloneIgnoredApp).ToList();
             _state.Settings = new AppSettings
             {
                 Language = Strings.NormalizeCode(currentLang),
+                LastSeenVersion = _state.Settings.LastSeenVersion,
                 CustomThemes = customThemes,
+                IgnoredApps = ignoredApps,
                 Theme = currentTheme
             };
             NormalizeSettings(_state.Settings);
@@ -256,7 +287,7 @@ internal sealed class StateStore
 
     public bool RecordDiscoveredApp(string appKey, string displayName, string exePath)
     {
-        if (string.IsNullOrWhiteSpace(appKey))
+        if (string.IsNullOrWhiteSpace(appKey) || IsAppIgnored(appKey))
             return false;
 
         if (_discoveredFastCache.TryGetValue(appKey, out var cached) &&
@@ -388,6 +419,15 @@ internal sealed class StateStore
                 case GlobalHotkeySlot.PromotePlaying:
                     _state.Settings.HotkeyPromotePlaying = normalized;
                     break;
+                case GlobalHotkeySlot.VolumeUp:
+                    _state.Settings.HotkeyVolumeUp = normalized;
+                    break;
+                case GlobalHotkeySlot.VolumeDown:
+                    _state.Settings.HotkeyVolumeDown = normalized;
+                    break;
+                case GlobalHotkeySlot.VolumeMute:
+                    _state.Settings.HotkeyVolumeMute = normalized;
+                    break;
             }
             RebuildCachesLocked();
             SaveInternal(_state);
@@ -458,6 +498,18 @@ internal sealed class StateStore
         if (exceptGlobalSlot != GlobalHotkeySlot.PromotePlaying &&
             string.Equals(_state.Settings.HotkeyPromotePlaying, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
             _state.Settings.HotkeyPromotePlaying = string.Empty;
+
+        if (exceptGlobalSlot != GlobalHotkeySlot.VolumeUp &&
+            string.Equals(_state.Settings.HotkeyVolumeUp, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
+            _state.Settings.HotkeyVolumeUp = string.Empty;
+
+        if (exceptGlobalSlot != GlobalHotkeySlot.VolumeDown &&
+            string.Equals(_state.Settings.HotkeyVolumeDown, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
+            _state.Settings.HotkeyVolumeDown = string.Empty;
+
+        if (exceptGlobalSlot != GlobalHotkeySlot.VolumeMute &&
+            string.Equals(_state.Settings.HotkeyVolumeMute, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
+            _state.Settings.HotkeyVolumeMute = string.Empty;
 
         foreach (var other in _state.PriorityApps)
         {
@@ -592,6 +644,102 @@ internal sealed class StateStore
         if (deleted)
             StateChanged?.Invoke();
         return deleted;
+    }
+
+    public bool IsAppIgnored(string? appKey)
+        => !string.IsNullOrWhiteSpace(appKey) && _ignoredAppKeysCache.Contains(appKey);
+
+    public bool IgnoreApp(string appKey, string displayName, string exePath)
+    {
+        if (string.IsNullOrWhiteSpace(appKey))
+            return false;
+
+        string cleanKey = appKey.Trim();
+        bool changed = false;
+        lock (_lock)
+        {
+            _state.Settings.IgnoredApps ??= [];
+            bool exists = _state.Settings.IgnoredApps.Exists(e =>
+                string.Equals(e.AppKey, cleanKey, StringComparison.OrdinalIgnoreCase));
+            if (!exists)
+            {
+                _state.Settings.IgnoredApps.Add(new IgnoredAppEntry
+                {
+                    AppKey = cleanKey,
+                    DisplayName = string.IsNullOrWhiteSpace(displayName) ? cleanKey : displayName.Trim(),
+                    ExePath = exePath ?? string.Empty
+                });
+                changed = true;
+            }
+
+            if (_state.PriorityApps.RemoveAll(a =>
+                    string.Equals(a.AppKey, cleanKey, StringComparison.OrdinalIgnoreCase)) > 0)
+            {
+                changed = true;
+            }
+
+            if (changed)
+            {
+                RebuildCachesLocked();
+                SaveInternal(_state);
+            }
+        }
+
+        if (changed)
+            StateChanged?.Invoke();
+        return changed;
+    }
+
+    public bool UnignoreApp(string appKey)
+    {
+        if (string.IsNullOrWhiteSpace(appKey))
+            return false;
+
+        bool removed = false;
+        lock (_lock)
+        {
+            _state.Settings.IgnoredApps ??= [];
+            if (_state.Settings.IgnoredApps.RemoveAll(e =>
+                    string.Equals(e.AppKey, appKey.Trim(), StringComparison.OrdinalIgnoreCase)) > 0)
+            {
+                removed = true;
+                RebuildCachesLocked();
+                SaveInternal(_state);
+            }
+        }
+
+        if (removed)
+            StateChanged?.Invoke();
+        return removed;
+    }
+
+    private static IgnoredAppEntry CloneIgnoredApp(IgnoredAppEntry src) => new()
+    {
+        AppKey = src.AppKey,
+        DisplayName = src.DisplayName,
+        ExePath = src.ExePath
+    };
+
+    private static void SanitizeIgnoredApps(List<IgnoredAppEntry> list)
+    {
+        var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = list.Count - 1; i >= 0; i--)
+        {
+            var item = list[i];
+            if (item == null || string.IsNullOrWhiteSpace(item.AppKey))
+            {
+                list.RemoveAt(i);
+                continue;
+            }
+            item.AppKey = item.AppKey.Trim();
+            if (!seenKeys.Add(item.AppKey))
+            {
+                list.RemoveAt(i);
+                continue;
+            }
+            item.DisplayName = string.IsNullOrWhiteSpace(item.DisplayName) ? item.AppKey : item.DisplayName.Trim();
+            item.ExePath ??= string.Empty;
+        }
     }
 
     private static CustomThemePreset CloneCustomTheme(CustomThemePreset src) => new()

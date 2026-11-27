@@ -11,11 +11,18 @@ const hostIconPending = new Set();
 const hostIconAttempts = new Map();
 let ws = null;
 let connected = false;
-let reconnectDelayMs = 1000;
+let reconnectDelayMs = 500;
+let lastPongAt = 0;
 let reconnectTimer = null;
 let connectTimeout = null;
 let heartbeatTimer = null;
 let flushTimer = null;
+
+function ensureConnected() {
+  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    connect();
+  }
+}
 
 function serializeTabState(st) {
   return {
@@ -131,6 +138,11 @@ async function scanAndInjectTabs(forceInject = false) {
 
   for (const tab of tabs) {
     if (!tab.id) continue;
+    const meta = getEffectiveMeta(tab.id, tab);
+    if (tab.audible === true) {
+      meta.audible = true;
+      recomputeTabState(tab.id, tab);
+    }
     if (forceInject) {
       try {
         await injectContentScript(tab.id);
@@ -335,6 +347,25 @@ function clearConnectTimeout() {
   }
 }
 
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+function teardownSocket(socket) {
+  if (ws === socket) {
+    ws = null;
+    connected = false;
+    clearConnectTimeout();
+    stopHeartbeat();
+  }
+  try {
+    socket.close();
+  } catch {}
+}
+
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
@@ -351,6 +382,7 @@ function connect() {
     socket = new WebSocket(WS_URL);
     ws = socket;
   } catch {
+    ws = null;
     scheduleReconnect();
     return;
   }
@@ -358,29 +390,35 @@ function connect() {
   connectTimeout = setTimeout(() => {
     connectTimeout = null;
     if (ws === socket && socket.readyState === WebSocket.CONNECTING) {
-      try {
-        socket.close();
-      } catch {}
+      teardownSocket(socket);
+      scheduleReconnect();
     }
-  }, 5000);
+  }, 2500);
 
   socket.onopen = () => {
     if (ws !== socket) return;
     clearConnectTimeout();
     connected = true;
-    reconnectDelayMs = 1000;
+    reconnectDelayMs = 500;
+    lastPongAt = Date.now();
     sendWs({ type: "hello", browser: BROWSER_KEY, version: BRIDGE_PROTOCOL_VERSION });
     scheduleFlush();
     scanAndInjectTabs();
 
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    stopHeartbeat();
     heartbeatTimer = setInterval(() => {
+      if (ws !== socket || socket.readyState !== WebSocket.OPEN || Date.now() - lastPongAt > 12000) {
+        teardownSocket(socket);
+        scheduleReconnect();
+        return;
+      }
       sendWs({ type: "ping", browser: BROWSER_KEY, version: BRIDGE_PROTOCOL_VERSION });
-    }, 20000);
+    }, 5000);
   };
 
   socket.onmessage = (event) => {
     if (ws !== socket) return;
+    lastPongAt = Date.now();
     let msg;
     try {
       msg = JSON.parse(event.data);
@@ -400,29 +438,21 @@ function connect() {
 
   socket.onclose = () => {
     if (ws !== socket) return;
-    clearConnectTimeout();
-    connected = false;
-    if (heartbeatTimer) {
-      clearInterval(heartbeatTimer);
-      heartbeatTimer = null;
-    }
-    ws = null;
+    teardownSocket(socket);
     scheduleReconnect();
   };
 
   socket.onerror = () => {
     if (ws !== socket) return;
-    clearConnectTimeout();
-    try {
-      socket.close();
-    } catch {}
+    teardownSocket(socket);
+    scheduleReconnect();
   };
 }
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
   const delay = reconnectDelayMs;
-  reconnectDelayMs = Math.min(3000, Math.round(reconnectDelayMs * 1.5));
+  reconnectDelayMs = Math.min(2000, Math.round(reconnectDelayMs * 1.5));
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
@@ -649,6 +679,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
 
   if (msg.type === "page_meta" && sender.tab?.id) {
+    ensureConnected();
     const tabId = sender.tab.id;
     const meta = getEffectiveMeta(tabId, sender.tab);
     if (msg.url) {
@@ -667,6 +698,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "media_state" && sender.tab?.id) {
+    ensureConnected();
     const tabId = sender.tab.id;
     const frameId = typeof sender.frameId === "number" ? sender.frameId : 0;
     const st = msg.state;
@@ -728,12 +760,16 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       prev?.close();
     } catch {}
     connected = false;
-    reconnectDelayMs = 1000;
+    reconnectDelayMs = 500;
     connect();
     scanAndInjectTabs();
     sendResponse({ ok: true });
     return true;
   }
+});
+
+api.tabs.onActivated?.addListener(() => {
+  ensureConnected();
 });
 
 api.tabs.onRemoved.addListener((tabId) => {
@@ -743,6 +779,7 @@ api.tabs.onRemoved.addListener((tabId) => {
 });
 
 api.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  ensureConnected();
   if (changeInfo.discarded === true) {
     if (removeTabTracking(tabId)) {
       scheduleFlush();
@@ -823,7 +860,12 @@ if (api.alarms) {
       if (!ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)) {
         connect();
       } else if (ws.readyState === WebSocket.OPEN) {
-        sendWs({ type: "ping", browser: BROWSER_KEY, version: BRIDGE_PROTOCOL_VERSION });
+        if (Date.now() - lastPongAt > 15000) {
+          teardownSocket(ws);
+          connect();
+        } else {
+          sendWs({ type: "ping", browser: BROWSER_KEY, version: BRIDGE_PROTOCOL_VERSION });
+        }
       }
     }
   });

@@ -8,11 +8,14 @@ public sealed class AppSettings
     public bool MinimizeToTrayOnClose { get; set; } = true;
     public bool AlwaysOnTop { get; set; } = false;
     public bool AutoCheckUpdates { get; set; } = true;
+    public string LastSeenVersion { get; set; } = string.Empty;
     public bool MediaHookEnabled { get; set; } = true;
     public bool TrayWheelVolumeEnabled { get; set; } = false;
     public int VolumeStepPercent { get; set; } = 5;
     public bool OsdEnabled { get; set; } = false;
     public bool AutoPauseEnabled { get; set; } = false;
+    public bool AutoDuckingEnabled { get; set; } = false;
+    public int DuckVolumePercent { get; set; } = 25;
     public bool HeadphoneGuardEnabled { get; set; } = false;
     public bool SoloModeEnabled { get; set; } = false;
     public bool GameFullscreenGuardEnabled { get; set; } = false;
@@ -24,9 +27,20 @@ public sealed class AppSettings
     public string HotkeySoloMode { get; set; } = string.Empty;
     public string HotkeyPlayPause { get; set; } = string.Empty;
     public string HotkeyPromotePlaying { get; set; } = string.Empty;
+    public string HotkeyVolumeUp { get; set; } = string.Empty;
+    public string HotkeyVolumeDown { get; set; } = string.Empty;
+    public string HotkeyVolumeMute { get; set; } = string.Empty;
     public string MpvPipeName { get; set; } = "mpvsocket";
     public List<string> GameBlacklistExes { get; set; } = [];
+    public List<IgnoredAppEntry> IgnoredApps { get; set; } = [];
     public List<CustomThemePreset> CustomThemes { get; set; } = [];
+}
+
+public sealed class IgnoredAppEntry
+{
+    public string AppKey { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string ExePath { get; set; } = string.Empty;
 }
 
 public sealed class CustomThemePreset

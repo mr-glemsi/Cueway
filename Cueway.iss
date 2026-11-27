@@ -2,7 +2,7 @@
 
 #define MyAppName "Cueway"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.1.1"
+  #define MyAppVersion "1.2.0"
 #endif
 #define MyAppPublisher "Cueway"
 #define MyAppExeName "Cueway.exe"
@@ -44,6 +44,10 @@ Name: "german"; MessagesFile: "compiler:Languages\German.isl"
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
+Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
+Name: "italian"; MessagesFile: "compiler:Languages\Italian.isl"
+Name: "polish"; MessagesFile: "compiler:Languages\Polish.isl"
+Name: "finnish"; MessagesFile: "compiler:Languages\Finnish.isl"
 
 [Messages]
 turkish.WelcomeLabel2=Bilgisayarınıza [name/ver] uygulaması kurulacak.
@@ -55,6 +59,10 @@ german.WelcomeLabel2=Dieses Programm wird [name/ver] auf Ihrem Computer installi
 french.WelcomeLabel2=L'assistant va installer [name/ver] sur votre ordinateur.
 japanese.WelcomeLabel2=お使いのコンピューターに [name/ver] をインストールします。
 korean.WelcomeLabel2=컴퓨터에 [name/ver]을(를) 설치합니다.
+brazilianportuguese.WelcomeLabel2=Este assistente instalará [name/ver] no seu computador.
+italian.WelcomeLabel2=Questo programma installerà [name/ver] sul computer.
+polish.WelcomeLabel2=Ten kreator zainstaluje [name/ver] na Twoim komputerze.
+finnish.WelcomeLabel2=Tämä ohjelma asentaa sovelluksen [name/ver] tietokoneellesi.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

@@ -35,8 +35,8 @@ internal sealed unsafe class TrayController : IDisposable
     private string? _lastTip;
     private string? _lastThemeId;
 
+    public event Action? ToggleFlyoutRequested;
     public event Action? ShowMainWindowRequested;
-    public event Action? ToggleMainWindowRequested;
     public event Action? OpenSettingsRequested;
     public event Action? OpenUpdateRequested;
     public event Action? ToggleManualLockRequested;
@@ -186,7 +186,11 @@ internal sealed unsafe class TrayController : IDisposable
         {
             case NIN_SELECT:
             case NIN_KEYSELECT:
-                ToggleMainWindowRequested?.Invoke();
+                ToggleFlyoutRequested?.Invoke();
+                break;
+
+            case Win32.WM_LBUTTONDBLCLK:
+                ShowMainWindowRequested?.Invoke();
                 break;
 
             case WM_CONTEXTMENU:

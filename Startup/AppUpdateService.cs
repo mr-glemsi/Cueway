@@ -683,6 +683,8 @@ internal sealed class AppUpdateService : IDisposable
         return s.Trim();
     }
 
+    internal static string GetCurrentAppVersion() => ReadCurrentAssemblyVersion();
+
     private static string ReadCurrentAssemblyVersion()
     {
         var v = typeof(AppUpdateService).Assembly.GetName().Version;

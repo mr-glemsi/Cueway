@@ -16,6 +16,9 @@ internal sealed unsafe class KeyboardHookService : IDisposable
         HotkeyBinding SoloMode,
         HotkeyBinding PlayPause,
         HotkeyBinding PromotePlaying,
+        HotkeyBinding VolumeUp,
+        HotkeyBinding VolumeDown,
+        HotkeyBinding VolumeMute,
         AppHotkeyEntry[] AppHotkeys);
 
     private const nuint TIMER_WATCHDOG = 9001;
@@ -59,7 +62,9 @@ internal sealed unsafe class KeyboardHookService : IDisposable
     private volatile bool _mediaHookEnabled = true;
     private volatile bool _timelineScrubbingEnabled = true;
     private volatile int _longPressThresholdMs = 400;
-    private volatile HotkeySnapshot _hotkeys = new(default, default, default, default, default, []);
+    private volatile int _volumeStepPercent = 5;
+    private long _lastVolHotkeyTick;
+    private volatile HotkeySnapshot _hotkeys = new(default, default, default, default, default, default, default, default, []);
 
     public event Action? ToggleWindowRequested;
     public bool IsCapturingHotkey => _onCaptureResult != null;
@@ -82,12 +87,16 @@ internal sealed unsafe class KeyboardHookService : IDisposable
         _mediaHookEnabled = s.MediaHookEnabled;
         _timelineScrubbingEnabled = s.TimelineScrubbingEnabled;
         _longPressThresholdMs = s.LongPressThresholdMs;
+        _volumeStepPercent = s.VolumeStepPercent;
 
         HotkeyHelper.TryParse(s.HotkeyToggleWindow, out var toggleWin);
         HotkeyHelper.TryParse(s.HotkeyManualLock, out var manualLock);
         HotkeyHelper.TryParse(s.HotkeySoloMode, out var soloMode);
         HotkeyHelper.TryParse(s.HotkeyPlayPause, out var playPause, allowAnySingleKey: true);
         HotkeyHelper.TryParse(s.HotkeyPromotePlaying, out var promotePlaying, allowAnySingleKey: true);
+        HotkeyHelper.TryParse(s.HotkeyVolumeUp, out var volUp);
+        HotkeyHelper.TryParse(s.HotkeyVolumeDown, out var volDown);
+        HotkeyHelper.TryParse(s.HotkeyVolumeMute, out var volMute);
 
         var appEntries = new List<AppHotkeyEntry>();
         foreach (var app in apps)
@@ -96,7 +105,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                 appEntries.Add(new AppHotkeyEntry(appBinding, app.AppKey));
         }
 
-        _hotkeys = new HotkeySnapshot(toggleWin, manualLock, soloMode, playPause, promotePlaying, [.. appEntries]);
+        _hotkeys = new HotkeySnapshot(toggleWin, manualLock, soloMode, playPause, promotePlaying, volUp, volDown, volMute, [.. appEntries]);
     }
 
     public void BeginHotkeyCapture(
@@ -338,6 +347,39 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                     {
                         if (_heldCustomVks.Add(vkCode))
                             _ = Task.Run(() => _engine.ToggleSoloMode());
+                        return true;
+                    }
+
+                    if (!snap.VolumeUp.IsEmpty && snap.VolumeUp.VkCode == vkCode && snap.VolumeUp.Modifiers == mods)
+                    {
+                        bool firstPress = _heldCustomVks.Add(vkCode);
+                        long nowTick = Environment.TickCount64;
+                        if (firstPress || nowTick - _lastVolHotkeyTick >= 110)
+                        {
+                            _lastVolHotkeyTick = nowTick;
+                            float step = _volumeStepPercent / 100f;
+                            _ = Task.Run(() => _engine.AdjustActiveTargetVolume(step));
+                        }
+                        return true;
+                    }
+
+                    if (!snap.VolumeDown.IsEmpty && snap.VolumeDown.VkCode == vkCode && snap.VolumeDown.Modifiers == mods)
+                    {
+                        bool firstPress = _heldCustomVks.Add(vkCode);
+                        long nowTick = Environment.TickCount64;
+                        if (firstPress || nowTick - _lastVolHotkeyTick >= 110)
+                        {
+                            _lastVolHotkeyTick = nowTick;
+                            float step = -(_volumeStepPercent / 100f);
+                            _ = Task.Run(() => _engine.AdjustActiveTargetVolume(step));
+                        }
+                        return true;
+                    }
+
+                    if (!snap.VolumeMute.IsEmpty && snap.VolumeMute.VkCode == vkCode && snap.VolumeMute.Modifiers == mods)
+                    {
+                        if (_heldCustomVks.Add(vkCode))
+                            _ = Task.Run(() => _engine.ToggleActiveTargetMute());
                         return true;
                     }
 

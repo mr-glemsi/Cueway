@@ -47,10 +47,13 @@ internal sealed class MediaRouterEngine : IDisposable
     private bool _gameGuardActive;
     private bool _soloWasActive;
 
-    // Auto-pause / Auto-resume tracking
+    private sealed record DuckedEntry(float OriginalVolume, string TriggerSessionId, SessionSource Source);
+
+    // Auto-pause / Auto-resume / Auto-ducking tracking
     private readonly Dictionary<string, bool> _prevEffectivePlaying = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _autoPausedBy = new(StringComparer.Ordinal); // pausedSessionId -> triggerSessionId
     private readonly HashSet<string> _suppressNextTransition = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DuckedEntry> _autoDucked = new(StringComparer.Ordinal);
 
     private RouterStateSnapshot _snapshot = new()
     {
@@ -103,6 +106,8 @@ internal sealed class MediaRouterEngine : IDisposable
         List<string> toAutoPause = [];
         List<string> toAutoResume = [];
         string? autoPauseTriggerId = null;
+        List<(string SessionId, float TargetVol, SessionSource Source)> toDuck = [];
+        List<(string SessionId, float RestoreVol, SessionSource Source)> toUnduck = [];
 
         RouterStateSnapshot prevSnapshot;
         RouterStateSnapshot nextSnapshot;
@@ -110,6 +115,18 @@ internal sealed class MediaRouterEngine : IDisposable
         lock (_lock)
         {
             _gameGuardActive = gameActive;
+
+            if (!string.IsNullOrEmpty(_lockedAppKey) && _stateStore.IsAppIgnored(_lockedAppKey))
+            {
+                _lockedSessionId = null;
+                _lockedAppKey = null;
+            }
+            if (!string.IsNullOrEmpty(_lastPlayedAppKey) && _stateStore.IsAppIgnored(_lastPlayedAppKey))
+            {
+                _lastPlayedSessionId = null;
+                _lastPlayedAppKey = null;
+                _lastPlayedSnapshot = null;
+            }
 
             MediaSessionInfo? lockedSession = null;
             if (!string.IsNullOrEmpty(_lockedSessionId))
@@ -205,6 +222,24 @@ internal sealed class MediaRouterEngine : IDisposable
                 _autoPausedBy.Clear();
             }
 
+            // Auto-Ducking engine
+            if (settings.AutoDuckingEnabled && lockedSession == null)
+            {
+                EvaluateAutoDuckingLocked(sessions, toAutoPause, settings.DuckVolumePercent / 100f, toDuck, toUnduck);
+            }
+            else if (!settings.AutoDuckingEnabled && _autoDucked.Count > 0)
+            {
+                var sessionMap = new Dictionary<string, MediaSessionInfo>(sessions.Count, StringComparer.Ordinal);
+                foreach (var s in sessions)
+                    sessionMap[s.SessionId] = s;
+                foreach (var kv in _autoDucked)
+                {
+                    if (sessionMap.ContainsKey(kv.Key))
+                        toUnduck.Add((kv.Key, kv.Value.OriginalVolume, kv.Value.Source));
+                }
+                _autoDucked.Clear();
+            }
+
             UpdatePrevPlayingLocked(sessions);
 
             prevSnapshot = _snapshot;
@@ -230,6 +265,12 @@ internal sealed class MediaRouterEngine : IDisposable
         if (toAutoPause.Count > 0 || toAutoResume.Count > 0)
         {
             _ = ExecuteAutoPauseResumeAsync(toAutoPause, toAutoResume, autoPauseTriggerId);
+        }
+
+        // Execute smooth auto-ducking / unducking asynchronously
+        if (toDuck.Count > 0 || toUnduck.Count > 0)
+        {
+            _ = ExecuteAutoDuckingAsync(toDuck, toUnduck);
         }
 
         if (forceNotify || !SnapshotsEquivalent(prevSnapshot, nextSnapshot))
@@ -584,6 +625,124 @@ internal sealed class MediaRouterEngine : IDisposable
             await _sessionManager.PlayAsync(id);
     }
 
+    private void EvaluateAutoDuckingLocked(
+        List<MediaSessionInfo> sessions,
+        List<string> toAutoPause,
+        float duckTarget,
+        List<(string SessionId, float TargetVol, SessionSource Source)> toDuck,
+        List<(string SessionId, float RestoreVol, SessionSource Source)> toUnduck)
+    {
+        if (sessions.Count <= 1 && _autoDucked.Count == 0)
+            return;
+
+        var sessionMap = new Dictionary<string, MediaSessionInfo>(sessions.Count, StringComparer.Ordinal);
+        foreach (var s in sessions)
+            sessionMap[s.SessionId] = s;
+
+        var staleKeys = _autoDucked.Keys.Where(k => !sessionMap.ContainsKey(k)).ToList();
+        foreach (string k in staleKeys)
+            _autoDucked.Remove(k);
+
+        HashSet<string>? pendingPauseSet = toAutoPause.Count > 0
+            ? new HashSet<string>(toAutoPause, StringComparer.Ordinal)
+            : null;
+
+        // Duck other effectively playing sessions when a higher/new media source starts playing
+        foreach (var candidate in sessions)
+        {
+            if (candidate.IsPassiveTab)
+                continue;
+            if (candidate.Source == SessionSource.AudioSession &&
+                !ProcessResolver.IsKnownMediaAudioProcess(candidate.AppKey))
+                continue;
+
+            bool wasPlaying = _prevEffectivePlaying.TryGetValue(candidate.SessionId, out bool prev) && prev;
+            if (!wasPlaying && candidate.IsEffectivelyPlaying)
+            {
+                foreach (var other in sessions)
+                {
+                    if (string.Equals(other.SessionId, candidate.SessionId, StringComparison.Ordinal))
+                        continue;
+                    if (!other.IsEffectivelyPlaying)
+                        continue;
+                    if (pendingPauseSet != null && pendingPauseSet.Contains(other.SessionId))
+                        continue;
+                    if (_autoPausedBy.ContainsKey(other.SessionId))
+                        continue;
+                    if (_autoDucked.ContainsKey(other.SessionId))
+                        continue;
+                    if (other.Volume > duckTarget + 0.02f)
+                    {
+                        _autoDucked[other.SessionId] = new DuckedEntry(other.Volume, candidate.SessionId, other.Source);
+                        toDuck.Add((other.SessionId, duckTarget, other.Source));
+                    }
+                }
+            }
+        }
+
+        // Restore volume once the triggering session stops playing or disappears
+        if (_autoDucked.Count > 0)
+        {
+            var restorable = new List<string>();
+            foreach (var kv in _autoDucked)
+            {
+                bool triggerStillPlaying = sessionMap.TryGetValue(kv.Value.TriggerSessionId, out var trig) &&
+                                           trig.IsEffectivelyPlaying;
+                if (!triggerStillPlaying)
+                {
+                    restorable.Add(kv.Key);
+                }
+            }
+
+            foreach (string id in restorable)
+            {
+                if (_autoDucked.Remove(id, out var entry) && sessionMap.ContainsKey(id))
+                {
+                    toUnduck.Add((id, entry.OriginalVolume, entry.Source));
+                }
+            }
+        }
+    }
+
+    private async Task ExecuteAutoDuckingAsync(
+        List<(string SessionId, float TargetVol, SessionSource Source)> toDuck,
+        List<(string SessionId, float RestoreVol, SessionSource Source)> toUnduck)
+    {
+        foreach (var (id, targetVol, source) in toDuck)
+            await RampSessionVolumeAsync(id, targetVol, source).ConfigureAwait(false);
+
+        foreach (var (id, restoreVol, source) in toUnduck)
+            await RampSessionVolumeAsync(id, restoreVol, source).ConfigureAwait(false);
+    }
+
+    private async Task RampSessionVolumeAsync(string sessionId, float targetVol, SessionSource source)
+    {
+        targetVol = Math.Clamp(targetVol, 0f, 1f);
+        if (source == SessionSource.BrowserBridge)
+        {
+            await _sessionManager.SetSessionVolumeAsync(sessionId, targetVol).ConfigureAwait(false);
+            return;
+        }
+
+        float startVol = GetSnapshot().Sessions
+            .Find(s => string.Equals(s.SessionId, sessionId, StringComparison.Ordinal))?.Volume ?? targetVol;
+        if (MathF.Abs(startVol - targetVol) <= 0.03f)
+        {
+            await _sessionManager.SetSessionVolumeAsync(sessionId, targetVol).ConfigureAwait(false);
+            return;
+        }
+
+        const int Steps = 4;
+        for (int i = 1; i <= Steps; i++)
+        {
+            float t = (float)i / Steps;
+            float v = i == Steps ? targetVol : startVol + (targetVol - startVol) * t;
+            await _sessionManager.SetSessionVolumeAsync(sessionId, v).ConfigureAwait(false);
+            if (i < Steps)
+                await Task.Delay(45).ConfigureAwait(false);
+        }
+    }
+
     private void SyncSoloMode(bool soloEnabled, MediaSessionInfo? activeTarget)
     {
         if (!soloEnabled || activeTarget == null)
@@ -935,7 +1094,19 @@ internal sealed class MediaRouterEngine : IDisposable
         if (target == null)
             return;
 
+        lock (_lock)
+            _autoDucked.Remove(target.SessionId);
+
         _ = AdjustTargetVolumeInternalAsync(target, delta);
+    }
+
+    public void ToggleActiveTargetMute()
+    {
+        var target = GetSnapshot().ActiveTarget;
+        if (target == null)
+            return;
+
+        _ = ToggleSessionMuteAsync(target.SessionId);
     }
 
     private async Task AdjustTargetVolumeInternalAsync(MediaSessionInfo target, float delta)
@@ -948,7 +1119,11 @@ internal sealed class MediaRouterEngine : IDisposable
     }
 
     public Task<int?> SetSessionVolumeAsync(string sessionId, float level)
-        => _sessionManager.SetSessionVolumeAsync(sessionId, level);
+    {
+        lock (_lock)
+            _autoDucked.Remove(sessionId);
+        return _sessionManager.SetSessionVolumeAsync(sessionId, level);
+    }
 
     public async Task<bool?> ToggleSessionMuteAsync(string sessionId)
     {
@@ -977,5 +1152,26 @@ internal sealed class MediaRouterEngine : IDisposable
         _sessionManager.SessionsUpdated -= OnSessionsUpdated;
         _stateStore.StateChanged -= OnStoreStateChanged;
         _audioService.DefaultOutputDeviceChanged -= OnAudioOutputDeviceChanged;
+
+        List<(string SessionId, float OriginalVolume)> toRestore;
+        lock (_lock)
+        {
+            toRestore = new List<(string, float)>(_autoDucked.Count);
+            foreach (var kv in _autoDucked)
+                toRestore.Add((kv.Key, kv.Value.OriginalVolume));
+            _autoDucked.Clear();
+        }
+
+        foreach (var (id, origVol) in toRestore)
+        {
+            try
+            {
+                _sessionManager.SetSessionVolumeAsync(id, origVol).Wait(300);
+            }
+            catch
+            {
+                // Best-effort volume restore during shutdown
+            }
+        }
     }
 }

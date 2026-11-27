@@ -11,6 +11,8 @@ namespace Cueway.Config;
 [JsonSerializable(typeof(List<CustomThemePreset>))]
 [JsonSerializable(typeof(DiscoveredApp))]
 [JsonSerializable(typeof(List<DiscoveredApp>))]
+[JsonSerializable(typeof(IgnoredAppEntry))]
+[JsonSerializable(typeof(List<IgnoredAppEntry>))]
 [JsonSerializable(typeof(List<string>))]
 [JsonSerializable(typeof(BridgeIncomingMessage))]
 [JsonSerializable(typeof(BridgeTabDto))]

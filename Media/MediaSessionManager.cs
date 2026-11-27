@@ -577,8 +577,26 @@ internal sealed class MediaSessionManager : IDisposable
             // 4. Universal WASAPI Audio Session Discovery (catches apps without SMTC such as Stremio, VLC, etc.)
             CollectAudioFallbackSessions(collected, connectedBridgeBrowsers, procSnapshot, visibleWindows, audioByPid);
 
+            // 5. Filter out user-ignored apps/sites
+            collected.RemoveAll(s => _stateStore.IsAppIgnored(s.AppKey));
+
             lock (_sessionsLock)
             {
+                if (_recentSmtcBrowserTabs.Count > 0)
+                {
+                    List<string>? ignoredCached = null;
+                    foreach (string k in _recentSmtcBrowserTabs.Keys)
+                    {
+                        if (_stateStore.IsAppIgnored(k))
+                            (ignoredCached ??= []).Add(k);
+                    }
+                    if (ignoredCached != null)
+                    {
+                        foreach (string k in ignoredCached)
+                            _recentSmtcBrowserTabs.Remove(k);
+                    }
+                }
+
                 _smtcSessions.Clear();
                 foreach (var kv in liveSmtcMap)
                     _smtcSessions[kv.Key] = kv.Value;

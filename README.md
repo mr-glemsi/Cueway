@@ -35,10 +35,13 @@ Download the latest Windows installer (`Cueway-Setup-x64.exe`) from the [Release
 
 - Priority-based routing for hardware media keys and playback controls
 - Per-tab playback, volume, mute, and focus control through the companion browser extension
+- EarTrumpet-style tray quick control flyout on left-click alongside the full multi-player dashboard
 - Automatic detection of active desktop audio sources, with or without Windows SMTC support
-- Manual target lock (`Alt+M`) and solo mode (`Alt+S`)
+- Smart audio ducking to smoothly lower background players instead of pausing them when new media starts
+- Optional global target volume hotkeys (`Volume Up`, `Volume Down`, `Mute`) for the active player or tab
+- Manual target lock (`Alt+M`), solo mode (`Alt+S`), and one-click ignore list for unwanted apps or sites
 - Fullscreen game detection and automatic pause/resume for lower-priority players
-- Lightweight native Windows build with a system tray interface
+- Lightweight native Windows build with 13 interface languages, custom themes, and a system tray interface
 
 ## Settings & Customization
 
