@@ -18,11 +18,11 @@ internal readonly record struct AudioOutputDevice(
 internal sealed class CoreAudioService : IDisposable
 {
     private readonly object _lock = new();
-    private readonly HashSet<uint> _soloMutedPids = [];
     private CoreAudio.NotificationClientCcw? _ccw;
     private nint _notificationEnumerator;
     private long _lastDeviceEventTick;
     private long _suppressDeviceGuardUntilTick;
+    private int _perAppRoutingSupported = -1;
     private bool _disposed;
 
     public event Action<string>? DefaultOutputDeviceChanged;
@@ -77,6 +77,35 @@ internal sealed class CoreAudioService : IDisposable
             return;
 
         DefaultOutputDeviceChanged?.Invoke(reason);
+    }
+
+    public string? GetDefaultOutputDeviceId()
+    {
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        bool mustUninit = coHr == 0 || coHr == 1;
+
+        nint enumerator = 0;
+        nint defaultDevice = 0;
+        try
+        {
+            if (CoreAudio.CreateDeviceEnumerator(out enumerator) != 0 || enumerator == 0)
+                return null;
+            if (CoreAudio.Enumerator_GetDefaultAudioEndpoint(enumerator, CoreAudio.eRender, CoreAudio.eMultimedia, out defaultDevice) != 0 || defaultDevice == 0)
+                return null;
+            return CoreAudio.Device_GetId(defaultDevice, out string id) == 0 && !string.IsNullOrWhiteSpace(id)
+                ? id.Trim()
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (defaultDevice != 0) CoreAudio.Release(defaultDevice);
+            if (enumerator != 0) CoreAudio.Release(enumerator);
+            if (mustUninit) Win32.CoUninitialize();
+        }
     }
 
     public unsafe List<AudioOutputDevice> GetOutputDevices()
@@ -204,6 +233,122 @@ internal sealed class CoreAudioService : IDisposable
         int nextIdx = defIdx >= 0 ? (defIdx + 1) % devices.Count : 0;
         var next = devices[nextIdx];
         return SetDefaultOutputDevice(next.Id) ? next with { IsDefault = true } : null;
+    }
+
+    public bool IsPerAppAudioRoutingSupported()
+    {
+        int cached = Volatile.Read(ref _perAppRoutingSupported);
+        if (cached >= 0)
+            return cached == 1;
+
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        bool mustUninit = coHr == 0 || coHr == 1;
+        nint factory = 0;
+        bool ok = false;
+        try
+        {
+            ok = CoreAudio.TryCreateAudioPolicyConfigFactory(out factory) && factory != 0;
+        }
+        catch
+        {
+            ok = false;
+        }
+        finally
+        {
+            if (factory != 0) CoreAudio.Release(factory);
+            if (mustUninit) Win32.CoUninitialize();
+        }
+
+        Interlocked.CompareExchange(ref _perAppRoutingSupported, ok ? 1 : 0, -1);
+        return ok;
+    }
+
+    public Dictionary<int, string?> GetAppOutputDeviceIds(IReadOnlyCollection<int> pids)
+    {
+        var result = new Dictionary<int, string?>();
+        if (pids.Count == 0 || !IsPerAppAudioRoutingSupported())
+            return result;
+
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        bool mustUninit = coHr == 0 || coHr == 1;
+        nint factory = 0;
+        try
+        {
+            if (!CoreAudio.TryCreateAudioPolicyConfigFactory(out factory) || factory == 0)
+                return result;
+
+            foreach (int p in pids)
+            {
+                if (p <= 0 || result.ContainsKey(p))
+                    continue;
+                result[p] = CoreAudio.AudioPolicyConfig_GetPersistedDefaultAudioEndpoint(factory, (uint)p);
+            }
+        }
+        catch
+        {
+            // Ignore transient policy query errors
+        }
+        finally
+        {
+            if (factory != 0) CoreAudio.Release(factory);
+            if (mustUninit) Win32.CoUninitialize();
+        }
+
+        return result;
+    }
+
+    public bool SetAppOutputDevice(IReadOnlyCollection<int> pids, string? deviceId)
+    {
+        if (pids.Count == 0 || !IsPerAppAudioRoutingSupported())
+            return false;
+
+        Interlocked.Exchange(ref _suppressDeviceGuardUntilTick, Environment.TickCount64 + 2500);
+
+        int representativePid = 0;
+        int anyAudioPid = 0;
+        int firstPositive = 0;
+        var audioByPid = GetAudioStatesByPid();
+        var seenAll = new HashSet<int>();
+        foreach (int p in pids)
+        {
+            if (p <= 0 || !seenAll.Add(p))
+                continue;
+            if (firstPositive == 0)
+                firstPositive = p;
+            if (audioByPid.TryGetValue((uint)p, out var state))
+            {
+                if (anyAudioPid == 0)
+                    anyAudioPid = p;
+                if (state.HasActiveSession)
+                {
+                    representativePid = p;
+                    break;
+                }
+            }
+        }
+        int targetPid = representativePid != 0 ? representativePid : (anyAudioPid != 0 ? anyAudioPid : firstPositive);
+        if (targetPid == 0)
+            return false;
+
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        bool mustUninit = coHr == 0 || coHr == 1;
+        nint factory = 0;
+        try
+        {
+            if (!CoreAudio.TryCreateAudioPolicyConfigFactory(out factory) || factory == 0)
+                return false;
+
+            return CoreAudio.AudioPolicyConfig_SetPersistedDefaultAudioEndpoint(factory, (uint)targetPid, deviceId);
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (factory != 0) CoreAudio.Release(factory);
+            if (mustUninit) Win32.CoUninitialize();
+        }
     }
 
     public bool IsAnyMicrophoneSessionActive()
@@ -457,61 +602,6 @@ internal sealed class CoreAudioService : IDisposable
         }
     }
 
-    public void ApplySoloMode(bool enabled, IReadOnlySet<int> allowedPids)
-    {
-        lock (_lock)
-        {
-            if (!enabled)
-            {
-                if (_soloMutedPids.Count == 0)
-                    return;
-
-                ForEachAudioSession((_, _, volPtr, _) =>
-                {
-                    CoreAudio.SimpleAudioVolume_SetMute(volPtr, false);
-                }, filterPids: _soloMutedPids);
-                _soloMutedPids.Clear();
-                return;
-            }
-
-            var allowedSet = new HashSet<uint>();
-            foreach (int p in allowedPids)
-            {
-                if (p > 0) allowedSet.Add((uint)p);
-            }
-
-            var seenPids = new HashSet<uint>();
-            ForEachAudioSession((pid, _, volPtr, _) =>
-            {
-                seenPids.Add(pid);
-                if (CoreAudio.SimpleAudioVolume_GetMute(volPtr, out bool currentlyMuted) != 0)
-                    return;
-
-                if (allowedSet.Contains(pid))
-                {
-                    if (_soloMutedPids.Contains(pid) && currentlyMuted)
-                    {
-                        CoreAudio.SimpleAudioVolume_SetMute(volPtr, false);
-                    }
-                    _soloMutedPids.Remove(pid);
-                }
-                else
-                {
-                    if (!currentlyMuted)
-                    {
-                        if (CoreAudio.SimpleAudioVolume_SetMute(volPtr, true) == 0)
-                        {
-                            _soloMutedPids.Add(pid);
-                        }
-                    }
-                }
-            });
-
-            // Prune exited processes from solo tracking
-            _soloMutedPids.RemoveWhere(p => !seenPids.Contains(p));
-        }
-    }
-
     private static void ForEachAudioSession(
         Action<uint, bool, nint, float> callback,
         bool includePeak = false,
@@ -667,13 +757,7 @@ internal sealed class CoreAudioService : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-        }
 
-        // Restore any solo-muted apps on shutdown
-        try { ApplySoloMode(false, new HashSet<int>()); } catch { }
-
-        lock (_lock)
-        {
             if (_notificationEnumerator != 0 && _ccw != null)
             {
                 try

@@ -339,7 +339,7 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
     /// with a status badge, or the Cueway Concept #4 active-tab emblem when idle or iconless.
     /// Caller owns the returned HICON and must release it with Win32.DestroyIcon.
     /// </summary>
-    public nint CreateCompositeIcon(string? appKey, string? exePath, bool isPlaying, bool isMuted, bool soloMode, int size = 32)
+    public nint CreateCompositeIcon(string? appKey, string? exePath, bool isPlaying, bool isMuted, int size = 32)
     {
         int stride = size * 4;
         byte* pixels = (byte*)NativeMemory.AllocZeroed((nuint)(stride * size));
@@ -370,11 +370,6 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
                 {
                     badgeRgb = Theme.Red;
                     frameBorderRgb = Theme.Red;
-                }
-                else if (soloMode && isPlaying)
-                {
-                    badgeRgb = Theme.Amber;
-                    frameBorderRgb = Theme.Amber;
                 }
                 else if (isPlaying)
                 {
@@ -418,7 +413,7 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
                     GdiPlus.GdipDrawImageRectI(graphics, appBitmap, 0, 0, size, size);
                     if (isMuted || isPlaying)
                     {
-                        uint badgeRgb = isMuted ? Theme.Red : (soloMode ? Theme.Amber : Theme.Green);
+                        uint badgeRgb = isMuted ? Theme.Red : Theme.Green;
                         float badgeD = 8.5f * scale;
                         float ringPad = 1.5f * scale;
                         float bx = size - badgeD - 1.0f * scale;
@@ -431,7 +426,7 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
                 {
                     uint stripRgb = isMuted
                         ? Theme.Red
-                        : (soloMode && isPlaying ? Theme.Amber : (isPlaying ? Theme.Green : 0xFF6B2C));
+                        : (isPlaying ? Theme.Green : 0xFF6B2C);
                     DrawConcept4Emblem(graphics, size, stripRgb);
                 }
             }

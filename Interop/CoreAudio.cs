@@ -31,6 +31,12 @@ internal static unsafe partial class CoreAudio
     public static readonly Guid IID_IPolicyConfig = new("F8679F50-850A-41CF-9C72-430F290290C8");
     public static readonly Guid IID_IPolicyConfigVista = new("568B9108-44BF-40B4-9006-86AFE5B5A620");
 
+    public const string AudioPolicyConfigClassName = "Windows.Media.Internal.AudioPolicyConfig";
+    public const string MmDevApiPrefix = @"\\?\SWD#MMDEVAPI#";
+    public const string DevInterfaceAudioRenderSuffix = "#{e6327cad-dcec-4949-ae8a-991e976a79d2}";
+    public static readonly Guid IID_IAudioPolicyConfigFactory_21H2 = new("AB3D4648-E242-459F-B02F-541C70306324");
+    public static readonly Guid IID_IAudioPolicyConfigFactory_Downlevel = new("2A59116D-6C4F-45E0-A74F-707E3FEF9258");
+
     public static readonly PROPERTYKEY PKEY_Device_FriendlyName = new()
     {
         fmtid = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"),
@@ -218,6 +224,110 @@ internal static unsafe partial class CoreAudio
         finally
         {
             Release(policy);
+        }
+    }
+
+    public static bool TryCreateAudioPolicyConfigFactory(out nint factory)
+    {
+        factory = 0;
+        if (Win32.WindowsCreateString(AudioPolicyConfigClassName, (uint)AudioPolicyConfigClassName.Length, out nint classHStr) != 0 || classHStr == 0)
+            return false;
+
+        try
+        {
+            Guid iid21h2 = IID_IAudioPolicyConfigFactory_21H2;
+            int hr = Win32.RoGetActivationFactory(classHStr, &iid21h2, out factory);
+            if (hr == 0 && factory != 0)
+                return true;
+
+            Guid iidDownlevel = IID_IAudioPolicyConfigFactory_Downlevel;
+            hr = Win32.RoGetActivationFactory(classHStr, &iidDownlevel, out factory);
+            if (hr == 0 && factory != 0)
+                return true;
+
+            factory = 0;
+            return false;
+        }
+        finally
+        {
+            Win32.WindowsDeleteString(classHStr);
+        }
+    }
+
+    public static bool AudioPolicyConfig_SetPersistedDefaultAudioEndpoint(nint factory, uint processId, string? rawDeviceId)
+    {
+        if (factory == 0 || processId == 0)
+            return false;
+
+        nint devHStr = 0;
+        if (!string.IsNullOrWhiteSpace(rawDeviceId))
+        {
+            string packed = $"{MmDevApiPrefix}{rawDeviceId.Trim()}{DevInterfaceAudioRenderSuffix}";
+            if (Win32.WindowsCreateString(packed, (uint)packed.Length, out devHStr) != 0)
+                devHStr = 0;
+        }
+
+        try
+        {
+            nint* vtbl = *(nint**)factory;
+            // vtable: 0..2 IUnknown, 3..5 IInspectable, 6..24 19 factory methods, 25 SetPersistedDefaultAudioEndpoint
+            var setEndpoint = (delegate* unmanaged[Stdcall]<nint, uint, int, int, nint, int>)vtbl[25];
+            int hrMultimedia = setEndpoint(factory, processId, eRender, eMultimedia, devHStr);
+            int hrConsole = setEndpoint(factory, processId, eRender, eConsole, devHStr);
+            return hrMultimedia == 0 || hrConsole == 0;
+        }
+        finally
+        {
+            if (devHStr != 0)
+                Win32.WindowsDeleteString(devHStr);
+        }
+    }
+
+    public static string? AudioPolicyConfig_GetPersistedDefaultAudioEndpoint(nint factory, uint processId)
+    {
+        if (factory == 0 || processId == 0)
+            return null;
+
+        nint* vtbl = *(nint**)factory;
+        // vtable: 26 GetPersistedDefaultAudioEndpoint
+        var getEndpoint = (delegate* unmanaged[Stdcall]<nint, uint, int, int, nint*, int>)vtbl[26];
+
+        nint devHStr = 0;
+        try
+        {
+            int hr = getEndpoint(factory, processId, eRender, eMultimedia, &devHStr);
+            if (hr != 0 || devHStr == 0)
+            {
+                if (devHStr != 0)
+                {
+                    Win32.WindowsDeleteString(devHStr);
+                    devHStr = 0;
+                }
+                hr = getEndpoint(factory, processId, eRender, eConsole, &devHStr);
+            }
+
+            if (hr != 0 || devHStr == 0)
+                return null;
+
+            nint buf = Win32.WindowsGetStringRawBuffer(devHStr, out uint len);
+            if (buf == 0 || len == 0)
+                return null;
+
+            string raw = Marshal.PtrToStringUni(buf, (int)len).Trim();
+            if (string.IsNullOrEmpty(raw))
+                return null;
+
+            if (raw.StartsWith(MmDevApiPrefix, StringComparison.OrdinalIgnoreCase))
+                raw = raw[MmDevApiPrefix.Length..];
+            if (raw.EndsWith(DevInterfaceAudioRenderSuffix, StringComparison.OrdinalIgnoreCase))
+                raw = raw[..^DevInterfaceAudioRenderSuffix.Length];
+
+            return string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
+        }
+        finally
+        {
+            if (devHStr != 0)
+                Win32.WindowsDeleteString(devHStr);
         }
     }
 

@@ -33,7 +33,8 @@ internal static unsafe class ProcessResolver
         "waterfox",
         "arc",
         "thorium",
-        "chromium"
+        "chromium",
+        "helium"
     };
 
     private static readonly HashSet<string> GeckoBrowserExeNames = new(StringComparer.OrdinalIgnoreCase)
@@ -308,6 +309,25 @@ internal static unsafe class ProcessResolver
         return BrowserExeNames.Contains(normalized);
     }
 
+    public static string? ResolveBrowserDisplayName(MediaSessionInfo session)
+    {
+        string? browserKey = BrowserSiteScanner.ExtractBrowserKeyFromAppKey(session.AppKey);
+        if (string.IsNullOrEmpty(browserKey) && !string.IsNullOrWhiteSpace(session.ExePath))
+        {
+            string exeKey = NormalizeExeKey(session.ExePath);
+            if (IsBrowserProcessName(exeKey))
+                browserKey = exeKey;
+        }
+        if (string.IsNullOrEmpty(browserKey) && session.IsBrowser)
+        {
+            browserKey = NormalizeExeKey(session.AppKey);
+        }
+        if (string.IsNullOrEmpty(browserKey))
+            return null;
+
+        return FormatDisplayName(browserKey, session.ExePath);
+    }
+
     public static string NormalizeExeKey(string exeOrName)
     {
         string file = Path.GetFileNameWithoutExtension(exeOrName.Trim());
@@ -352,11 +372,16 @@ internal static unsafe class ProcessResolver
             "chrome" => "Google Chrome",
             "msedge" => "Microsoft Edge",
             "brave" => "Brave",
-            "opera" or "opera_gx" => "Opera",
+            "opera" => "Opera",
+            "opera_gx" => "Opera GX",
             "vivaldi" => "Vivaldi",
             "floorp" => "Floorp",
             "librewolf" => "LibreWolf",
             "waterfox" => "Waterfox",
+            "arc" => "Arc",
+            "thorium" => "Thorium",
+            "chromium" => "Chromium",
+            "helium" => "Helium",
             "spotify" => "Spotify",
             "mpv" => "mpv",
             "mpvnet" => "mpv.net",

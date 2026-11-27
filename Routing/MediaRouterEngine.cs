@@ -25,14 +25,11 @@ internal sealed class RouterStateSnapshot
     public required MediaSessionInfo? SecondaryTarget { get; init; }
     public required List<MediaSessionInfo> Sessions { get; init; }
     public required bool IsManualLock { get; init; }
-    public required bool SoloModeEnabled { get; init; }
     public required bool GameGuardActive { get; init; }
 }
 
 internal sealed class MediaRouterEngine : IDisposable
 {
-    private static readonly HashSet<int> EmptyPidSet = [];
-
     private readonly StateStore _stateStore;
     private readonly CoreAudioService _audioService;
     private readonly MediaSessionManager _sessionManager;
@@ -45,7 +42,6 @@ internal sealed class MediaRouterEngine : IDisposable
     private string? _lastPlayedAppKey;
     private MediaSessionInfo? _lastPlayedSnapshot;
     private bool _gameGuardActive;
-    private bool _soloWasActive;
 
     private sealed record DuckedEntry(float OriginalVolume, string TriggerSessionId, SessionSource Source);
 
@@ -62,9 +58,11 @@ internal sealed class MediaRouterEngine : IDisposable
     private long _sleepTimerEndTick;
     private bool _sleepFadeActive;
     private readonly Dictionary<string, (float OriginalVolume, SessionSource Source)> _sleepFadedSessions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string?> _sessionOutputDeviceIds = new(StringComparer.Ordinal);
 
     public bool IsSleepTimerActive { get { lock (_lock) return _sleepTimerEndTick > 0; } }
     public bool IsMicDuckingActive { get { lock (_lock) return _micDucked.Count > 0; } }
+    public bool IsPerAppAudioRoutingSupported => _audioService.IsPerAppAudioRoutingSupported();
 
     public event Action? SleepTimerChanged;
 
@@ -77,7 +75,6 @@ internal sealed class MediaRouterEngine : IDisposable
         SecondaryTarget = null,
         Sessions = [],
         IsManualLock = false,
-        SoloModeEnabled = false,
         GameGuardActive = false
     };
 
@@ -116,6 +113,26 @@ internal sealed class MediaRouterEngine : IDisposable
         var settings = _stateStore.GetSettingsSnapshot();
         bool gameActive = settings.GameFullscreenGuardEnabled && FullscreenGameDetector.IsFullscreenGameActive(settings);
         bool micActive = settings.MicDuckingEnabled && _audioService.IsAnyMicrophoneSessionActive();
+
+        Dictionary<int, string?>? appOutMap = null;
+        string? defaultOutId = null;
+        if (sessions.Count > 0 && _audioService.IsPerAppAudioRoutingSupported())
+        {
+            var allPids = new List<int>(sessions.Count);
+            foreach (var s in sessions)
+            {
+                foreach (int p in s.ProcessIds)
+                {
+                    if (p > 0) allPids.Add(p);
+                }
+            }
+            if (allPids.Count > 0)
+                appOutMap = _audioService.GetAppOutputDeviceIds(allPids);
+        }
+        if (sessions.Count > 1 && (settings.AutoDuckingEnabled || settings.AutoPauseEnabled))
+        {
+            defaultOutId = _audioService.GetDefaultOutputDeviceId();
+        }
 
         List<string> toAutoPause = [];
         List<string> toAutoResume = [];
@@ -227,20 +244,38 @@ internal sealed class MediaRouterEngine : IDisposable
                     nowPlayingSessions.Add(s);
             }
 
-            // Auto-Pause / Auto-Resume engine
+            _sessionOutputDeviceIds.Clear();
+            if (appOutMap != null)
+            {
+                foreach (var s in sessions)
+                {
+                    string? assigned = null;
+                    foreach (int p in s.ProcessIds)
+                    {
+                        if (appOutMap.TryGetValue(p, out string? devId) && !string.IsNullOrWhiteSpace(devId))
+                        {
+                            assigned = devId;
+                            break;
+                        }
+                    }
+                    _sessionOutputDeviceIds[s.SessionId] = assigned;
+                }
+            }
+
+            // Auto-Pause / Auto-Resume engine (scoped to same effective output device)
             if (settings.AutoPauseEnabled && lockedSession == null)
             {
-                EvaluateAutoPauseLocked(sessions, activeTarget, toAutoPause, toAutoResume, out autoPauseTriggerId);
+                EvaluateAutoPauseLocked(sessions, activeTarget, defaultOutId, toAutoPause, toAutoResume, out autoPauseTriggerId);
             }
             else if (!settings.AutoPauseEnabled)
             {
                 _autoPausedBy.Clear();
             }
 
-            // Auto-Ducking engine
+            // Auto-Ducking engine (scoped to same effective output device)
             if (settings.AutoDuckingEnabled && lockedSession == null)
             {
-                EvaluateAutoDuckingLocked(sessions, toAutoPause, settings.DuckVolumePercent / 100f, toDuck, toUnduck);
+                EvaluateAutoDuckingLocked(sessions, toAutoPause, defaultOutId, settings.DuckVolumePercent / 100f, toDuck, toUnduck);
             }
             else if (!settings.AutoDuckingEnabled && _autoDucked.Count > 0)
             {
@@ -300,14 +335,10 @@ internal sealed class MediaRouterEngine : IDisposable
                 SecondaryTarget = secondaryTarget,
                 Sessions = sessions,
                 IsManualLock = lockedSession != null,
-                SoloModeEnabled = settings.SoloModeEnabled,
                 GameGuardActive = gameActive
             };
             _snapshot = nextSnapshot;
         }
-
-        // Apply Solo Mode synchronization outside lock
-        SyncSoloMode(settings.SoloModeEnabled, nextSnapshot.ActiveTarget);
 
         // Execute auto-pause / auto-resume commands asynchronously
         if (toAutoPause.Count > 0 || toAutoResume.Count > 0)
@@ -343,7 +374,6 @@ internal sealed class MediaRouterEngine : IDisposable
             return true;
         if (a.IsManualLock != b.IsManualLock ||
             a.IsNowPlayingClosed != b.IsNowPlayingClosed ||
-            a.SoloModeEnabled != b.SoloModeEnabled ||
             a.GameGuardActive != b.GameGuardActive)
             return false;
 
@@ -580,9 +610,27 @@ internal sealed class MediaRouterEngine : IDisposable
         return false;
     }
 
+    private string? ResolveEffectiveOutputDeviceLocked(string sessionId, string? defaultOutId)
+    {
+        if (_sessionOutputDeviceIds.TryGetValue(sessionId, out string? assigned) &&
+            !string.IsNullOrWhiteSpace(assigned))
+        {
+            return assigned;
+        }
+        return defaultOutId;
+    }
+
+    private bool AreOnSameOutputDeviceLocked(string sessionA, string sessionB, string? defaultOutId)
+    {
+        string? devA = ResolveEffectiveOutputDeviceLocked(sessionA, defaultOutId);
+        string? devB = ResolveEffectiveOutputDeviceLocked(sessionB, defaultOutId);
+        return string.Equals(devA ?? string.Empty, devB ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+    }
+
     private void EvaluateAutoPauseLocked(
         List<MediaSessionInfo> sessions,
         MediaSessionInfo? activeTarget,
+        string? defaultOutId,
         List<string> toAutoPause,
         List<string> toAutoResume,
         out string? triggerId)
@@ -601,7 +649,7 @@ internal sealed class MediaRouterEngine : IDisposable
         foreach (string k in staleKeys)
             _autoPausedBy.Remove(k);
 
-        // 1. Check if any session newly started effectively playing and holds higher priority than other playing sessions
+        // 1. Check if any session newly started effectively playing and holds higher priority than other playing sessions on the same output device
         foreach (var candidate in sessions)
         {
             if (_suppressNextTransition.Remove(candidate.SessionId))
@@ -616,6 +664,8 @@ internal sealed class MediaRouterEngine : IDisposable
                     if (string.Equals(other.SessionId, candidate.SessionId, StringComparison.Ordinal))
                         continue;
                     if (!other.IsEffectivelyPlaying)
+                        continue;
+                    if (!AreOnSameOutputDeviceLocked(candidate.SessionId, other.SessionId, defaultOutId))
                         continue;
 
                     int otherPrio = _stateStore.GetPriorityIndex(other.AppKey);
@@ -633,7 +683,7 @@ internal sealed class MediaRouterEngine : IDisposable
             }
         }
 
-        // 2. Check if any trigger session stopped playing or disappeared -> resume auto-paused sessions
+        // 2. Check if any trigger session stopped playing, disappeared, or moved to another output -> resume auto-paused sessions
         if (_autoPausedBy.Count > 0)
         {
             var resumable = new List<string>();
@@ -642,17 +692,13 @@ internal sealed class MediaRouterEngine : IDisposable
                 string pausedId = kv.Key;
                 string trigId = kv.Value;
 
-                bool triggerStillPlaying = sessionMap.TryGetValue(trigId, out var trigSession) && trigSession.IsEffectivelyPlaying;
-                if (!triggerStillPlaying)
+                bool triggerStillPlayingSameOutput =
+                    sessionMap.TryGetValue(trigId, out var trigSession) &&
+                    trigSession.IsEffectivelyPlaying &&
+                    AreOnSameOutputDeviceLocked(pausedId, trigId, defaultOutId);
+                if (!triggerStillPlayingSameOutput)
                 {
-                    if (sessionMap.TryGetValue(pausedId, out var pausedSession) && !pausedSession.IsPlaying)
-                    {
-                        resumable.Add(pausedId);
-                    }
-                    else
-                    {
-                        resumable.Add(pausedId); // remove entry anyway
-                    }
+                    resumable.Add(pausedId);
                 }
             }
 
@@ -686,6 +732,7 @@ internal sealed class MediaRouterEngine : IDisposable
     private void EvaluateAutoDuckingLocked(
         List<MediaSessionInfo> sessions,
         List<string> toAutoPause,
+        string? defaultOutId,
         float duckTarget,
         List<(string SessionId, float TargetVol, SessionSource Source)> toDuck,
         List<(string SessionId, float RestoreVol, SessionSource Source)> toUnduck)
@@ -705,7 +752,7 @@ internal sealed class MediaRouterEngine : IDisposable
             ? new HashSet<string>(toAutoPause, StringComparer.Ordinal)
             : null;
 
-        // Duck other effectively playing sessions when a higher/new media source starts playing
+        // Duck other effectively playing sessions on the same output device when a new media source starts playing
         foreach (var candidate in sessions)
         {
             if (candidate.IsPassiveTab)
@@ -723,6 +770,8 @@ internal sealed class MediaRouterEngine : IDisposable
                         continue;
                     if (!other.IsEffectivelyPlaying)
                         continue;
+                    if (!AreOnSameOutputDeviceLocked(candidate.SessionId, other.SessionId, defaultOutId))
+                        continue;
                     if (pendingPauseSet != null && pendingPauseSet.Contains(other.SessionId))
                         continue;
                     if (_autoPausedBy.ContainsKey(other.SessionId))
@@ -738,15 +787,17 @@ internal sealed class MediaRouterEngine : IDisposable
             }
         }
 
-        // Restore volume once the triggering session stops playing or disappears
+        // Restore volume once the triggering session stops playing, disappears, or moves to a different output device
         if (_autoDucked.Count > 0)
         {
             var restorable = new List<string>();
             foreach (var kv in _autoDucked)
             {
-                bool triggerStillPlaying = sessionMap.TryGetValue(kv.Value.TriggerSessionId, out var trig) &&
-                                           trig.IsEffectivelyPlaying;
-                if (!triggerStillPlaying)
+                bool triggerStillPlayingSameOutput =
+                    sessionMap.TryGetValue(kv.Value.TriggerSessionId, out var trig) &&
+                    trig.IsEffectivelyPlaying &&
+                    AreOnSameOutputDeviceLocked(kv.Key, kv.Value.TriggerSessionId, defaultOutId);
+                if (!triggerStillPlayingSameOutput)
                 {
                     restorable.Add(kv.Key);
                 }
@@ -887,23 +938,6 @@ internal sealed class MediaRouterEngine : IDisposable
         }
     }
 
-    private void SyncSoloMode(bool soloEnabled, MediaSessionInfo? activeTarget)
-    {
-        if (!soloEnabled || activeTarget == null)
-        {
-            if (_soloWasActive)
-            {
-                _audioService.ApplySoloMode(false, EmptyPidSet);
-                _soloWasActive = false;
-            }
-            return;
-        }
-
-        _soloWasActive = true;
-        var allowed = new HashSet<int>(activeTarget.ProcessIds);
-        _audioService.ApplySoloMode(true, allowed);
-    }
-
     private void OnAudioOutputDeviceChanged(string reason)
     {
         var settings = _stateStore.GetSettingsSnapshot();
@@ -1028,25 +1062,6 @@ internal sealed class MediaRouterEngine : IDisposable
 
         _stateStore.RecordDiscoveredApp(playing.AppKey, playing.DisplayName, playing.ExePath);
         PromoteAppToTop(playing.AppKey);
-    }
-
-    public void ToggleSoloMode()
-    {
-        bool nextSolo = false;
-        _stateStore.UpdateSettings(s =>
-        {
-            s.SoloModeEnabled = !s.SoloModeEnabled;
-            nextSolo = s.SoloModeEnabled;
-        });
-
-        var snap = GetSnapshot();
-        NotifyOsd(
-            Strings.OsdSoloTitle,
-            nextSolo
-                ? Strings.OsdSoloEnabled(snap.ActiveTarget?.DisplayName ?? Strings.OsdSoloNoTarget)
-                : Strings.OsdSoloDisabled,
-            snap.ActiveTarget?.ExePath,
-            appKey: snap.ActiveTarget?.AppKey);
     }
 
     public bool IsActiveTargetVideoCapable()
@@ -1310,6 +1325,55 @@ internal sealed class MediaRouterEngine : IDisposable
         {
             NotifyOsd(Strings.OsdAudioDeviceTitle, next.Value.Name, null);
         }
+    }
+
+    public string? GetSessionOutputDeviceId(string sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId))
+            return null;
+        lock (_lock)
+        {
+            return _sessionOutputDeviceIds.TryGetValue(sessionId, out string? id) ? id : null;
+        }
+    }
+
+    public bool SetSessionOutputDevice(string sessionId, string? deviceId, string? deviceName = null)
+    {
+        var snap = GetSnapshot();
+        var session = snap.Sessions.Find(s => string.Equals(s.SessionId, sessionId, StringComparison.Ordinal));
+        if (session == null || session.ProcessIds.Length == 0)
+            return false;
+
+        string? normalizedId = string.IsNullOrWhiteSpace(deviceId) ? null : deviceId.Trim();
+        if (string.Equals(GetSessionOutputDeviceId(sessionId), normalizedId, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (!_audioService.SetAppOutputDevice(session.ProcessIds, normalizedId))
+            return false;
+
+        var changedPids = new HashSet<int>(session.ProcessIds);
+        RouterStateSnapshot updatedSnap;
+        lock (_lock)
+        {
+            foreach (var s in _snapshot.Sessions)
+            {
+                foreach (int p in s.ProcessIds)
+                {
+                    if (changedPids.Contains(p))
+                    {
+                        _sessionOutputDeviceIds[s.SessionId] = normalizedId;
+                        break;
+                    }
+                }
+            }
+            updatedSnap = _snapshot;
+        }
+
+        StateChanged?.Invoke(updatedSnap);
+        Evaluate(forceNotify: false);
+        _ = _sessionManager.RefreshAsync();
+        NotifyOsd(session.DisplayName, deviceName ?? Strings.AudioDeviceSystemDefault, session.ExePath, appKey: session.AppKey);
+        return true;
     }
 
     public void StartSleepTimer(int minutes)

@@ -2,7 +2,7 @@
 
 #define MyAppName "Cueway"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.3.0"
+  #define MyAppVersion "1.4.0"
 #endif
 #define MyAppPublisher "Cueway"
 #define MyAppExeName "Cueway.exe"
@@ -94,7 +94,7 @@ var
   ResultCode: Integer;
 begin
   // Ask any active Cueway or legacy WinMediaRouter instance to shut down gracefully
-  // (restores Solo-muted apps and cleans up its system tray icon).
+  // (restores ducked audio and cleans up its system tray icon).
   Wnd := FindWindowByClassName('Cueway_MainWindow');
   if Wnd <> 0 then
   begin

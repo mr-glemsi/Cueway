@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Cueway.Input;
 using Cueway.Localization;
@@ -8,7 +9,6 @@ internal enum GlobalHotkeySlot
 {
     ToggleWindow = 0,
     ManualLock = 1,
-    SoloMode = 2,
     PlayPause = 3,
     PromotePlaying = 4,
     VolumeUp = 5,
@@ -17,16 +17,21 @@ internal enum GlobalHotkeySlot
     CycleAudioDevice = 8
 }
 
-internal sealed class StateStore
+internal sealed class StateStore : IDisposable
 {
+    private const int DEFERRED_SAVE_DELAY_MS = 800;
+
     private readonly object _lock = new();
     private readonly string _filePath;
     private AppState _state;
     private volatile AppSettings _cachedSettingsSnapshot = new();
     private volatile Dictionary<string, int> _priorityIndexCache = new(StringComparer.OrdinalIgnoreCase);
-    private volatile Dictionary<string, (string DisplayName, string ExePath, long LastSeenTick)> _discoveredFastCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, (string DisplayName, string ExePath, long LastSeenTick)> _discoveredFastCache = new(StringComparer.OrdinalIgnoreCase);
     private volatile HashSet<string> _ignoredAppKeysCache = new(StringComparer.OrdinalIgnoreCase);
     private volatile Dictionary<string, int> _savedSiteVolumesCache = new(StringComparer.OrdinalIgnoreCase);
+    private System.Threading.Timer? _deferredSaveTimer;
+    private bool _deferredSavePending;
+    private bool _disposed;
 
     public event Action? StateChanged;
 
@@ -134,7 +139,6 @@ internal sealed class StateStore
         s.LongPressThresholdMs = Math.Clamp(s.LongPressThresholdMs, 150, 1500);
         s.HotkeyToggleWindow = HotkeyHelper.Normalize(s.HotkeyToggleWindow);
         s.HotkeyManualLock = HotkeyHelper.Normalize(s.HotkeyManualLock);
-        s.HotkeySoloMode = HotkeyHelper.Normalize(s.HotkeySoloMode);
         s.HotkeyPlayPause = HotkeyHelper.Normalize(s.HotkeyPlayPause, allowAnySingleKey: true);
         s.HotkeyPromotePlaying = HotkeyHelper.Normalize(s.HotkeyPromotePlaying, allowAnySingleKey: true);
         s.HotkeyVolumeUp = HotkeyHelper.Normalize(s.HotkeyVolumeUp);
@@ -151,16 +155,74 @@ internal sealed class StateStore
 
     private void SaveInternal(AppState state)
     {
+        _deferredSavePending = false;
         try
         {
-            string json = JsonSerializer.Serialize(state, AppJsonContext.Default.AppState);
-            string tempPath = _filePath + ".tmp";
-            File.WriteAllText(tempPath, json);
-            File.Move(tempPath, _filePath, overwrite: true);
+            _deferredSaveTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        string json = JsonSerializer.Serialize(state, AppJsonContext.Default.AppState);
+        string tempPath = $"{_filePath}.{Environment.ProcessId}.tmp";
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            try
+            {
+                File.WriteAllText(tempPath, json);
+                File.Move(tempPath, _filePath, overwrite: true);
+                return;
+            }
+            catch (IOException) when (attempt < 3)
+            {
+                Thread.Sleep(25);
+            }
+            catch
+            {
+                break;
+            }
+        }
+        try
+        {
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
         }
         catch
         {
-            // Ignore transient IO failures
+            // Ignore cleanup failure
+        }
+    }
+
+    private void ScheduleDeferredSaveLocked()
+    {
+        _deferredSavePending = true;
+        if (_disposed)
+        {
+            SaveInternal(_state);
+            return;
+        }
+
+        _deferredSaveTimer ??= new System.Threading.Timer(OnDeferredSaveTimer, null, Timeout.Infinite, Timeout.Infinite);
+        try
+        {
+            _deferredSaveTimer.Change(DEFERRED_SAVE_DELAY_MS, Timeout.Infinite);
+        }
+        catch (ObjectDisposedException)
+        {
+            SaveInternal(_state);
+        }
+    }
+
+    private void OnDeferredSaveTimer(object? _) => FlushPendingSave();
+
+    public void FlushPendingSave()
+    {
+        lock (_lock)
+        {
+            if (!_deferredSavePending)
+                return;
+            SaveInternal(_state);
         }
     }
 
@@ -185,15 +247,15 @@ internal sealed class StateStore
             MicDuckingEnabled = s.MicDuckingEnabled,
             DuckVolumePercent = s.DuckVolumePercent,
             RememberSiteVolumeEnabled = s.RememberSiteVolumeEnabled,
+            SuppressBrowserOutputNotice = s.SuppressBrowserOutputNotice,
+            ReducedAnimations = s.ReducedAnimations,
             HeadphoneGuardEnabled = s.HeadphoneGuardEnabled,
-            SoloModeEnabled = s.SoloModeEnabled,
             GameFullscreenGuardEnabled = s.GameFullscreenGuardEnabled,
             TimelineScrubbingEnabled = s.TimelineScrubbingEnabled,
             SeekSeconds = s.SeekSeconds,
             LongPressThresholdMs = s.LongPressThresholdMs,
             HotkeyToggleWindow = s.HotkeyToggleWindow,
             HotkeyManualLock = s.HotkeyManualLock,
-            HotkeySoloMode = s.HotkeySoloMode,
             HotkeyPlayPause = s.HotkeyPlayPause,
             HotkeyPromotePlaying = s.HotkeyPromotePlaying,
             HotkeyVolumeUp = s.HotkeyVolumeUp,
@@ -225,16 +287,15 @@ internal sealed class StateStore
 
         long nowTick = Environment.TickCount64;
         var prio = new Dictionary<string, int>(_state.PriorityApps.Count, StringComparer.OrdinalIgnoreCase);
-        var disc = new Dictionary<string, (string DisplayName, string ExePath, long LastSeenTick)>(_state.PriorityApps.Count, StringComparer.OrdinalIgnoreCase);
+        _discoveredFastCache.Clear();
         for (int i = 0; i < _state.PriorityApps.Count; i++)
         {
             var app = _state.PriorityApps[i];
             if (!prio.ContainsKey(app.AppKey))
                 prio[app.AppKey] = i;
-            disc[app.AppKey] = (app.DisplayName, app.ExePath, nowTick);
+            _discoveredFastCache[app.AppKey] = (app.DisplayName, app.ExePath, nowTick);
         }
         _priorityIndexCache = prio;
-        _discoveredFastCache = disc;
     }
 
     public AppSettings GetSettingsSnapshot() => _cachedSettingsSnapshot;
@@ -295,7 +356,6 @@ internal sealed class StateStore
             NormalizeSettings(_state.Settings);
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeyToggleWindow, exceptGlobalSlot: GlobalHotkeySlot.ToggleWindow);
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeyManualLock, exceptGlobalSlot: GlobalHotkeySlot.ManualLock);
-            ClearDuplicateHotkeyLocked(_state.Settings.HotkeySoloMode, exceptGlobalSlot: GlobalHotkeySlot.SoloMode);
             ClearDuplicateHotkeyLocked(_state.Settings.HotkeyPromotePlaying, exceptGlobalSlot: GlobalHotkeySlot.PromotePlaying);
             UI.Theme.SetCustomThemes(_state.Settings.CustomThemes);
             UI.Theme.SetTheme(_state.Settings.Theme);
@@ -339,9 +399,15 @@ internal sealed class StateStore
                     changed = true;
                 }
                 existing.LastSeenUtc = DateTimeOffset.UtcNow;
-                RebuildCachesLocked();
                 if (changed)
+                {
+                    RebuildCachesLocked();
                     SaveInternal(_state);
+                }
+                else
+                {
+                    _discoveredFastCache[appKey] = (existing.DisplayName, existing.ExePath, Environment.TickCount64);
+                }
             }
             else
             {
@@ -430,9 +496,6 @@ internal sealed class StateStore
                 case GlobalHotkeySlot.ManualLock:
                     _state.Settings.HotkeyManualLock = normalized;
                     break;
-                case GlobalHotkeySlot.SoloMode:
-                    _state.Settings.HotkeySoloMode = normalized;
-                    break;
                 case GlobalHotkeySlot.PlayPause:
                     _state.Settings.HotkeyPlayPause = normalized;
                     break;
@@ -509,10 +572,6 @@ internal sealed class StateStore
         if (exceptGlobalSlot != GlobalHotkeySlot.ManualLock &&
             string.Equals(_state.Settings.HotkeyManualLock, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
             _state.Settings.HotkeyManualLock = string.Empty;
-
-        if (exceptGlobalSlot != GlobalHotkeySlot.SoloMode &&
-            string.Equals(_state.Settings.HotkeySoloMode, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
-            _state.Settings.HotkeySoloMode = string.Empty;
 
         if (exceptGlobalSlot != GlobalHotkeySlot.PlayPause &&
             string.Equals(_state.Settings.HotkeyPlayPause, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
@@ -792,7 +851,7 @@ internal sealed class StateStore
                 });
             }
             RebuildCachesLocked();
-            SaveInternal(_state);
+            ScheduleDeferredSaveLocked();
         }
         StateChanged?.Invoke();
     }
@@ -906,5 +965,19 @@ internal sealed class StateStore
         }
         if (list.Count > 20)
             list.RemoveRange(0, list.Count - 20);
+    }
+
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            if (_deferredSavePending)
+                SaveInternal(_state);
+            _deferredSaveTimer?.Dispose();
+            _deferredSaveTimer = null;
+        }
     }
 }

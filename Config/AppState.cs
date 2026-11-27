@@ -18,15 +18,15 @@ public sealed class AppSettings
     public bool MicDuckingEnabled { get; set; } = false;
     public int DuckVolumePercent { get; set; } = 25;
     public bool RememberSiteVolumeEnabled { get; set; } = true;
+    public bool SuppressBrowserOutputNotice { get; set; } = false;
+    public bool ReducedAnimations { get; set; } = false;
     public bool HeadphoneGuardEnabled { get; set; } = false;
-    public bool SoloModeEnabled { get; set; } = false;
     public bool GameFullscreenGuardEnabled { get; set; } = false;
     public bool TimelineScrubbingEnabled { get; set; } = true;
     public int SeekSeconds { get; set; } = 10;
     public int LongPressThresholdMs { get; set; } = 400;
     public string HotkeyToggleWindow { get; set; } = string.Empty;
     public string HotkeyManualLock { get; set; } = string.Empty;
-    public string HotkeySoloMode { get; set; } = string.Empty;
     public string HotkeyPlayPause { get; set; } = string.Empty;
     public string HotkeyPromotePlaying { get; set; } = string.Empty;
     public string HotkeyVolumeUp { get; set; } = string.Empty;

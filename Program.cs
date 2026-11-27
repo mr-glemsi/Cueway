@@ -46,7 +46,7 @@ internal static unsafe class Program
 
         try
         {
-            var stateStore = new StateStore();
+            using var stateStore = new StateStore();
             var startupService = new StartupService();
             using var updateService = new AppUpdateService();
             using var audioService = new CoreAudioService();
@@ -155,13 +155,16 @@ internal static unsafe class Program
             flyout.OpenDashboardRequested += () => mainWindow.ShowAndFocus(settingsTab: false);
             flyout.OpenSettingsRequested += () => mainWindow.ShowAndFocus(settingsTab: true);
             tray.ToggleManualLockRequested += () => engine.ToggleManualLockOnActiveOrSelected();
-            tray.ToggleSoloModeRequested += () => engine.ToggleSoloMode();
             tray.SleepTimerSelected += mins => engine.StartSleepTimer(mins);
             tray.SleepTimerCancelRequested += () => engine.CancelSleepTimer();
             tray.ExitRequested += ShutdownApp;
 
             stateStore.StateChanged += () => mainWindow.BeginInvoke(() => UpdatePollTimer());
-            audioService.OutputDevicesChanged += () => mainWindow.BeginInvoke(() => flyout.RefreshAudioDevices());
+            audioService.OutputDevicesChanged += () => mainWindow.BeginInvoke(() =>
+            {
+                flyout.RefreshAudioDevices();
+                mainWindow.RefreshOutputDevices();
+            });
             engine.SleepTimerChanged += () => mainWindow.BeginInvoke(() =>
             {
                 bool active = engine.IsSleepTimerActive;
@@ -174,6 +177,7 @@ internal static unsafe class Program
                         Win32.KillTimer(mainWindow.Handle, TIMER_SLEEP_TICK);
                 }
                 tray.Update(engine.GetSnapshot());
+                mainWindow.RefreshVisuals();
             });
 
             engine.StateChanged += snap => mainWindow.BeginInvoke(() =>
@@ -194,6 +198,7 @@ internal static unsafe class Program
                     mainWindow.BeginInvoke(() =>
                     {
                         tray.ForceRefresh(engine.GetSnapshot());
+                        mainWindow.InvalidateIconCache();
                         mainWindow.RefreshVisuals();
                         flyout.RefreshVisuals();
                     });
@@ -293,7 +298,7 @@ internal static unsafe class Program
         if (others.Count == 0)
             return;
 
-        // Ask any previous Cueway (or legacy WinMediaRouter) window to exit gracefully (restores Solo audio & removes tray icon)
+        // Ask any previous Cueway (or legacy WinMediaRouter) window to exit gracefully (restores ducked audio & removes tray icon)
         Win32.EnumWindows(&NotifyOldWindowProc, 0);
 
         var deadline = Environment.TickCount64 + 1200;

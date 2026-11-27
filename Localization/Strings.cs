@@ -26,29 +26,12 @@ internal static class Strings
 
     public static AppLanguage Current => (AppLanguage)_current;
 
-    public static string CurrentCode => Current switch
-    {
-        AppLanguage.En => "en",
-        AppLanguage.Zh => "zh",
-        AppLanguage.Es => "es",
-        AppLanguage.Ru => "ru",
-        AppLanguage.De => "de",
-        AppLanguage.Fr => "fr",
-        AppLanguage.Ja => "ja",
-        AppLanguage.Ko => "ko",
-        AppLanguage.Pt => "pt",
-        AppLanguage.It => "it",
-        AppLanguage.Pl => "pl",
-        AppLanguage.Fi => "fi",
-        _ => "tr"
-    };
-
-    public static string PreferredFontName => Current switch
+    public static string ResolveDirectWriteFontFamily() => Current switch
     {
         AppLanguage.Zh => "Microsoft YaHei UI",
         AppLanguage.Ja => "Yu Gothic UI",
         AppLanguage.Ko => "Malgun Gothic",
-        _ => "Segoe UI"
+        _ => IsWindows11OrLater ? "Segoe UI Variable Text" : "Segoe UI"
     };
 
     public static (string FaceName, int Weight) ResolveFont(int requestedWeight) => Current switch
@@ -167,13 +150,12 @@ internal static class Strings
         "Cueway — Kontroler Mediów",
         "Cueway — Median reititin");
 
-    public static string TabDashboard => T("Kontrol Paneli", "Dashboard", "控制台", "Panel", "Панель", "Übersicht", "Tableau", "ダッシュボード", "대시보드", "Painel", "Pannello", "Panel", "Hallinta");
     public static string TabSettings => T("Ayarlar", "Settings", "设置", "Ajustes", "Настройки", "Einstellungen", "Paramètres", "設定", "설정", "Configurações", "Impostazioni", "Ustawienia", "Asetukset");
     public static string BtnExit => T("Çıkış", "Exit", "退出", "Salir", "Выход", "Beenden", "Quitter", "終了", "종료", "Sair", "Esci", "Zakończ", "Lopeta");
 
     // Header Badges
-    public static string BadgeSoloActive => T("SOLO AKTİF", "SOLO ON", "独占开启", "SOLO ACTIVO", "СОЛО ВКЛ", "SOLO AN", "SOLO ACTIF", "SOLO 有効", "SOLO 켜짐", "SOLO ATIVO", "SOLO ON", "SOLO WŁ.", "SOLO PÄÄLLÄ");
     public static string BadgeGameGuard => T("OYUN KORUMASI", "GAME GUARD", "游戏保护", "MODO JUEGO", "РЕЖИМ ИГРЫ", "SPIELSCHUTZ", "MODE JEU", "ゲーム保護", "게임 보호", "MODO JOGO", "MODO GIOCO", "OCHRONA GRY", "PELISUOJA");
+    public static string BadgeMediaHookOff => T("MEDYA TUŞU KAPALI", "MEDIA KEYS OFF", "媒体键已关", "TECLAS OFF", "КЛАВИШИ ВЫКЛ", "TASTEN AUS", "TOUCHES OFF", "メディアキーOFF", "미디어 키 꺼짐", "TECLAS OFF", "TASTI OFF", "KLAWISZE WYŁ.", "NÄPPÄIMET POIS");
 
     // Status Pills & Metadata
     public static string StatusPlaying => T("Oynatılıyor", "Playing", "正在播放", "Reproduciendo", "Воспроизведение", "Wiedergabe", "Lecture", "再生中", "재생 중", "Reproduzindo", "In riproduzione", "Odtwarzanie", "Toistetaan");
@@ -181,7 +163,6 @@ internal static class Strings
     public static string StatusMuted => T("Sessiz", "Muted", "已静音", "Silenciado", "Без звука", "Stumm", "Muet", "ミュート", "음소거", "Mudo", "Muto", "Wyciszono", "Mykistetty");
     public static string StatusClosed => T("Kapatıldı", "Closed", "已关闭", "Cerrado", "Закрыто", "Geschlossen", "Fermé", "終了", "닫힘", "Fechado", "Chiuso", "Zamknięto", "Suljettu");
     public static string ModeManualLock => T("Manuel Kilit", "Manual Lock", "手动锁定", "Bloqueo Manual", "Ручная фиксация", "Manuelle Sperre", "Verrou Manuel", "手動ロック", "수동 잠금", "Trava Manual", "Blocco Manuale", "Blokada ręczna", "Manuaalinen lukitus");
-    public static string ModeAuto => T("Otomatik Mod", "Auto Priority", "自动优先", "Modo Automático", "Автоприоритет", "Auto-Priorität", "Priorité Auto", "自動優先", "자동 우선순위", "Prioridade Auto", "Priorità Auto", "Auto-priorytet", "Automaattinen");
     public static string MediaPlayingFallback => T("Medya oynatılıyor", "Playing media", "正在播放媒体", "Reproduciendo", "Воспроизведение", "Medienwiedergabe", "Lecture en cours", "メディアを再生中", "미디어 재생 중", "Reproduzindo mídia", "Riproduzione in corso", "Odtwarzanie mediów", "Toistetaan mediaa");
 
     // Dashboard Section Headings & Buttons
@@ -217,23 +198,6 @@ internal static class Strings
         "Gdy dowolna aplikacja lub karta odtworzy multimedia, pojawi się tutaj ostatnio odtwarzana pozycja.",
         "Kun sovellus tai selainvälilehti toistaa mediaa, viimeisin toistettu kohde näkyy tässä.");
     public static string BadgePriorityTarget => T("ÖNCELİKLİ", "PRIORITY", "优先", "PRIORIDAD", "ПРИОРИТЕТ", "PRIORITÄT", "PRIORITÉ", "優先", "우선", "PRIORIDADE", "PRIORITÀ", "PRIORYTET", "ENSISIJAINEN");
-
-    public static string SecActiveTarget => T("AKTİF HEDEF", "ACTIVE TARGET", "当前目标", "DESTINO ACTIVO", "АКТИВНАЯ ЦЕЛЬ", "AKTIVES ZIEL", "CIBLE ACTIVE", "アクティブターゲット", "활성 대상", "ALVO ATIVO", "DESTINAZIONE ATTIVA", "AKTYWNY CEL", "AKTIIVINEN KOHDE");
-    public static string NoActiveTargetTitle => T("Aktif Hedef Yok", "No Active Target", "无活动目标", "Sin destino activo", "Нет активной цели", "Kein aktives Ziel", "Aucune cible active", "アクティブな対象なし", "활성 대상 없음", "Nenhum alvo ativo", "Nessuna destinazione attiva", "Brak aktywnego celu", "Ei aktiivista kohdetta");
-    public static string NoActiveTargetSub => T(
-        "Herhangi bir medya oynatıldığında tuşlar otomatik olarak yönlendirilir.",
-        "Media keys are routed automatically once any player starts playing.",
-        "任意播放器开始播放后，媒体按键将自动路由。",
-        "Las teclas multimedia se enrutarán automáticamente al reproducir algo.",
-        "Клавиши будут направляться автоматически при запуске любого медиаплеера.",
-        "Medientasten werden automatisch geleitet, sobald ein Player startet.",
-        "Les touches média seront routées automatiquement dès qu'un lecteur démarre.",
-        "いずれかのプレーヤーで再生を開始すると、メディアキーが自動的にルーティングされます。",
-        "미디어 플레이어가 재생을 시작하면 미디어 키가 자동으로 라우팅됩니다.",
-        "As teclas de mídia serão direcionadas automaticamente quando um player iniciar.",
-        "I tasti multimediali verranno indirizzati automaticamente all'avvio di un lettore.",
-        "Klawisze multimedialne będą kierowane automatycznie po uruchomieniu dowolnego odtwarzacza.",
-        "Medianäppäimet reititetään automaattisesti, kun soitin aloittaa toiston.");
 
     public static string BtnLock => T("Kilitle", "Lock", "锁定", "Fijar", "Закрепить", "Fixieren", "Verrouiller", "ロック", "잠금", "Travar", "Blocca", "Zablokuj", "Lukitse");
     public static string BtnLocked => T("Kilitli", "Locked", "已锁定", "Fijado", "Закреплено", "Fixiert", "Verrouillé", "ロック中", "잠금됨", "Travado", "Bloccato", "Zablokowano", "Lukittu");
@@ -309,7 +273,6 @@ internal static class Strings
         "Sovellukset ja välilehdet, joissa toistat mediaa, ilmestyvät tähän automaattisesti järjestyksen muokkaamista varten.");
 
     // Settings Sections
-    public static string SecLanguage => T("DİL", "LANGUAGE", "语言", "IDIOMA", "ЯЗЫК", "SPRACHE", "LANGUE", "言語", "언어", "IDIOMA", "LINGUA", "JĘZYK", "KIELI");
     public static string LanguageTitle => T("Uygulama Dili", "Application Language", "界面语言", "Idioma de la aplicación", "Язык интерфейса", "Anwendungssprache", "Langue de l'application", "アプリの表示言語", "앱 언어", "Idioma do Aplicativo", "Lingua dell'app", "Język aplikacji", "Sovelluksen kieli");
     public static string LanguageSub => T(
         "Arayüz, sistem tepsisi ve bildirim dilini anında değiştirin",
@@ -380,7 +343,6 @@ internal static class Strings
     public static string ThemePreviewHeading => T("CANLI ÖNİZLEME", "LIVE PREVIEW", "实时预览", "VISTA PREVIA", "ПРЕДПРОСМОТР", "LIVE-VORSCHAU", "APERÇU EN DIRECT", "プレビュー", "미리보기", "PRÉ-VISUALIZAÇÃO", "ANTEPRIMA", "PODGLĄD NA ŻYWO", "ESIKATSELU");
     public static string BtnSaveTheme => T("Temayı Kaydet", "Save Theme", "保存主题", "Guardar tema", "Сохранить", "Speichern", "Enregistrer", "保存", "테마 저장", "Salvar Tema", "Salva tema", "Zapisz motyw", "Tallenna teema");
     public static string BtnDeleteTheme => T("Sil", "Delete", "删除", "Eliminar", "Удалить", "Löschen", "Supprimer", "削除", "삭제", "Excluir", "Elimina", "Usuń", "Poista");
-    public static string BtnEditTheme => T("Düzenle", "Edit", "编辑", "Editar", "Изменить", "Bearbeiten", "Modifier", "編集", "편집", "Editar", "Modifica", "Edytuj", "Muokkaa");
     public static string BtnCancel => T("İptal", "Cancel", "取消", "Cancelar", "Отмена", "Abbrechen", "Annuler", "キャンセル", "취소", "Cancelar", "Annulla", "Anuluj", "Peruuta");
     public static string MsgCustomThemeSaved(string name) => T(
         $"\"{name}\" teması kaydedildi ve uygulandı.",
@@ -687,22 +649,6 @@ internal static class Strings
         "Natychmiast wstrzymaj wszystkie sesje po odłączeniu lub zmianie domyślnego wyjścia audio",
         "Keskeytä kaikki toisto heti, kun oletusäänilaite vaihtuu tai irrotetaan");
 
-    public static string SetSoloTitle => T("Solo Modu", "Solo Mode", "独占模式", "Modo Solo", "Режим Соло", "Solo-Modus", "Mode Solo", "ソロモード", "솔로 모드", "Modo Solo", "Modalità Solo", "Tryb Solo", "Soolotila");
-    public static string SetSoloSub => T(
-        "Aktif hedef dışındaki tüm açık uygulamaların sesini geçici olarak sustur",
-        "Temporarily mute all running applications except the active target",
-        "临时静音除当前活动目标以外的所有应用程序音频",
-        "Silenciar temporalmente todas las aplicaciones excepto el destino activo",
-        "Временно заглушить все приложения, кроме активной цели",
-        "Alle anderen laufenden Anwendungen außer dem aktiven Ziel stummschalten",
-        "Couper temporairement le son de toutes les applications sauf la cible active",
-        "アクティブな対象以外の全アプリの音声を一時的にミュートします",
-        "활성 대상을 제외한 모든 실행 중 앱의 소리를 일시적으로 음소거합니다",
-        "Silenciar temporariamente todos os aplicativos em execução, exceto o alvo ativo",
-        "Silenzia temporaneamente tutte le applicazioni attive tranne la destinazione corrente",
-        "Tymczasowo wycisz wszystkie inne aplikacje poza aktywnym celem",
-        "Mykistä tilapäisesti kaikki muut käynnissä olevat sovellukset paitsi aktiivinen kohde");
-
     public static string SetGameGuardTitle => T("Tam Ekran Oyun Koruması", "Fullscreen Game Guard", "全屏游戏保护", "Protección de juegos en pantalla completa", "Защита в полноэкранных играх", "Vollbild-Spielschutz", "Protection jeux plein écran", "フルスクリーンゲーム保護", "전체 화면 게임 보호", "Proteção para Jogos em Tela Cheia", "Protezione giochi a schermo intero", "Ochrona gier pełnoekranowych", "Koko näytön pelisuoja");
     public static string SetGameGuardSub => T(
         "Ön planda tam ekran bir oyun açıkken tarayıcıları atlayıp doğrudan müzik çalara odaklan",
@@ -803,21 +749,6 @@ internal static class Strings
         "Blocca o sblocca il routing multimediale sulla destinazione attiva",
         "Blokuje lub odblokowuje kierowanie mediów na bieżący aktywny cel",
         "Lukitsee tai vapauttaa median reitityksen nykyiseen kohteeseen");
-    public static string SetHkSoloTitle => T("Solo Modunu Aç / Kapat", "Toggle Solo Mode", "切换独占模式", "Alternar modo Solo", "Режим Соло", "Solo-Modus umschalten", "Basculer le mode Solo", "ソロモード切替", "솔로 모드 전환", "Alternar Modo Solo", "Attiva/Disattiva modalità Solo", "Przełącz tryb Solo", "Vaihda soolotila");
-    public static string SetHkSoloSub => T(
-        "Aktif hedef dışındaki tüm açık uygulamaların sesini susturur veya geri açar",
-        "Mute or restore audio for all running apps except the active target",
-        "一键静音或恢复除当前目标外的所有应用程序音量",
-        "Silencia o restaura el audio de todas las apps excepto el destino activo",
-        "Отключает или возвращает звук всем приложениям, кроме активной цели",
-        "Schaltet alle Apps außer dem aktiven Ziel stumm oder stellt sie wieder her",
-        "Coupe ou rétablit le son de toutes les apps sauf la cible active",
-        "対象以外のすべてのアプリの音をミュートまたは解除します",
-        "활성 대상 외의 모든 실행 중 앱 소리를 끄거나 켭니다",
-        "Silencia ou restaura o áudio de todos os apps exceto o alvo ativo",
-        "Silenzia o ripristina l'audio per tutte le app tranne la destinazione attiva",
-        "Wycisza lub przywraca dźwięk wszystkich aplikacji oprócz aktywnego celu",
-        "Mykistää tai palauttaa äänet kaikista muista sovelluksista paitsi aktiivisesta kohteesta");
     public static string SetHkPlayPauseTitle => T("Oynat / Duraklat Kısayolu", "Play / Pause Shortcut", "播放 / 暂停快捷键", "Atajo Reproducir / Pausar", "Воспр. / Пауза", "Wiedergabe / Pause-Kürzel", "Raccourci Lecture / Pause", "再生 / 一時停止ショートカット", "재생 / 일시정지 단축키", "Atalho Reproduzir / Pausar", "Scorciatoia Riproduci / Pausa", "Skrót Odtwórz / Wstrzymaj", "Toisto / Tauko -pikanäppäin");
     public static string SetHkPlayPauseSub => T(
         "Medya tuşu olmayan klavyeler için tek tuş (ör. End, F8, P) veya kombinasyon atayın",
@@ -1013,27 +944,26 @@ internal static class Strings
         "Ctrl / Shift + Klawisz mediów  →  Wysyła jednorazowe polecenie do 2. celu bez zmiany priorytetu",
         "Ctrl / Shift + Medianäppäin  →  Lähettää yksittäisen komennon 2. kohteelle muuttamatta järjestystä");
 
-    public static string FormatShortcutToggles(string toggleHk, string lockHk, string soloHk)
+    public static string FormatShortcutToggles(string toggleHk, string lockHk)
     {
         string none = HotkeyUnassigned;
         string t = string.IsNullOrEmpty(toggleHk) ? none : toggleHk;
         string l = string.IsNullOrEmpty(lockHk) ? none : lockHk;
-        string s = string.IsNullOrEmpty(soloHk) ? none : soloHk;
         return Current switch
         {
-            AppLanguage.En => $"{t} → Window   •   {l} → Manual Lock   •   {s} → Solo Mode",
-            AppLanguage.Zh => $"{t} → 窗口   •   {l} → 手动锁定   •   {s} → 独占模式",
-            AppLanguage.Es => $"{t} → Ventana   •   {l} → Bloqueo   •   {s} → Modo Solo",
-            AppLanguage.Ru => $"{t} → Окно   •   {l} → Фиксация   •   {s} → Режим Соло",
-            AppLanguage.De => $"{t} → Fenster   •   {l} → Sperre   •   {s} → Solo-Modus",
-            AppLanguage.Fr => $"{t} → Fenêtre   •   {l} → Verrou   •   {s} → Mode Solo",
-            AppLanguage.Ja => $"{t} → 画面   •   {l} → ロック   •   {s} → ソロ",
-            AppLanguage.Ko => $"{t} → 창 전환   •   {l} → 수동 잠금   •   {s} → 솔로 모드",
-            AppLanguage.Pt => $"{t} → Janela   •   {l} → Trava Manual   •   {s} → Modo Solo",
-            AppLanguage.It => $"{t} → Finestra   •   {l} → Blocco   •   {s} → Modo Solo",
-            AppLanguage.Pl => $"{t} → Okno   •   {l} → Blokada   •   {s} → Tryb Solo",
-            AppLanguage.Fi => $"{t} → Ikkuna   •   {l} → Lukitus   •   {s} → Soolotila",
-            _ => $"{t} → Pencere   •   {l} → Manuel Kilit   •   {s} → Solo Modu"
+            AppLanguage.En => $"{t} → Window   •   {l} → Manual Lock",
+            AppLanguage.Zh => $"{t} → 窗口   •   {l} → 手动锁定",
+            AppLanguage.Es => $"{t} → Ventana   •   {l} → Bloqueo",
+            AppLanguage.Ru => $"{t} → Окно   •   {l} → Фиксация",
+            AppLanguage.De => $"{t} → Fenster   •   {l} → Sperre",
+            AppLanguage.Fr => $"{t} → Fenêtre   •   {l} → Verrou",
+            AppLanguage.Ja => $"{t} → 画面   •   {l} → ロック",
+            AppLanguage.Ko => $"{t} → 창 전환   •   {l} → 수동 잠금",
+            AppLanguage.Pt => $"{t} → Janela   •   {l} → Trava Manual",
+            AppLanguage.It => $"{t} → Finestra   •   {l} → Blocco",
+            AppLanguage.Pl => $"{t} → Okno   •   {l} → Blokada",
+            AppLanguage.Fi => $"{t} → Ikkuna   •   {l} → Lukitus",
+            _ => $"{t} → Pencere   •   {l} → Manuel Kilit"
         };
     }
 
@@ -1057,7 +987,6 @@ internal static class Strings
     // Tray Menu & Tooltips
     public static string TrayMenuOpen => T("Kontrol Panelini Aç", "Open Control Panel", "打开控制面板", "Abrir panel de control", "Открыть панель управления", "Bedienfeld öffnen", "Ouvrir le panneau", "コントロールパネルを開く", "제어판 열기", "Abrir Painel de Controle", "Apri Pannello di controllo", "Otwórz panel sterowania", "Avaa ohjauspaneeli");
     public static string TrayMenuLockBase => T("Manuel Kilit", "Manual Lock", "手动锁定", "Bloqueo manual", "Фиксация цели", "Manuelle Sperre", "Verrou manuel", "手動ロック", "수동 잠금", "Trava Manual", "Blocco manuale", "Blokada ręczna", "Manuaalinen lukitus");
-    public static string TrayMenuSoloBase => T("Solo Modu", "Solo Mode", "独占模式", "Modo Solo", "Режим Соло", "Solo-Modus", "Mode Solo", "ソロモード", "솔로 모드", "Modo Solo", "Modalità Solo", "Tryb Solo", "Soolotila");
     public static string TrayMenuSettings => T("Ayarlar", "Settings", "设置", "Ajustes", "Настройки", "Einstellungen", "Paramètres", "設定", "설정", "Configurações", "Impostazioni", "Ustawienia", "Asetukset");
     public static string TrayMenuExit => T("Çıkış", "Exit", "退出", "Salir", "Выход", "Beenden", "Quitter", "終了", "종료", "Sair", "Esci", "Zakończ", "Lopeta");
     public static string TrayTipEmpty => T("Cueway — Aktif medya yok", "Cueway — No active media", "Cueway — 无活动媒体", "Cueway — Sin medios activos", "Cueway — Нет активных медиа", "Cueway — Keine aktiven Medien", "Cueway — Aucun média actif", "Cueway — アクティブなメディアなし", "Cueway — 활성 미디어 없음", "Cueway — Nenhuma mídia ativa", "Cueway — Nessun media attivo", "Cueway — Brak aktywnych mediów", "Cueway — Ei aktiivista mediaa");
@@ -1467,25 +1396,6 @@ internal static class Strings
     public static string OsdManualLockActive => T("Manuel kilit aktif", "Manual lock active", "手动锁定已开启", "Bloqueo manual activo", "Ручная фиксация активна", "Manuelle Sperre aktiv", "Verrou manuel actif", "手動ロック有効", "수동 잠금 활성화", "Trava manual ativa", "Blocco manuale attivo", "Blokada ręczna aktywna", "Manuaalinen lukitus käytössä");
     public static string OsdAutoMode => T("Otomatik öncelik moduna geçildi", "Switched to auto priority mode", "已切换回自动优先级模式", "Modo automático activado", "Включён режим автоприоритета", "Auto-Prioritätsmodus aktiv", "Mode priorité auto activé", "自動優先モードに切替", "자동 우선순위 모드로 전환", "Modo de prioridade automática ativado", "Modalità priorità automatica attiva", "Przełączono na tryb automatyczny", "Vaihdettu automaattiseen prioriteettitilaan");
     public static string OsdPromotedTop => T("Öncelik #1 sırasına alındı", "Promoted to #1 priority", "已置顶为第 1 优先级", "Movido a prioridad #1", "Перемещено на 1-е место", "Auf Priorität #1 gesetzt", "Placé en priorité #1", "優先順位 1 位に移動しました", "우선순위 1위로 올렸습니다", "Movido para prioridade #1", "Promosso a priorità #1", "Przeniesiono na 1. miejsce", "Siirretty sijalle #1");
-    public static string OsdSoloTitle => T("Solo Modu", "Solo Mode", "独占模式", "Modo Solo", "Режим Соло", "Solo-Modus", "Mode Solo", "ソロモード", "솔로 모드", "Modo Solo", "Modalità Solo", "Tryb Solo", "Soolotila");
-    public static string OsdSoloNoTarget => T("Hedef yok", "No target", "无目标", "Sin destino", "Нет цели", "Kein Ziel", "Aucune cible", "対象なし", "대상 없음", "Sem alvo", "Nessuna destinazione", "Brak celu", "Ei kohdetta");
-    public static string OsdSoloEnabled(string targetName) => Current switch
-    {
-        AppLanguage.En => $"Active (all except {targetName} muted)",
-        AppLanguage.Zh => $"已开启（已静音除 {targetName} 外的其他应用）",
-        AppLanguage.Es => $"Activo (todo silenciado excepto {targetName})",
-        AppLanguage.Ru => $"Активен (заглушено всё, кроме {targetName})",
-        AppLanguage.De => $"Aktiv (alles außer {targetName} stumm)",
-        AppLanguage.Fr => $"Actif (tout coupé sauf {targetName})",
-        AppLanguage.Ja => $"有効 ({targetName} 以外をミュート)",
-        AppLanguage.Ko => $"활성 ({targetName} 외 모두 음소거)",
-        AppLanguage.Pt => $"Ativo (tudo silenciado exceto {targetName})",
-        AppLanguage.It => $"Attivo (tutto muto tranne {targetName})",
-        AppLanguage.Pl => $"Włączono (wyciszono wszystko poza {targetName})",
-        AppLanguage.Fi => $"Käytössä (kaikki paitsi {targetName} mykistetty)",
-        _ => $"Aktif ({targetName} dışındakiler susturuldu)"
-    };
-    public static string OsdSoloDisabled => T("Kapatıldı — tüm sesler geri yüklendi", "Disabled — all audio restored", "已关闭 — 已恢复所有应用声音", "Desactivado — audio restaurado", "Выкл — звук восстановлен", "Deaktiviert — Audio wiederhergestellt", "Désactivé — audio restauré", "無効化 — すべての音声を復元", "비활성화 — 모든 오디오 복원됨", "Desativado — áudio restaurado", "Disattivata — audio ripristinato", "Wyłączono — przywrócono dźwięk", "Pois käytöstä — kaikki äänet palautettu");
     public static string OsdSecondaryTitle => T("İkincil Rota", "Secondary Route", "次级路由", "Ruta secundaria", "Вторичный маршрут", "Sekundär-Route", "Route secondaire", "セカンダリルート", "보조 경로", "Rota Secundária", "Percorso secondario", "Drugi cel", "Toissijainen kohde");
     public static string OsdSecondaryEmpty => T("2. sırada aktif medya oturumu yok", "No secondary media session available", "没有可用的第 2 顺位媒体会话", "No hay una segunda sesión disponible", "Нет второй активной медиасессии", "Keine zweite Mediensitzung verfügbar", "Aucune session secondaire disponible", "2 番目のメディアセッションがありません", "사용 가능한 2순위 미디어 세션이 없습니다", "Nenhuma sessão secundária disponível", "Nessuna seconda sessione disponibile", "Brak drugiej aktywnej sesji mediów", "Toissijaista mediaistuntoa ei ole saatavilla");
     public static string OsdSecondaryPrefix => T("[2. Rota]", "[2nd]", "[次级]", "[2.ª]", "[2-я]", "[2. Ziel]", "[2e]", "[2番目]", "[2순위]", "[2º]", "[2°]", "[2.]", "[2.]");
@@ -1968,4 +1878,109 @@ internal static class Strings
         "Время вышло — воспроизведение приостановлено", "Zeit abgelaufen — Wiedergabe pausiert", "Temps écoulé — lecture en pause", "終了 — 再生を一時停止しました",
         "시간 종료 — 재생이 일시정지되었습니다", "Tempo esgotado — reprodução pausada", "Tempo scaduto — riproduzione in pausa",
         "Czas minął — odtwarzanie wstrzymane", "Aika täynnä — toisto pysäytetty");
+
+    public static string AudioDeviceSystemDefault => T(
+        "Varsayılan (Sistem)", "System Default", "系统默认", "Predeterminado del sistema",
+        "По умолчанию (система)", "Systemstandard", "Par défaut (système)", "システム既定",
+        "시스템 기본값", "Padrão do Sistema", "Predefinito di sistema", "Domyślne systemu", "Järjestelmän oletus");
+
+    public static string FlyoutAppAudioTitle(string appName) => Current switch
+    {
+        AppLanguage.En => $"{appName} — Output",
+        AppLanguage.Zh => $"{appName} — 输出",
+        AppLanguage.Es => $"{appName} — Salida",
+        AppLanguage.Ru => $"{appName} — Вывод",
+        AppLanguage.De => $"{appName} — Ausgabe",
+        AppLanguage.Fr => $"{appName} — Sortie",
+        AppLanguage.Ja => $"{appName} — 出力",
+        AppLanguage.Ko => $"{appName} — 출력",
+        AppLanguage.Pt => $"{appName} — Saída",
+        AppLanguage.It => $"{appName} — Uscita",
+        AppLanguage.Pl => $"{appName} — Wyjście",
+        AppLanguage.Fi => $"{appName} — Lähtö",
+        _ => $"{appName} — Ses Çıkışı"
+    };
+
+    public static string BrowserOutputScopeNotice(string browserName) => Current switch
+    {
+        AppLanguage.En => $"Windows audio routing switches all {browserName} tabs together.",
+        AppLanguage.Zh => $"Windows 音频路由会同时切换所有 {browserName} 标签页。",
+        AppLanguage.Es => $"El enrutamiento de audio de Windows cambia todas las pestañas de {browserName} juntas.",
+        AppLanguage.Ru => $"Маршрутизация звука Windows переключает все вкладки {browserName} вместе.",
+        AppLanguage.De => $"Windows-Audio-Routing schaltet alle {browserName}-Tabs gemeinsam um.",
+        AppLanguage.Fr => $"Le routage audio Windows bascule tous les onglets {browserName} ensemble.",
+        AppLanguage.Ja => $"Windowsの音声出力切替は{browserName}の全タブにまとめて適用されます。",
+        AppLanguage.Ko => $"Windows 오디오 라우팅은 모든 {browserName} 탭을 함께 전환합니다.",
+        AppLanguage.Pt => $"O roteamento de áudio do Windows alterna todas as abas do {browserName} juntas.",
+        AppLanguage.It => $"Il routing audio di Windows sposta insieme tutte le schede di {browserName}.",
+        AppLanguage.Pl => $"Kierowanie dźwięku Windows przełącza wszystkie karty {browserName} razem.",
+        AppLanguage.Fi => $"Windowsin äänenreititys vaihtaa kaikki {browserName}-välilehdet yhdessä.",
+        _ => $"Windows ses yönlendirmesi tüm {browserName} sekmelerini birlikte geçirir."
+    };
+
+    public static string BtnDontShowAgain => T(
+        "Bir daha gösterme", "Don't show again", "不再显示", "No volver a mostrar",
+        "Больше не показывать", "Nicht mehr anzeigen", "Ne plus afficher", "今後表示しない",
+        "다시 표시 안 함", "Não mostrar novamente", "Non mostrare più", "Nie pokazuj ponownie", "Älä näytä uudelleen");
+
+    // Redesigned Console UI Navigation & C1+C3 Labels
+    public static string TabControl => T(
+        "Kontrol", "Control", "控制", "Control", "Контроль",
+        "Steuerung", "Contrôle", "コントロール", "제어",
+        "Controle", "Controllo", "Sterowanie", "Hallinta");
+
+    public static string TabApps => T(
+        "Uygulamalar", "Apps", "应用", "Apps", "Приложения",
+        "Apps", "Apps", "アプリ", "앱",
+        "Apps", "App", "Aplikacje", "Sovellukset");
+
+    public static string TabAudioRules => T(
+        "Ses & Kurallar", "Audio & Rules", "音频与规则", "Audio y reglas", "Звук и правила",
+        "Audio & Regeln", "Audio & Règles", "音声とルール", "오디오 및 규칙",
+        "Áudio e Regras", "Audio e Regole", "Dźwięk i reguły", "Ääni ja säännöt");
+
+    public static string TabHotkeys => T(
+        "Kısayollar", "Shortcuts", "快捷键", "Atajos", "Горячие клавиши",
+        "Tastenkürzel", "Raccourcis", "ショートカット", "단축키",
+        "Atalhos", "Scorciatoie", "Skróty", "Pikanäppäimet");
+
+    public static string QuickPriorityLabel => T(
+        "HIZLI ÖNCELİK", "QUICK PRIORITY", "快速优先级", "PRIORIDAD RÁPIDA", "БЫСТРЫЙ ПРИОРИТЕТ",
+        "SCHNELLPRIORITÄT", "PRIORITÉ RAPIDE", "クイック優先", "빠른 우선순위",
+        "PRIORIDADE RÁPIDA", "PRIORITÀ RAPIDA", "SZYBKI PRIORYTET", "PIKAPRIO");
+
+    public static string BtnManageAll => T(
+        "Tümünü Düzenle →", "Manage All →", "全部管理 →", "Gestionar todo →", "Управлять →",
+        "Alle verwalten →", "Tout gérer →", "すべて管理 →", "모두 관리 →",
+        "Gerenciar Tudo →", "Gestisci tutto →", "Zarządzaj →", "Hallitse kaikkia →");
+
+    public static string SetReducedAnimTitle => T(
+        "Animasyonları Azalt", "Reduce Animations", "减弱动画效果", "Reducir animaciones", "Уменьшить анимацию",
+        "Animationen reduzieren", "Réduire les animations", "アニメーションを減らす", "애니메이션 줄이기",
+        "Reduzir Animações", "Riduci animazioni", "Ogranicz animacje", "Vähennä animaatioita");
+
+    public static string SetReducedAnimSub => T(
+        "Sekme geçişi ve görsel efektleri kapatarak anında çizime geçer.",
+        "Disable tab transitions and visual effects for instant rendering.",
+        "关闭标签切换和视觉动效以实现即时绘制。",
+        "Desactiva las transiciones y efectos visuales para un dibujo instantáneo.",
+        "Отключает переходы вкладок и эффекты для мгновенной отрисовки.",
+        "Deaktiviert Tab-Übergänge und visuelle Effekte für sofortige Darstellung.",
+        "Désactive les transitions d'onglets et effets visuels pour un rendu instantané.",
+        "タブ切り替えや視覚効果をオフにして即時描画します。",
+        "탭 전환 및 시각 효과를 꺼서 즉시 렌더링합니다.",
+        "Desativa transições de abas e efeitos visuais para renderização instantânea.",
+        "Disattiva transizioni ed effetti visivi per un rendering istantaneo.",
+        "Wyłącza przejścia kart i efekty wizualne dla natychmiastowego rysowania.",
+        "Poistaa välilehtisiirtymät ja tehosteet välittömään piirtoon.");
+
+    public static string DockMediaKeysOn => T(
+        "Medya Tuşu: Aktif", "Media Keys: On", "媒体键：开启", "Teclas: Activas", "Клавиши: Вкл.",
+        "Medientasten: Ein", "Touches: Actif", "メディアキー: 有効", "미디어 키: 켜짐",
+        "Teclas: Ativas", "Tasti: Attivi", "Klawisze: Wł.", "Näppäimet: Päällä");
+
+    public static string DockDefaultOutput => T(
+        "Varsayılan Çıkış", "Default Output", "默认输出", "Salida predeterminada", "Выход по умолч.",
+        "Standardausgabe", "Sortie par défaut", "既定の出力", "기본 출력",
+        "Saída Padrão", "Uscita predefinita", "Wyjście domyślne", "Oletuslähtö");
 }

@@ -143,8 +143,8 @@ internal static class WhatsNewCatalog
                     "Älykäs laajennuskohdistus"),
                 Strings.Tr(
                     "Bağlı Değil rozetine tıkladığınızda Ayarlar'daki eklenti kartı ekranın ortasına gelir ve 3 kez mavi ışıkla vurgulanır.",
-                    "Clicking the Dashboard bridge badge centers the extension card in Settings with a 3-pulse highlight so it's unmistakable.",
-                    "点击控制面板的桥接状态徽章会自动居中定位设置中的扩展卡片，并闪烁三次提示连接位置。",
+                    "Clicking the bottom status dock's bridge badge centers the extension card in Settings with a 3-pulse highlight so it's unmistakable.",
+                    "点击底部状态栏的桥接状态徽章会自动居中定位设置中的扩展卡片，并闪烁三次提示连接位置。",
                     "Al pulsar el aviso de conexión, se centra la tarjeta de extensión en Ajustes y parpadea tres veces para guiarle.",
                     "Клик по статусу подключения открывает карточку расширения по центру настроек с тройной подсветкой.",
                     "Ein Klick auf das Status-Badge zentriert die Erweiterungskarte in den Einstellungen mit dreifachem Leuchtimpuls.",

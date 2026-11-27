@@ -13,7 +13,6 @@ internal sealed unsafe class KeyboardHookService : IDisposable
     private sealed record HotkeySnapshot(
         HotkeyBinding ToggleWindow,
         HotkeyBinding ManualLock,
-        HotkeyBinding SoloMode,
         HotkeyBinding PlayPause,
         HotkeyBinding PromotePlaying,
         HotkeyBinding VolumeUp,
@@ -65,7 +64,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
     private volatile int _longPressThresholdMs = 400;
     private volatile int _volumeStepPercent = 5;
     private long _lastVolHotkeyTick;
-    private volatile HotkeySnapshot _hotkeys = new(default, default, default, default, default, default, default, default, default, []);
+    private volatile HotkeySnapshot _hotkeys = new(default, default, default, default, default, default, default, default, []);
 
     public event Action? ToggleWindowRequested;
     public bool IsCapturingHotkey => _onCaptureResult != null;
@@ -92,7 +91,6 @@ internal sealed unsafe class KeyboardHookService : IDisposable
 
         HotkeyHelper.TryParse(s.HotkeyToggleWindow, out var toggleWin);
         HotkeyHelper.TryParse(s.HotkeyManualLock, out var manualLock);
-        HotkeyHelper.TryParse(s.HotkeySoloMode, out var soloMode);
         HotkeyHelper.TryParse(s.HotkeyPlayPause, out var playPause, allowAnySingleKey: true);
         HotkeyHelper.TryParse(s.HotkeyPromotePlaying, out var promotePlaying, allowAnySingleKey: true);
         HotkeyHelper.TryParse(s.HotkeyVolumeUp, out var volUp);
@@ -107,7 +105,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                 appEntries.Add(new AppHotkeyEntry(appBinding, app.AppKey));
         }
 
-        _hotkeys = new HotkeySnapshot(toggleWin, manualLock, soloMode, playPause, promotePlaying, volUp, volDown, volMute, cycleAudioDevice, [.. appEntries]);
+        _hotkeys = new HotkeySnapshot(toggleWin, manualLock, playPause, promotePlaying, volUp, volDown, volMute, cycleAudioDevice, [.. appEntries]);
     }
 
     public void BeginHotkeyCapture(
@@ -342,13 +340,6 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                     {
                         if (_heldCustomVks.Add(vkCode))
                             _ = Task.Run(() => _engine.ToggleManualLockOnActiveOrSelected());
-                        return true;
-                    }
-
-                    if (!snap.SoloMode.IsEmpty && snap.SoloMode.VkCode == vkCode && snap.SoloMode.Modifiers == mods)
-                    {
-                        if (_heldCustomVks.Add(vkCode))
-                            _ = Task.Run(() => _engine.ToggleSoloMode());
                         return true;
                     }
 

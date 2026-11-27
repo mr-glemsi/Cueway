@@ -27,7 +27,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     {
         None = 0,
         AudioDevices = 1,
-        SleepTimer = 2
+        SleepTimer = 2,
+        AppOutputDevice = 3
     }
 
     private sealed record HitRegion(Win32.RECT Bounds, string Id, Action OnClick, bool IsButton = true);
@@ -76,8 +77,29 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     private uint _lastDwmBorder = uint.MaxValue;
     private bool _lastDwmIsLight;
     private FlyoutDrawer _openDrawer = FlyoutDrawer.None;
+    private string? _drawerTargetSessionId;
+    private string? _drawerTargetAppName;
+    private string? _drawerTargetBrowserName;
     private List<AudioOutputDevice> _outputDevices = [];
+    private Dictionary<string, uint> _deviceColors = new(StringComparer.OrdinalIgnoreCase);
+    private string? _defaultOutputDeviceId;
+    private bool _deviceColorsForLight;
     private bool _disposed;
+
+    private void RebuildOutputDeviceColorCache()
+    {
+        _defaultOutputDeviceId = AudioDeviceColors.GetDefaultDeviceId(_outputDevices);
+        _deviceColors = AudioDeviceColors.BuildDeviceColorMap(_outputDevices, Theme.IsLight);
+        _deviceColorsForLight = Theme.IsLight;
+    }
+
+    private uint GetEffectiveDeviceColor(string? deviceId)
+    {
+        if (_deviceColorsForLight != Theme.IsLight)
+            RebuildOutputDeviceColorCache();
+        string? effective = string.IsNullOrWhiteSpace(deviceId) ? _defaultOutputDeviceId : deviceId;
+        return effective != null && _deviceColors.TryGetValue(effective, out uint color) ? color : Theme.Accent;
+    }
 
     public event Action? OpenDashboardRequested;
     public event Action? OpenSettingsRequested;
@@ -181,6 +203,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         _snapshot = _engine.GetSnapshot();
         _openDrawer = FlyoutDrawer.None;
         _outputDevices = _engine.GetOutputDevices();
+        RebuildOutputDeviceColorCache();
         _scrollY = 0;
         _hoverId = null;
 
@@ -222,6 +245,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     {
         if (_disposed || _hwnd == 0) return;
         _outputDevices = _engine.GetOutputDevices();
+        RebuildOutputDeviceColorCache();
         if (Win32.IsWindowVisible(_hwnd))
         {
             if (_openDrawer == FlyoutDrawer.AudioDevices)
@@ -263,10 +287,15 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         Win32.InvalidateRect(_hwnd, null, false);
     }
 
+    private bool ShouldShowBrowserOutputNotice()
+        => !string.IsNullOrEmpty(_drawerTargetBrowserName) &&
+           !_stateStore.GetSettingsSnapshot().SuppressBrowserOutputNotice;
+
     private int ComputeDrawerHeightPx() => _openDrawer switch
     {
         FlyoutDrawer.AudioDevices => Math.Max(1, Math.Min(_outputDevices.Count, 5)) * 32 + 12,
         FlyoutDrawer.SleepTimer => 46,
+        FlyoutDrawer.AppOutputDevice => 24 + Math.Min(_outputDevices.Count + 1, 6) * 30 + 12 + (ShouldShowBrowserOutputNotice() ? 64 : 0),
         _ => 0
     };
 
@@ -761,19 +790,6 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         int titleW = MeasureTextWidth(dc, "Cueway", 13, Win32.FW_BOLD) + S(6);
         int nameEnd = Math.Min(titleRight, titleX + titleW);
         DrawText(dc, "Cueway", titleX, 0, nameEnd, headerH, 13, Win32.FW_BOLD, Theme.TextPrimary);
-
-        if (_snapshot.SoloModeEnabled && nameEnd + S(48) <= titleRight)
-        {
-            int pillH = S(18);
-            int pillW = Math.Max(S(40), MeasureTextWidth(dc, "SOLO", 9, Win32.FW_BOLD) + S(14));
-            int pillX = nameEnd + S(4);
-            if (pillX + pillW <= titleRight)
-            {
-                int pillY = (headerH - pillH) / 2;
-                GdiPlus.FillRoundedRect(gfx, pillX, pillY, pillW, pillH, pillH / 2f, GdiPlus.Argb(Theme.AmberSoft));
-                DrawText(dc, "SOLO", pillX, pillY, pillX + pillW, pillY + pillH, 9, Win32.FW_BOLD, Theme.Amber, centered: true);
-            }
-        }
     }
 
     private void DrawHeaderButton(nint dc, nint gfx, string id, string text, int x, int y, int w, int h, Action onClick)
@@ -910,7 +926,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             DrawLockBtn(gfx, $"fly_lock_{s.SessionId}", lockX, btnY, btnSz, isLocked, headerH, bodyBottom,
                 () => _engine.ToggleManualLockOnActiveOrSelected(captured.SessionId));
 
-            DrawVolumeRow(dc, gfx, $"fly_vol_{s.SessionId}", captured.SessionId, captured.Volume, captured.IsMuted,
+            DrawVolumeRow(dc, gfx, $"fly_vol_{s.SessionId}", captured,
                 x + pad, y + S(55), w - pad * 2, S(26), headerH, bodyBottom);
         }
 
@@ -1003,9 +1019,13 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     }
 
     private void DrawVolumeRow(
-        nint dc, nint gfx, string idPrefix, string sessionId,
-        float volume, bool isMuted, int x, int y, int w, int h, int headerH, int bodyBottom)
+        nint dc, nint gfx, string idPrefix, MediaSessionInfo session,
+        int x, int y, int w, int h, int headerH, int bodyBottom)
     {
+        string sessionId = session.SessionId;
+        float volume = session.Volume;
+        bool isMuted = session.IsMuted;
+
         int muteSz = S(22);
         int muteX = x;
         int muteY = y + (h - muteSz) / 2;
@@ -1026,8 +1046,14 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             headerH,
             bodyBottom);
 
+        bool showOutBtn = _engine.IsPerAppAudioRoutingSupported &&
+                          _outputDevices.Count > 1 &&
+                          session.ProcessIds.Length > 0;
+        int outSz = showOutBtn ? S(22) : 0;
+        int outGap = showOutBtn ? S(4) : 0;
+        int outX = x + w - outSz;
         int pctW = S(36);
-        int pctX = x + w - pctW;
+        int pctX = outX - outGap - pctW;
         int trackX = muteX + muteSz + S(8);
         int trackRight = pctX - S(6);
         int trackW = Math.Max(S(40), trackRight - trackX);
@@ -1080,6 +1106,53 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         int dispPct = (int)MathF.Round(dispVol * 100f);
         DrawText(dc, Strings.FormatPercent(dispPct), pctX, y, pctX + pctW, y + h, 10, Win32.FW_SEMIBOLD,
             isMuted && !isDraggingThis ? Theme.Red : Theme.TextSecondary, centered: true);
+
+        if (showOutBtn)
+        {
+            string outId = $"{idPrefix}_out";
+            string? assignedId = _engine.GetSessionOutputDeviceId(sessionId);
+            uint devColor = GetEffectiveDeviceColor(assignedId);
+            bool isDrawerForThis = _openDrawer == FlyoutDrawer.AppOutputDevice &&
+                                   string.Equals(_drawerTargetSessionId, sessionId, StringComparison.Ordinal);
+            bool outHover = string.Equals(_hoverId, outId, StringComparison.Ordinal);
+            bool solid = isDrawerForThis || outHover;
+            uint outBgArgb = solid
+                ? GdiPlus.Argb(devColor)
+                : GdiPlus.Argb(devColor, Theme.IsLight ? (byte)24 : (byte)32);
+            uint outBorderArgb = GdiPlus.Argb(devColor, solid ? (byte)255 : (byte)225);
+            uint outFg = solid ? Theme.OnAccent : devColor;
+            int outY = y + (h - outSz) / 2;
+
+            GdiPlus.FillAndStrokeRoundedRect(gfx, outX, outY, outSz, outSz, SF(5),
+                outBgArgb, outBorderArgb, solid ? 1f : 1.2f);
+            DrawOutputSwitchGlyph(gfx, outX, outY, outSz, outFg);
+
+            string appName = session.DisplayName;
+            string? browserName = ProcessResolver.ResolveBrowserDisplayName(session);
+            RegisterScrollableHit(
+                new Win32.RECT { Left = outX, Top = outY, Right = outX + outSz, Bottom = outY + outSz },
+                outId,
+                () =>
+                {
+                    if (_openDrawer == FlyoutDrawer.AppOutputDevice &&
+                        string.Equals(_drawerTargetSessionId, sessionId, StringComparison.Ordinal))
+                    {
+                        _openDrawer = FlyoutDrawer.None;
+                    }
+                    else
+                    {
+                        _drawerTargetSessionId = sessionId;
+                        _drawerTargetAppName = appName;
+                        _drawerTargetBrowserName = browserName;
+                        _outputDevices = _engine.GetOutputDevices();
+                        RebuildOutputDeviceColorCache();
+                        _openDrawer = FlyoutDrawer.AppOutputDevice;
+                    }
+                    PositionAndResize();
+                },
+                headerH,
+                bodyBottom);
+        }
     }
 
     private void RegisterScrollableHit(Win32.RECT bounds, string id, Action onClick, int headerH, int bodyBottom = int.MaxValue)
@@ -1116,20 +1189,21 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                 var dev = _outputDevices[i];
                 string id = $"fly_dev_{i}";
                 bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
-                uint bg = dev.IsDefault
-                    ? Theme.AccentSoft
-                    : (hovered ? Theme.BgControlHover : Theme.BgCard);
-                uint border = dev.IsDefault ? Theme.Accent : Theme.BorderSubtle;
+                uint devColor = GetEffectiveDeviceColor(dev.Id);
+                uint bgArgb = dev.IsDefault
+                    ? GdiPlus.Argb(devColor, Theme.IsLight ? (byte)28 : (byte)38)
+                    : GdiPlus.Argb(hovered ? Theme.BgControlHover : Theme.BgCard);
+                uint borderArgb = dev.IsDefault ? GdiPlus.Argb(devColor) : GdiPlus.Argb(Theme.BorderSubtle);
 
                 GdiPlus.FillAndStrokeRoundedRect(gfx, padX, ry, w - padX * 2, rowH, SF(6),
-                    GdiPlus.Argb(bg), GdiPlus.Argb(border));
+                    bgArgb, borderArgb);
 
                 int dotSz = S(7);
                 int dotX = padX + S(10);
                 int dotY = ry + (rowH - dotSz) / 2;
                 if (dev.IsDefault)
                 {
-                    if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(Theme.Accent), out nint dBr) == 0 && dBr != 0)
+                    if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(devColor), out nint dBr) == 0 && dBr != 0)
                     {
                         try { GdiPlus.GdipFillEllipse(gfx, dBr, dotX, dotY, dotSz, dotSz); }
                         finally { GdiPlus.GdipDeleteBrush(dBr); }
@@ -1137,7 +1211,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                 }
                 else
                 {
-                    if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(Theme.TextMuted), MathF.Max(1.1f, SF(1.1f)), GdiPlus.UnitPixel, out nint dPen) == 0 && dPen != 0)
+                    if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(devColor), MathF.Max(1.1f, SF(1.1f)), GdiPlus.UnitPixel, out nint dPen) == 0 && dPen != 0)
                     {
                         try { GdiPlus.GdipDrawEllipse(gfx, dPen, dotX, dotY, dotSz, dotSz); }
                         finally { GdiPlus.GdipDeletePen(dPen); }
@@ -1146,7 +1220,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
 
                 DrawText(dc, dev.Name, dotX + dotSz + S(8), ry, w - padX - S(10), ry + rowH,
                     11, dev.IsDefault ? Win32.FW_SEMIBOLD : Win32.FW_NORMAL,
-                    dev.IsDefault ? Theme.Accent : Theme.TextPrimary);
+                    dev.IsDefault ? devColor : Theme.TextPrimary);
 
                 var capturedDev = dev;
                 _hitRegions.Add(new HitRegion(
@@ -1157,6 +1231,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                         _engine.SelectOutputDevice(capturedDev.Id, capturedDev.Name);
                         _openDrawer = FlyoutDrawer.None;
                         _outputDevices = _engine.GetOutputDevices();
+                        RebuildOutputDeviceColorCache();
                         PositionAndResize();
                     }));
 
@@ -1218,6 +1293,116 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                     }));
             }
         }
+        else if (_openDrawer == FlyoutDrawer.AppOutputDevice)
+        {
+            string targetSid = _drawerTargetSessionId ?? string.Empty;
+            string headerTitle = Strings.FlyoutAppAudioTitle(_drawerTargetAppName ?? Strings.FlyoutAudioDeviceFallback);
+            DrawText(dc, headerTitle, padX + S(2), drawerY + S(5), w - padX, drawerY + S(23),
+                10, Win32.FW_BOLD, Theme.TextMuted);
+
+            string? assignedId = _engine.GetSessionOutputDeviceId(targetSid);
+            int rowH = S(26);
+            int rowGap = S(4);
+            int ry = drawerY + S(24);
+            int totalRows = Math.Min(_outputDevices.Count + 1, 6);
+
+            void DrawAppOutRow(string id, string label, bool selected, uint rowColor, Action onPick)
+            {
+                bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+                uint bgArgb = selected
+                    ? GdiPlus.Argb(rowColor, Theme.IsLight ? (byte)28 : (byte)38)
+                    : GdiPlus.Argb(hovered ? Theme.BgControlHover : Theme.BgCard);
+                uint borderArgb = selected ? GdiPlus.Argb(rowColor) : GdiPlus.Argb(Theme.BorderSubtle);
+
+                GdiPlus.FillAndStrokeRoundedRect(gfx, padX, ry, w - padX * 2, rowH, SF(6),
+                    bgArgb, borderArgb);
+
+                int dotSz = S(7);
+                int dotX = padX + S(10);
+                int dotY = ry + (rowH - dotSz) / 2;
+                if (selected)
+                {
+                    if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(rowColor), out nint dBr) == 0 && dBr != 0)
+                    {
+                        try { GdiPlus.GdipFillEllipse(gfx, dBr, dotX, dotY, dotSz, dotSz); }
+                        finally { GdiPlus.GdipDeleteBrush(dBr); }
+                    }
+                }
+                else
+                {
+                    if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(rowColor), MathF.Max(1.1f, SF(1.1f)), GdiPlus.UnitPixel, out nint dPen) == 0 && dPen != 0)
+                    {
+                        try { GdiPlus.GdipDrawEllipse(gfx, dPen, dotX, dotY, dotSz, dotSz); }
+                        finally { GdiPlus.GdipDeletePen(dPen); }
+                    }
+                }
+
+                DrawText(dc, label, dotX + dotSz + S(8), ry, w - padX - S(10), ry + rowH,
+                    11, selected ? Win32.FW_SEMIBOLD : Win32.FW_NORMAL,
+                    selected ? rowColor : Theme.TextPrimary);
+
+                _hitRegions.Add(new HitRegion(
+                    new Win32.RECT { Left = padX, Top = ry, Right = w - padX, Bottom = ry + rowH },
+                    id,
+                    onPick));
+                ry += rowH + rowGap;
+            }
+
+            DrawAppOutRow("fly_appout_default", Strings.AudioDeviceSystemDefault, assignedId == null, GetEffectiveDeviceColor(null), () =>
+            {
+                _engine.SetSessionOutputDevice(targetSid, null, Strings.AudioDeviceSystemDefault);
+                _openDrawer = FlyoutDrawer.None;
+                PositionAndResize();
+            });
+
+            for (int i = 0; i < Math.Min(_outputDevices.Count, totalRows - 1); i++)
+            {
+                var dev = _outputDevices[i];
+                bool selected = assignedId != null && string.Equals(assignedId, dev.Id, StringComparison.OrdinalIgnoreCase);
+                var capturedDev = dev;
+                DrawAppOutRow($"fly_appout_{i}", dev.Name, selected, GetEffectiveDeviceColor(dev.Id), () =>
+                {
+                    _engine.SetSessionOutputDevice(targetSid, capturedDev.Id, capturedDev.Name);
+                    _openDrawer = FlyoutDrawer.None;
+                    PositionAndResize();
+                });
+            }
+
+            if (ShouldShowBrowserOutputNotice() && _drawerTargetBrowserName != null)
+            {
+                int noticeY = ry + S(2);
+                int noticeH = S(58);
+                int noticeW = w - padX * 2;
+                GdiPlus.FillAndStrokeRoundedRect(gfx, padX, noticeY, noticeW, noticeH, SF(6),
+                    GdiPlus.Argb(Theme.AmberSoft), GdiPlus.Argb(Theme.Amber, 120));
+
+                string noticeText = Strings.BrowserOutputScopeNotice(_drawerTargetBrowserName);
+                DrawWrappedText(dc, noticeText, padX + S(8), noticeY + S(5), padX + noticeW - S(8), noticeY + S(35),
+                    9, Win32.FW_MEDIUM, Theme.TextPrimary);
+
+                const string dismissId = "fly_appout_dismiss_notice";
+                string dismissText = Strings.BtnDontShowAgain;
+                int dismissW = Math.Clamp(MeasureTextWidth(dc, dismissText, 9, Win32.FW_SEMIBOLD) + S(14), S(84), noticeW - S(16));
+                int dismissH = S(18);
+                int dismissX = padX + noticeW - S(7) - dismissW;
+                int dismissY = noticeY + noticeH - S(5) - dismissH;
+                bool dismissHover = string.Equals(_hoverId, dismissId, StringComparison.Ordinal);
+
+                GdiPlus.FillRoundedRect(gfx, dismissX, dismissY, dismissW, dismissH, SF(4),
+                    GdiPlus.Argb(Theme.Amber, dismissHover ? (byte)52 : (byte)26));
+                DrawText(dc, dismissText, dismissX, dismissY, dismissX + dismissW, dismissY + dismissH,
+                    9, Win32.FW_SEMIBOLD, Theme.Amber, centered: true);
+
+                _hitRegions.Add(new HitRegion(
+                    new Win32.RECT { Left = dismissX, Top = dismissY, Right = dismissX + dismissW, Bottom = dismissY + dismissH },
+                    dismissId,
+                    () =>
+                    {
+                        _stateStore.UpdateSettings(s => s.SuppressBrowserOutputNotice = true);
+                        PositionAndResize();
+                    }));
+            }
+        }
     }
 
     private void DrawFooter(nint dc, nint gfx, int w, int footerY, int footerH)
@@ -1270,7 +1455,10 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             {
                 _openDrawer = _openDrawer == FlyoutDrawer.AudioDevices ? FlyoutDrawer.None : FlyoutDrawer.AudioDevices;
                 if (_openDrawer == FlyoutDrawer.AudioDevices)
+                {
                     _outputDevices = _engine.GetOutputDevices();
+                    RebuildOutputDeviceColorCache();
+                }
                 PositionAndResize();
             }));
 
@@ -1344,6 +1532,38 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         finally
         {
             GdiPlus.GdipDeletePen(pen);
+        }
+    }
+
+    private void DrawOutputSwitchGlyph(nint gfx, int x, int y, int sz, uint colorRgb)
+    {
+        float cx = x + sz / 2f;
+        float cy = y + sz / 2f;
+        float hw = sz * 0.26f;
+        float ry = sz * 0.155f;
+        float ah = sz * 0.11f;
+
+        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.25f, SF(1.35f)), GdiPlus.UnitPixel, out nint pen) == 0 && pen != 0)
+        {
+            try
+            {
+                GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
+                GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
+
+                // Top arrow ->
+                GdiPlus.GdipDrawLine(gfx, pen, cx - hw, cy - ry, cx + hw, cy - ry);
+                GdiPlus.GdipDrawLine(gfx, pen, cx + hw - ah, cy - ry - ah, cx + hw, cy - ry);
+                GdiPlus.GdipDrawLine(gfx, pen, cx + hw - ah, cy - ry + ah, cx + hw, cy - ry);
+
+                // Bottom arrow <-
+                GdiPlus.GdipDrawLine(gfx, pen, cx + hw, cy + ry, cx - hw, cy + ry);
+                GdiPlus.GdipDrawLine(gfx, pen, cx - hw + ah, cy + ry - ah, cx - hw, cy + ry);
+                GdiPlus.GdipDrawLine(gfx, pen, cx - hw + ah, cy + ry + ah, cx - hw, cy + ry);
+            }
+            finally
+            {
+                GdiPlus.GdipDeletePen(pen);
+            }
         }
     }
 
@@ -1523,6 +1743,26 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             var rc = new Win32.RECT { Left = 0, Top = 0, Right = 1200, Bottom = S(32) };
             Win32.DrawTextW(dc, text, -1, &rc, Win32.DT_CALCRECT | Win32.DT_SINGLELINE | Win32.DT_NOPREFIX);
             return Math.Max(0, rc.Right - rc.Left);
+        }
+        finally
+        {
+            Win32.SelectObject(dc, old);
+        }
+    }
+
+    private void DrawWrappedText(nint dc, string text, int left, int top, int right, int bottom, int ptSize, int weight, uint rgb)
+    {
+        if (right <= left || bottom <= top || string.IsNullOrEmpty(text)) return;
+        nint font = GetOrCreateFont(ptSize, weight);
+        if (font == 0) return;
+
+        nint old = Win32.SelectObject(dc, font);
+        try
+        {
+            Win32.SetTextColor(dc, Theme.ToColorRef(rgb));
+            var rc = new Win32.RECT { Left = left, Top = top, Right = right, Bottom = bottom };
+            Win32.DrawTextW(dc, text, -1, &rc,
+                Win32.DT_LEFT | Win32.DT_WORDBREAK | Win32.DT_END_ELLIPSIS | Win32.DT_NOPREFIX);
         }
         finally
         {

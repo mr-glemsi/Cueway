@@ -720,6 +720,10 @@ internal static unsafe partial class Win32
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool DestroyMenu(nint hMenu);
 
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool ClientToScreen(nint hWnd, ref POINT lpPoint);
+
     [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
     public static partial uint RegisterWindowMessageW(string lpString);
 
@@ -849,6 +853,19 @@ internal static unsafe partial class Win32
 
     [LibraryImport("ole32.dll")]
     public static partial int PropVariantClear(void* pvar);
+
+    // Combase (WinRT activation & HSTRING for per-app audio policy)
+    [LibraryImport("combase.dll")]
+    public static partial int RoGetActivationFactory(nint activatableClassId, Guid* iid, out nint factory);
+
+    [LibraryImport("combase.dll", StringMarshalling = StringMarshalling.Utf16)]
+    public static partial int WindowsCreateString(string sourceString, uint length, out nint hstring);
+
+    [LibraryImport("combase.dll")]
+    public static partial int WindowsDeleteString(nint hstring);
+
+    [LibraryImport("combase.dll")]
+    public static partial nint WindowsGetStringRawBuffer(nint hstring, out uint length);
 
     // Advapi32 (Registry & Elevation)
     [LibraryImport("advapi32.dll", StringMarshalling = StringMarshalling.Utf16)]

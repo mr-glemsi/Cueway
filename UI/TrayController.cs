@@ -14,7 +14,6 @@ internal sealed unsafe class TrayController : IDisposable
 
     private const uint MENU_SHOW = 1;
     private const uint MENU_TOGGLE_LOCK = 2;
-    private const uint MENU_TOGGLE_SOLO = 3;
     private const uint MENU_SETTINGS = 4;
     private const uint MENU_EXIT = 5;
     private const uint MENU_UPDATE = 6;
@@ -37,7 +36,6 @@ internal sealed unsafe class TrayController : IDisposable
     private string? _lastExePath;
     private bool _lastIsPlaying;
     private bool _lastIsMuted;
-    private bool _lastSoloMode;
     private int _lastSleepMins;
     private string? _lastTip;
     private string? _lastThemeId;
@@ -47,7 +45,6 @@ internal sealed unsafe class TrayController : IDisposable
     public event Action? OpenSettingsRequested;
     public event Action? OpenUpdateRequested;
     public event Action? ToggleManualLockRequested;
-    public event Action? ToggleSoloModeRequested;
     public event Action<int>? SleepTimerSelected;
     public event Action? SleepTimerCancelRequested;
     public event Action? ExitRequested;
@@ -90,7 +87,6 @@ internal sealed unsafe class TrayController : IDisposable
         string? exePath = target?.ExePath;
         bool isPlaying = target?.IsPlaying ?? false;
         bool isMuted = target?.IsMuted ?? false;
-        bool soloMode = snapshot.SoloModeEnabled;
         var sleepRem = _getSleepRemaining?.Invoke();
         int sleepMins = sleepRem.HasValue ? Math.Max(1, (int)Math.Ceiling(sleepRem.Value.TotalMinutes)) : 0;
         string themeId = Theme.CurrentId;
@@ -98,8 +94,6 @@ internal sealed unsafe class TrayController : IDisposable
         string tip = target == null
             ? Strings.TrayTipEmpty
             : $"Cueway — {target.DisplayName} ({(target.IsEffectivelyPlaying ? Strings.StatusPlaying : target.IsMuted ? Strings.StatusMuted : Strings.StatusPaused)})";
-        if (soloMode)
-            tip += " [Solo]";
         if (sleepMins > 0)
             tip += $" [{Strings.FlyoutSleepMinutes(sleepMins)}]";
 
@@ -110,7 +104,6 @@ internal sealed unsafe class TrayController : IDisposable
             _currentTrayIcon != 0 &&
             _lastIsPlaying == isPlaying &&
             _lastIsMuted == isMuted &&
-            _lastSoloMode == soloMode &&
             _lastSleepMins == sleepMins &&
             string.Equals(_lastAppKey, appKey, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(_lastExePath, exePath, StringComparison.OrdinalIgnoreCase) &&
@@ -125,7 +118,6 @@ internal sealed unsafe class TrayController : IDisposable
             exePath,
             isPlaying,
             isMuted,
-            soloMode,
             size: 32);
 
         bool ownsIcon = newIcon != 0;
@@ -172,7 +164,6 @@ internal sealed unsafe class TrayController : IDisposable
         _lastExePath = exePath;
         _lastIsPlaying = isPlaying;
         _lastIsMuted = isMuted;
-        _lastSoloMode = soloMode;
         _lastSleepMins = sleepMins;
         _lastTip = tip;
         _lastThemeId = themeId;
@@ -239,7 +230,6 @@ internal sealed unsafe class TrayController : IDisposable
 
             string openLabel = FormatMenuHotkey(Strings.TrayMenuOpen, settings.HotkeyToggleWindow);
             string lockLabel = FormatMenuHotkey(Strings.TrayMenuLockBase, settings.HotkeyManualLock);
-            string soloLabel = FormatMenuHotkey(Strings.TrayMenuSoloBase, settings.HotkeySoloMode);
 
             Win32.AppendMenuW(hMenu, Win32.MF_STRING, MENU_SHOW, openLabel);
             Win32.AppendMenuW(hMenu, Win32.MF_SEPARATOR, 0, null);
@@ -248,11 +238,6 @@ internal sealed unsafe class TrayController : IDisposable
                 Win32.MF_STRING | (snapshot.IsManualLock ? Win32.MF_CHECKED : Win32.MF_UNCHECKED),
                 MENU_TOGGLE_LOCK,
                 lockLabel);
-            Win32.AppendMenuW(
-                hMenu,
-                Win32.MF_STRING | (snapshot.SoloModeEnabled ? Win32.MF_CHECKED : Win32.MF_UNCHECKED),
-                MENU_TOGGLE_SOLO,
-                soloLabel);
 
             hSleepMenu = Win32.CreatePopupMenu();
             if (hSleepMenu != 0)
@@ -301,9 +286,6 @@ internal sealed unsafe class TrayController : IDisposable
                     break;
                 case MENU_TOGGLE_LOCK:
                     ToggleManualLockRequested?.Invoke();
-                    break;
-                case MENU_TOGGLE_SOLO:
-                    ToggleSoloModeRequested?.Invoke();
                     break;
                 case MENU_SLEEP_15:
                     SleepTimerSelected?.Invoke(15);
