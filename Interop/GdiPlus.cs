@@ -108,6 +108,9 @@ internal static unsafe partial class GdiPlus
     [LibraryImport("gdiplus.dll")]
     public static partial int GdipCreateBitmapFromHICON(nint hicon, out nint bitmap);
 
+    [LibraryImport("gdiplus.dll", StringMarshalling = StringMarshalling.Utf16)]
+    public static partial int GdipCreateBitmapFromFile(string filename, out nint bitmap);
+
     [LibraryImport("gdiplus.dll")]
     public static partial int GdipGetImageGraphicsContext(nint image, out nint graphics);
 

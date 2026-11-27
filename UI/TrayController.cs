@@ -59,6 +59,13 @@ internal sealed unsafe class TrayController : IDisposable
         Update(snapshot);
     }
 
+    public void ForceRefresh(RouterStateSnapshot snapshot)
+    {
+        if (_disposed) return;
+        _lastAppKey = null;
+        Update(snapshot);
+    }
+
     public void Update(RouterStateSnapshot snapshot)
     {
         if (_disposed) return;

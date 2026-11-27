@@ -29,6 +29,7 @@ internal sealed class MediaSessionManager : IDisposable
     private bool _disposed;
 
     public event Action? SessionsUpdated;
+    public event Action<string, string>? SiteIconReceived;
 
     private static readonly HashSet<string> KnownVideoExes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -122,6 +123,108 @@ internal sealed class MediaSessionManager : IDisposable
                await _refreshLock.WaitAsync(0));
     }
 
+    private static bool IsSmtcCoveredByBridge(
+        IReadOnlyList<MediaSessionInfo> bSessions,
+        string? siteKey,
+        string title,
+        string artist,
+        bool isPlaying,
+        bool bridgeConnectedForBrowser)
+    {
+        if (bridgeConnectedForBrowser && !isPlaying)
+            return true;
+
+        foreach (var b in bSessions)
+        {
+            if (!string.IsNullOrEmpty(siteKey) &&
+                string.Equals(b.SiteKey, siteKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(title) &&
+                !string.IsNullOrWhiteSpace(b.Title) &&
+                (b.Title.Contains(title, StringComparison.OrdinalIgnoreCase) ||
+                 title.Contains(b.Title, StringComparison.OrdinalIgnoreCase) ||
+                 HasStrongTitleOverlap(title, b.Title)))
+            {
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(artist) &&
+                !string.IsNullOrWhiteSpace(b.Artist) &&
+                (b.Artist.Equals(artist, StringComparison.OrdinalIgnoreCase) ||
+                 b.Artist.Contains(artist, StringComparison.OrdinalIgnoreCase) ||
+                 artist.Contains(b.Artist, StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+        }
+
+        if (string.IsNullOrEmpty(siteKey))
+        {
+            if (!isPlaying || string.IsNullOrWhiteSpace(title))
+                return true;
+
+            if (bridgeConnectedForBrowser)
+            {
+                foreach (var b in bSessions)
+                {
+                    if (b.IsPlaying)
+                        return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasStrongTitleOverlap(string? a, string? b)
+    {
+        var setA = TokenizeTitleWords(a);
+        if (setA.Count < 2)
+            return false;
+
+        var setB = TokenizeTitleWords(b);
+        if (setB.Count < 2)
+            return false;
+
+        int shared = 0;
+        foreach (string w in setA)
+        {
+            if (setB.Contains(w))
+                shared++;
+        }
+
+        return shared >= 3 || shared * 2 >= Math.Min(setA.Count, setB.Count);
+    }
+
+    private static HashSet<string> TokenizeTitleWords(string? text)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(text))
+            return set;
+
+        int start = -1;
+        for (int i = 0; i <= text.Length; i++)
+        {
+            bool isWordChar = i < text.Length && char.IsLetterOrDigit(text[i]);
+            if (isWordChar)
+            {
+                if (start < 0) start = i;
+            }
+            else if (start >= 0)
+            {
+                int len = i - start;
+                if (len >= 3)
+                    set.Add(text.Substring(start, len));
+                start = -1;
+            }
+        }
+
+        return set;
+    }
+
     private async Task RefreshCoreAsync()
     {
         if (_disposed) return;
@@ -196,8 +299,13 @@ internal sealed class MediaSessionManager : IDisposable
 
                     string appKey = !string.IsNullOrEmpty(siteKey) ? $"{browserKey}:{siteKey}" : browserKey;
                     string displayName = !string.IsNullOrEmpty(siteKey)
-                        ? BrowserSiteScanner.FormatSiteDisplayName(siteKey)
+                        ? BrowserSiteScanner.ResolveSiteDisplayName(siteKey, tab.SiteName, tab.Title, tab.Url)
                         : ProcessResolver.FormatDisplayName(browserKey, exePath);
+
+                    if (!string.IsNullOrEmpty(siteKey) && !string.IsNullOrEmpty(tab.IconDataUrl))
+                    {
+                        SiteIconReceived?.Invoke(siteKey, tab.IconDataUrl);
+                    }
 
                     string baseId = $"bridge:{browserKey}:{tab.TabId}";
                     seenBridgeIds.TryGetValue(baseId, out int occ);
@@ -317,17 +425,7 @@ internal sealed class MediaSessionManager : IDisposable
                             if (bridgeByBrowser.TryGetValue(resolved.AppKey, out var bSessions) && bSessions.Count > 0)
                             {
                                 var quickSite = BrowserSiteScanner.TryResolveQuickBrowserSite(resolved.AppKey, aumid, title, artist, album);
-                                bool quickCovered = bSessions.Any(b =>
-                                    (quickSite.HasValue &&
-                                     string.Equals(b.SiteKey, quickSite.Value.SiteKey, StringComparison.OrdinalIgnoreCase)) ||
-                                    (!string.IsNullOrWhiteSpace(title) &&
-                                     !string.IsNullOrWhiteSpace(b.Title) &&
-                                     (b.Title.Contains(title, StringComparison.OrdinalIgnoreCase) ||
-                                      title.Contains(b.Title, StringComparison.OrdinalIgnoreCase))));
-
-                                if (quickCovered ||
-                                    (bridgeConnectedForBrowser && !isPlaying) ||
-                                    (!quickSite.HasValue && (!isPlaying || string.IsNullOrWhiteSpace(title))))
+                                if (IsSmtcCoveredByBridge(bSessions, quickSite?.SiteKey, title, artist, isPlaying, bridgeConnectedForBrowser))
                                 {
                                     continue;
                                 }
@@ -353,17 +451,7 @@ internal sealed class MediaSessionManager : IDisposable
                             // Suppress duplicate SMTC entry ONLY when the browser extension bridge already covers that same tab/site
                             if (bridgeByBrowser.TryGetValue(resolved.AppKey, out bSessions) && bSessions.Count > 0)
                             {
-                                bool covered = bSessions.Any(b =>
-                                    (!string.IsNullOrEmpty(siteKey) &&
-                                     string.Equals(b.SiteKey, siteKey, StringComparison.OrdinalIgnoreCase)) ||
-                                    (!string.IsNullOrWhiteSpace(title) &&
-                                     !string.IsNullOrWhiteSpace(b.Title) &&
-                                     (b.Title.Contains(title, StringComparison.OrdinalIgnoreCase) ||
-                                      title.Contains(b.Title, StringComparison.OrdinalIgnoreCase))));
-
-                                if (covered ||
-                                    (bridgeConnectedForBrowser && !isPlaying) ||
-                                    (string.IsNullOrEmpty(siteKey) && (!isPlaying || string.IsNullOrWhiteSpace(title))))
+                                if (IsSmtcCoveredByBridge(bSessions, siteKey, title, artist, isPlaying, bridgeConnectedForBrowser))
                                 {
                                     continue;
                                 }

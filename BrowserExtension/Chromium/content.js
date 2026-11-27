@@ -1,11 +1,14 @@
 (() => {
-  const WMR_VERSION = 5;
+  const WMR_VERSION = 6;
   if (window.__wmrVersion === WMR_VERSION) return;
   try { window.__wmrCleanup?.(); } catch {}
   window.__wmrVersion = WMR_VERSION;
 
   const api = globalThis.browser ?? globalThis.chrome;
+  const IS_TOP_FRAME = window === window.top;
   const FEED_HOSTS = /(^|\.)(x\.com|twitter\.com|instagram\.com|tiktok\.com|reddit\.com|facebook\.com)$/i;
+  const GENERIC_SITE_WORDS = new Set(["home", "index", "video", "player", "watch", "embed", "live", "anasayfa", "ana sayfa"]);
+  const SECOND_LEVEL_TLDS = new Set(["com.tr", "org.tr", "net.tr", "co.uk", "org.uk", "com.br", "co.jp", "com.au", "co.kr", "com.cn"]);
 
   const PLAY_PAUSE_SELECTORS = [
     "#play-pause-button",
@@ -39,8 +42,10 @@
   let lastActiveEl = null;
   let lastMediaSnapshot = null;
   let hadMediaOnHost = "";
+  let hadMediaInFrame = false;
   let missingSince = 0;
   let lastSerialized = "";
+  let lastPageMetaSig = "";
   let watcherId = 0;
   let watcherIntervalMs = 0;
   let lastShadowScanTs = 0;
@@ -134,6 +139,12 @@
     if (!(hasSrc && (el.readyState > 0 || dur > 0 || !el.paused))) return false;
 
     if (el.ended && el.paused && !isDedicatedWatchUrl()) return false;
+
+    if (!IS_TOP_FRAME && el.tagName === "VIDEO" && (el.paused || el.muted || el.volume === 0) &&
+        !document.hidden && el !== lastActiveEl) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 80 || rect.height < 60) return false;
+    }
 
     const host = normalizedHost();
     if (host.includes("youtube.com") && host !== "music.youtube.com" && !isDedicatedWatchUrl() && el.paused) {
@@ -275,6 +286,62 @@
     return (document.title || "").replace(/^\(\d+\+?\)\s*/, "").trim();
   }
 
+  function extractSiteName() {
+    if (!IS_TOP_FRAME) return "";
+
+    const metaSelectors = [
+      "meta[property='og:site_name']",
+      "meta[name='og:site_name']",
+      "meta[name='application-name']",
+      "meta[name='apple-mobile-web-app-title']"
+    ];
+    for (const sel of metaSelectors) {
+      const val = document.querySelector(sel)?.getAttribute("content")?.trim() || "";
+      if (val.length >= 2 && val.length <= 28 && !val.includes("://") && !GENERIC_SITE_WORDS.has(val.toLowerCase())) {
+        return val;
+      }
+    }
+
+    const rawTitle = cleanDocTitle();
+    if (!rawTitle) return "";
+
+    const host = normalizedHost();
+    const parts = host.split(".").filter(Boolean);
+    if (parts.length === 0) return "";
+
+    const lastTwo = parts.length >= 2 ? `${parts[parts.length - 2]}.${parts[parts.length - 1]}` : "";
+    let label = parts[0];
+    let joined = parts.length >= 2 ? `${parts[parts.length - 2]}${parts[parts.length - 1]}` : parts[0];
+    if (parts.length >= 3 && SECOND_LEVEL_TLDS.has(lastTwo)) {
+      label = parts[parts.length - 3];
+      joined = label;
+    } else if (parts.length >= 2) {
+      label = parts[parts.length - 2];
+    }
+
+    const labelNorm = label.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const joinedNorm = joined.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const segs = rawTitle.split(/\s+(?:\||-|—|–|·|•|:)\s+/).map((s) => s.trim()).filter(Boolean);
+    if (segs.length >= 2) {
+      const candidates = [segs[segs.length - 1], segs[0]];
+      for (const seg of candidates) {
+        if (seg.length < 2 || seg.length > 28 || GENERIC_SITE_WORDS.has(seg.toLowerCase())) continue;
+        const segNorm = seg.toLowerCase().replace(/[^a-z0-9]/g, "");
+        if (!segNorm) continue;
+        if (segNorm === labelNorm || segNorm === joinedNorm) {
+          return seg;
+        }
+        if (labelNorm.length >= 4 &&
+            (segNorm.startsWith(labelNorm) || labelNorm.startsWith(segNorm)) &&
+            Math.abs(segNorm.length - labelNorm.length) <= 4) {
+          return seg;
+        }
+      }
+    }
+
+    return "";
+  }
+
   function extractMetadata() {
     const host = (location.hostname || "").toLowerCase();
     let title = "";
@@ -347,7 +414,7 @@
         hadMediaOnHost = "";
         missingSince = 0;
       }
-      return { hasMedia: false, url: cleanUrl };
+      return { hasMedia: false, isIframe: !IS_TOP_FRAME, url: cleanUrl };
     }
 
     missingSince = 0;
@@ -361,9 +428,11 @@
 
     const state = {
       hasMedia: true,
+      isIframe: !IS_TOP_FRAME,
       url: cleanUrl,
       title,
       artist,
+      siteName: IS_TOP_FRAME ? extractSiteName() : "",
       isPlaying,
       isPaused: !isPlaying,
       isMuted,
@@ -378,10 +447,44 @@
     return state;
   }
 
+  function reportPageMeta(force = false) {
+    if (!IS_TOP_FRAME) return;
+    const url = sanitizeUrl();
+    const title = cleanDocTitle();
+    const siteName = extractSiteName();
+    const metaSig = `${url}|${title}|${siteName}`;
+    if (!force && metaSig === lastPageMetaSig) return;
+    lastPageMetaSig = metaSig;
+    try {
+      const res = api.runtime.sendMessage({ type: "page_meta", url, title, siteName });
+      if (res && typeof res.catch === "function") res.catch(() => {});
+    } catch {}
+  }
+
   function reportState(force = false) {
     if (window.__wmrVersion !== WMR_VERSION) return;
+    if (IS_TOP_FRAME) {
+      reportPageMeta(force);
+    }
+
     const state = buildState();
-    const signature = `${state.hasMedia ? 1 : 0}|${state.url || ""}|${state.title || ""}|${state.artist || ""}|${state.isPlaying ? 1 : 0}|${state.isMuted ? 1 : 0}|${Math.round((state.volume ?? 1) * 100)}|${state.hasVideo ? 1 : 0}`;
+    if (!IS_TOP_FRAME && !state.hasMedia) {
+      if (hadMediaInFrame) {
+        hadMediaInFrame = false;
+        lastSerialized = "";
+        try {
+          const res = api.runtime.sendMessage({ type: "media_state", state });
+          if (res && typeof res.catch === "function") res.catch(() => {});
+        } catch {}
+      }
+      ensureWatcher(false);
+      return;
+    }
+    if (state.hasMedia) {
+      hadMediaInFrame = true;
+    }
+
+    const signature = `${state.hasMedia ? 1 : 0}|${state.url || ""}|${state.title || ""}|${state.artist || ""}|${state.siteName || ""}|${state.isPlaying ? 1 : 0}|${state.isMuted ? 1 : 0}|${Math.round((state.volume ?? 1) * 100)}|${state.hasVideo ? 1 : 0}`;
 
     if (force || signature !== lastSerialized) {
       lastSerialized = signature;
@@ -521,13 +624,15 @@
     if (window.__wmrVersion !== WMR_VERSION) return;
     lastMediaSnapshot = null;
     hadMediaOnHost = "";
+    hadMediaInFrame = false;
     missingSince = 0;
     lastActiveEl = null;
     lastSerialized = "";
+    lastPageMetaSig = "";
     try {
       const res = api.runtime.sendMessage({
         type: "media_state",
-        state: { hasMedia: false, url: sanitizeUrl() }
+        state: { hasMedia: false, isIframe: !IS_TOP_FRAME, url: sanitizeUrl() }
       });
       if (res && typeof res.catch === "function") res.catch(() => {});
     } catch {}
@@ -550,7 +655,7 @@
   const titleEl = document.querySelector("title");
   if (titleEl && typeof MutationObserver !== "undefined") {
     titleObs = new MutationObserver(() => {
-      if (window.__wmrVersion === WMR_VERSION && (lastMediaSnapshot || document.querySelector("video, audio"))) {
+      if (window.__wmrVersion === WMR_VERSION && (IS_TOP_FRAME || lastMediaSnapshot || document.querySelector("video, audio"))) {
         scheduleReport(false);
       }
     });

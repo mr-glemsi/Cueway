@@ -114,6 +114,28 @@ internal static unsafe partial class BrowserSiteScanner
     [GeneratedRegex(@"(?:\s*[-–—|,]\s*|\s*\()(Ses\s+çalıyor|Ses\s+çalınıyor|Ses\s+yürütülüyor|Ses\s+yürütüyor|Ses\s+oynatılıyor|Ses\s+oynatıyor|Sesi\s+kapatıldı|Sesi\s+kısıldı|Sessize\s+alındı|Uyku\s+modunda|Uyku\s+modundaki\s+sekme|Sabitlendi|Playing\s+audio|Audio\s+playing|Audio\s+is\s+playing|Tab\s+is\s+playing\s+audio|Audio\s+wird\s+wiedergegeben|Contenu\s+audio\s+en\s+cours\s+de\s+lecture|Reproduciendo\s+audio|Воспроизводится\s+звук|正在播放音频|正在播放聲音|Sleeping\s+tab|Pinned|Muted)\)?\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex TabAudioStateRx();
 
+    private static readonly HashSet<string> BuiltInKnownSites = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "youtube", "youtubemusic", "x", "twitch", "kick",
+        "spotifyweb", "soundcloud", "netflix", "instagram", "tiktok",
+        "reddit", "facebook", "disneyplus", "primevideo", "vimeo",
+        "dailymotion", "bilibili"
+    };
+
+    private static readonly HashSet<string> SecondLevelPublicSuffixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "com.tr", "org.tr", "net.tr", "co.uk", "org.uk",
+        "com.br", "co.jp", "com.au", "co.kr", "com.cn"
+    };
+
+    private static readonly HashSet<string> GenericSiteTitleWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "home", "index", "video", "player", "watch", "embed", "live", "anasayfa", "ana sayfa"
+    };
+
+    public static bool IsBuiltInKnownSite(string? siteKey)
+        => !string.IsNullOrEmpty(siteKey) && BuiltInKnownSites.Contains(siteKey);
+
     public static bool IsMusicSite(string? siteKey)
         => !string.IsNullOrEmpty(siteKey) && MusicSiteKeys.Contains(siteKey);
 
@@ -158,6 +180,99 @@ internal static unsafe partial class BrowserSiteScanner
             "bilibili" => "Bilibili",
             _ => char.ToUpperInvariant(siteKey[0]) + siteKey[1..]
         };
+    }
+
+    public static string ResolveSiteDisplayName(string siteKey, string? pageSiteName, string? pageTitle, string? url)
+    {
+        if (IsBuiltInKnownSite(siteKey))
+            return FormatSiteDisplayName(siteKey);
+
+        if (!string.IsNullOrWhiteSpace(pageSiteName))
+        {
+            string clean = pageSiteName.Trim();
+            if (clean.Length is >= 2 and <= 32 &&
+                !clean.Contains("://", StringComparison.Ordinal) &&
+                !GenericSiteTitleWords.Contains(clean))
+            {
+                return clean;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(pageTitle))
+        {
+            var (label, joined) = ExtractHostLabels(url);
+            string labelNorm = NormalizeAlphaNum(label);
+            string joinedNorm = NormalizeAlphaNum(joined);
+
+            string[] segs = pageTitle.Split(
+                [" | ", " - ", " — ", " – ", " · ", " • ", " : "],
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (segs.Length >= 2)
+            {
+                string[] candidates = [segs[^1], segs[0]];
+                foreach (string seg in candidates)
+                {
+                    if (seg.Length is < 2 or > 32 || GenericSiteTitleWords.Contains(seg))
+                        continue;
+                    string segNorm = NormalizeAlphaNum(seg);
+                    if (string.IsNullOrEmpty(segNorm))
+                        continue;
+
+                    if (segNorm == labelNorm || segNorm == joinedNorm)
+                        return seg;
+
+                    if (labelNorm.Length >= 4 &&
+                        (segNorm.StartsWith(labelNorm, StringComparison.Ordinal) ||
+                         labelNorm.StartsWith(segNorm, StringComparison.Ordinal)) &&
+                        Math.Abs(segNorm.Length - labelNorm.Length) <= 4)
+                    {
+                        return seg;
+                    }
+                }
+            }
+        }
+
+        return FormatSiteDisplayName(siteKey);
+    }
+
+    private static string NormalizeAlphaNum(string? s)
+    {
+        if (string.IsNullOrEmpty(s))
+            return string.Empty;
+        var sb = new StringBuilder(s.Length);
+        foreach (char ch in s)
+        {
+            if (char.IsAsciiLetterOrDigit(ch))
+                sb.Append(char.ToLowerInvariant(ch));
+        }
+        return sb.ToString();
+    }
+
+    private static (string Label, string Joined) ExtractHostLabels(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return (string.Empty, string.Empty);
+
+        string host = uri.Host.ToLowerInvariant();
+        if (host.StartsWith("www.", StringComparison.Ordinal)) host = host[4..];
+        if (host.StartsWith("m.", StringComparison.Ordinal)) host = host[2..];
+        if (host.StartsWith("mobile.", StringComparison.Ordinal)) host = host[7..];
+
+        string[] parts = host.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0)
+            return (string.Empty, string.Empty);
+
+        if (parts.Length >= 3)
+        {
+            string tailTwo = $"{parts[^2]}.{parts[^1]}";
+            if (SecondLevelPublicSuffixes.Contains(tailTwo))
+                return (parts[^3], parts[^3]);
+        }
+
+        if (parts.Length >= 2)
+            return (parts[^2], parts[^2] + parts[^1]);
+
+        return (parts[0], parts[0]);
     }
 
     public static string NormalizeBrowserWindowTitle(string? title)
@@ -1070,13 +1185,10 @@ internal static unsafe partial class BrowserSiteScanner
             return null;
 
         string host = uri.Host.ToLowerInvariant();
-        if (host.StartsWith("www.", StringComparison.Ordinal)) host = host[4..];
-        if (host.StartsWith("m.", StringComparison.Ordinal)) host = host[2..];
         if (host is "localhost" or "127.0.0.1" || string.IsNullOrEmpty(host))
             return null;
 
-        int dot = host.IndexOf('.');
-        string label = dot > 0 ? host[..dot] : host;
+        var (label, _) = ExtractHostLabels(url);
         if (label is "google" or "bing" or "duckduckgo" or "yandex" or "github" or "chatgpt" or "claude")
             return null;
 

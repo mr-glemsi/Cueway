@@ -8,8 +8,8 @@ Bu klasör **Mozilla Add-ons (Firefox / Zen Browser)** ve **Microsoft Edge Add-o
 
 | Dosya | Kullanım Yeri |
 | :--- | :--- |
-| `StoreSubmission\Cueway-Companion-Firefox-AMO-v1.2.3.zip` | Mozilla AMO yükleme paketi (Firefox & Zen) |
-| `StoreSubmission\Cueway-Companion-Edge-Chrome-v1.2.3.zip` | Microsoft Edge Add-ons / Chrome Web Store yükleme paketi |
+| `StoreSubmission\Cueway-Companion-Firefox-AMO-v1.2.4.zip` | Mozilla AMO yükleme paketi (Firefox & Zen) |
+| `StoreSubmission\Cueway-Companion-Edge-Chrome-v1.2.4.zip` | Microsoft Edge Add-ons / Chrome Web Store yükleme paketi |
 | `StoreSubmission\Assets\edge-store-logo-300x300.png` | Edge Partner Center mağaza logosu (`300x300`) |
 | `StoreSubmission\Assets\store-promo-440x280.png` | Mağaza tanıtım görseli (`440x280`) |
 | `StoreSubmission\Assets\store-screenshot-1280x800.png` | Mağaza ekran görüntüsü (`1280x800`) |
@@ -23,7 +23,7 @@ Giriş: `https://addons.mozilla.org/developers/addon/submit/distribution`
 
 ### Hangi Seçeneği Seçmelisin?
 * **"On your own" (Önerilen Hızlı Yol — Liste Dışı İmzalı `.xpi`):**
-  1. `"On your own"` seç → `Cueway-Companion-Firefox-AMO-v1.2.3.zip` yükle.
+  1. `"On your own"` seç → `Cueway-Companion-Firefox-AMO-v1.2.4.zip` yükle.
   2. Kaynak kod isterse hayır de (kod küçültülmemiş/minify edilmemiş, açık).
   3. Genellikle birkaç dakika içinde imzalı **`.xpi`** dosyası çıkar.
   4. İndirdiğin dosyanın adını `cueway-companion.xpi` yapıp şu klasöre koy:
@@ -67,7 +67,7 @@ Data handling & privacy:
 Giriş: `https://partner.microsoft.com/dashboard/microsoftedge`
 
 1. Microsoft hesabınla ücretsiz Edge Developer kaydı oluştur.
-2. **Create new extension** → Packages → **`Cueway-Companion-Edge-Chrome-v1.2.3.zip`** yükle.
+2. **Create new extension** → Packages → **`Cueway-Companion-Edge-Chrome-v1.2.4.zip`** yükle.
 3. **Store listing**:
    * Logo (`300x300`): `StoreSubmission\Assets\edge-store-logo-300x300.png`
    * Promotional tile (`440x280`): `StoreSubmission\Assets\store-promo-440x280.png`

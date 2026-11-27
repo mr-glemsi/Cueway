@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Cueway Companion",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Controls individual browser media tabs directly from Cueway without stealing focus.",
   "permissions": [
     "tabs",
@@ -25,7 +25,7 @@
         "content.js"
       ],
       "run_at": "document_idle",
-      "all_frames": false
+      "all_frames": true
     }
   ],
   "browser_action": {

@@ -15,6 +15,8 @@ internal sealed class BridgeTabDto
     public string Url { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
     public string Artist { get; set; } = string.Empty;
+    public string SiteName { get; set; } = string.Empty;
+    public string IconDataUrl { get; set; } = string.Empty;
     public bool IsPlaying { get; set; }
     public bool IsPaused { get; set; }
     public bool IsMuted { get; set; }

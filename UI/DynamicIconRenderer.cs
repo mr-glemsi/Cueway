@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using Cueway.Interop;
 using Cueway.Media;
 
@@ -6,9 +7,25 @@ namespace Cueway.UI;
 
 internal sealed unsafe class DynamicIconRenderer : IDisposable
 {
+    private const string PngDataUrlPrefix = "data:image/png;base64,";
+    private const int MaxIconBytes = 64 * 1024;
+
+    private static readonly string SiteIconsDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Cueway",
+        "SiteIcons");
+
+    private static readonly HashSet<string> BuiltInBrandVectorSites = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "youtube", "youtubemusic", "x", "twitch", "kick",
+        "spotifyweb", "soundcloud", "netflix", "instagram", "tiktok",
+        "reddit", "facebook"
+    };
+
     private readonly object _cacheLock = new();
     private readonly Dictionary<string, nint> _exeIconCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, nint> _siteIconCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _cachedSiteIconHashes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<int, nint> _brandIconCache = new();
 
     public nint GetIconForApp(string? appKey, string? exePath)
@@ -72,19 +89,164 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
         }
     }
 
+    public static bool HasBuiltInBrandVector(string? siteKey)
+        => !string.IsNullOrEmpty(siteKey) && BuiltInBrandVectorSites.Contains(siteKey);
+
+    private static string SanitizeSiteKey(string siteKey)
+    {
+        Span<char> buf = stackalloc char[Math.Min(siteKey.Length, 48)];
+        int n = 0;
+        foreach (char c in siteKey)
+        {
+            if (n >= buf.Length) break;
+            if (char.IsAsciiLetterOrDigit(c) || c == '_' || c == '-')
+                buf[n++] = char.ToLowerInvariant(c);
+        }
+        return n > 0 ? new string(buf[..n]) : string.Empty;
+    }
+
+    public bool CacheSiteIconFromDataUrl(string? siteKey, string? iconDataUrl)
+    {
+        if (string.IsNullOrWhiteSpace(siteKey) ||
+            string.IsNullOrWhiteSpace(iconDataUrl) ||
+            HasBuiltInBrandVector(siteKey) ||
+            !iconDataUrl.StartsWith(PngDataUrlPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string safeKey = SanitizeSiteKey(siteKey);
+        if (string.IsNullOrEmpty(safeKey))
+            return false;
+
+        byte[] bytes;
+        try
+        {
+            bytes = Convert.FromBase64String(iconDataUrl[PngDataUrlPrefix.Length..]);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (bytes.Length < 16 || bytes.Length > MaxIconBytes)
+            return false;
+
+        // PNG 8-byte signature check: 89 50 4E 47 0D 0A 1A 0A
+        if (bytes[0] != 0x89 || bytes[1] != 0x50 || bytes[2] != 0x4E || bytes[3] != 0x47 ||
+            bytes[4] != 0x0D || bytes[5] != 0x0A || bytes[6] != 0x1A || bytes[7] != 0x0A)
+        {
+            return false;
+        }
+
+        string digest = Convert.ToHexString(SHA256.HashData(bytes));
+        string filePath = Path.Combine(SiteIconsDir, $"{safeKey}.png");
+
+        lock (_cacheLock)
+        {
+            if (_cachedSiteIconHashes.TryGetValue(safeKey, out string? prevDigest) &&
+                string.Equals(prevDigest, digest, StringComparison.Ordinal) &&
+                File.Exists(filePath))
+            {
+                return false;
+            }
+        }
+
+        try
+        {
+            Directory.CreateDirectory(SiteIconsDir);
+            File.WriteAllBytes(filePath, bytes);
+        }
+        catch
+        {
+            return false;
+        }
+
+        lock (_cacheLock)
+        {
+            _cachedSiteIconHashes[safeKey] = digest;
+            string prefix = $"{safeKey}:";
+            List<string>? toRemove = null;
+            foreach (string key in _siteIconCache.Keys)
+            {
+                if (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    (toRemove ??= []).Add(key);
+            }
+            if (toRemove != null)
+            {
+                foreach (string k in toRemove)
+                {
+                    if (_siteIconCache.Remove(k, out nint oldIcon) && oldIcon != 0)
+                        Win32.DestroyIcon(oldIcon);
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private static nint TryLoadPngFileAsIcon(string filePath, int size)
+    {
+        if (!File.Exists(filePath))
+            return 0;
+
+        int stride = size * 4;
+        byte* pixels = (byte*)NativeMemory.AllocZeroed((nuint)(stride * size));
+        nint srcBmp = 0;
+        nint dstBmp = 0;
+        nint gfx = 0;
+
+        try
+        {
+            if (GdiPlus.GdipCreateBitmapFromFile(filePath, out srcBmp) != 0 || srcBmp == 0)
+                return 0;
+            if (GdiPlus.GdipCreateBitmapFromScan0(size, size, stride, GdiPlus.PixelFormat32bppPARGB, (nint)pixels, out dstBmp) != 0 || dstBmp == 0)
+                return 0;
+            if (GdiPlus.GdipGetImageGraphicsContext(dstBmp, out gfx) != 0 || gfx == 0)
+                return 0;
+
+            GdiPlus.GdipSetSmoothingMode(gfx, GdiPlus.SmoothingModeAntiAlias);
+            GdiPlus.GdipSetPixelOffsetMode(gfx, GdiPlus.PixelOffsetModeHighQuality);
+            GdiPlus.GdipSetInterpolationMode(gfx, GdiPlus.InterpolationModeHighQualityBicubic);
+            GdiPlus.GdipGraphicsClear(gfx, 0x00000000);
+            GdiPlus.GdipDrawImageRectI(gfx, srcBmp, 0, 0, size, size);
+
+            if (GdiPlus.GdipCreateHICONFromBitmap(dstBmp, out nint hIcon) == 0)
+                return hIcon;
+            return 0;
+        }
+        finally
+        {
+            if (gfx != 0) GdiPlus.GdipDeleteGraphics(gfx);
+            if (dstBmp != 0) GdiPlus.GdipDisposeImage(dstBmp);
+            if (srcBmp != 0) GdiPlus.GdipDisposeImage(srcBmp);
+            NativeMemory.Free(pixels);
+        }
+    }
+
     public nint GetOrCreateSiteIcon(string siteKey, int size = 48)
     {
         if (string.IsNullOrWhiteSpace(siteKey))
             return 0;
 
-        string cacheKey = $"{siteKey.ToLowerInvariant()}:{size}";
+        string normalizedKey = siteKey.ToLowerInvariant();
+        string cacheKey = $"{normalizedKey}:{size}";
         lock (_cacheLock)
         {
             if (_siteIconCache.TryGetValue(cacheKey, out nint cached))
                 return cached;
         }
 
-        nint hIcon = RenderSiteBrandIcon(siteKey.ToLowerInvariant(), size);
+        nint hIcon = 0;
+        if (!HasBuiltInBrandVector(normalizedKey))
+        {
+            string safeKey = SanitizeSiteKey(normalizedKey);
+            if (!string.IsNullOrEmpty(safeKey))
+                hIcon = TryLoadPngFileAsIcon(Path.Combine(SiteIconsDir, $"{safeKey}.png"), size);
+        }
+
+        if (hIcon == 0)
+            hIcon = RenderSiteBrandIcon(normalizedKey, size);
         if (hIcon == 0)
             return 0;
 

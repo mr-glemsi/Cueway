@@ -139,6 +139,17 @@ internal static unsafe class Program
                 }
             });
             engine.OsdRequested += msg => mainWindow.BeginInvoke(() => osd.ShowMessage(msg));
+            sessionManager.SiteIconReceived += (siteKey, iconDataUrl) =>
+            {
+                if (iconRenderer.CacheSiteIconFromDataUrl(siteKey, iconDataUrl))
+                {
+                    mainWindow.BeginInvoke(() =>
+                    {
+                        tray.ForceRefresh(engine.GetSnapshot());
+                        mainWindow.RefreshVisuals();
+                    });
+                }
+            };
             updateService.UpdateAvailableNotified += ver => mainWindow.BeginInvoke(() =>
             {
                 if (!Win32.IsWindowVisible(mainWindow.Handle))

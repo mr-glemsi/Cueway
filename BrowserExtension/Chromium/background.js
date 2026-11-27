@@ -1,8 +1,14 @@
 const api = globalThis.browser ?? globalThis.chrome;
 const WS_URL = "ws://127.0.0.1:47621";
-const BRIDGE_PROTOCOL_VERSION = 3;
+const BRIDGE_PROTOCOL_VERSION = 4;
+const BUILTIN_ICON_HOSTS = /(^|\.)(youtube\.com|youtu\.be|x\.com|twitter\.com|twitch\.tv|kick\.com|spotify\.com|soundcloud\.com|netflix\.com|instagram\.com|tiktok\.com|reddit\.com|facebook\.com)$/i;
 
 const tabStates = new Map();
+const tabFrames = new Map();
+const tabMeta = new Map();
+const hostIconCache = new Map();
+const hostIconPending = new Set();
+const hostIconAttempts = new Map();
 let ws = null;
 let connected = false;
 let reconnectDelayMs = 1000;
@@ -10,6 +16,26 @@ let reconnectTimer = null;
 let connectTimeout = null;
 let heartbeatTimer = null;
 let flushTimer = null;
+
+function serializeTabState(st) {
+  return {
+    tabId: st.tabId,
+    windowId: st.windowId,
+    url: st.url,
+    title: st.title,
+    artist: st.artist,
+    siteName: st.siteName || "",
+    iconDataUrl: st.iconDataUrl || "",
+    isPlaying: Boolean(st.isPlaying),
+    isPaused: Boolean(st.isPaused),
+    isMuted: Boolean(st.isMuted),
+    volume: Number.isFinite(Number(st.volume)) ? Number(st.volume) : 1,
+    hasVideo: Boolean(st.hasVideo),
+    hasAudio: st.hasAudio !== false,
+    duration: Number(st.duration) || 0,
+    currentTime: Number(st.currentTime) || 0
+  };
+}
 
 function detectBrowserKey() {
   const ua = navigator.userAgent || "";
@@ -45,7 +71,7 @@ function scheduleFlush() {
       type: "tabs",
       browser: BROWSER_KEY,
       version: BRIDGE_PROTOCOL_VERSION,
-      tabs: Array.from(tabStates.values())
+      tabs: Array.from(tabStates.values(), serializeTabState)
     });
   }, 60);
 }
@@ -53,16 +79,23 @@ function scheduleFlush() {
 async function injectContentScript(tabId) {
   if (api.scripting?.executeScript) {
     await api.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       files: ["content.js"]
     });
   } else if (api.tabs?.executeScript) {
-    await api.tabs.executeScript(tabId, { file: "content.js" });
+    await api.tabs.executeScript(tabId, { file: "content.js", allFrames: true });
   }
 }
 
+function removeTabTracking(tabId) {
+  const had = tabStates.delete(tabId);
+  tabFrames.delete(tabId);
+  tabMeta.delete(tabId);
+  return had;
+}
+
 async function pruneClosedTabs() {
-  if (tabStates.size === 0) return;
+  if (tabStates.size === 0 && tabFrames.size === 0 && tabMeta.size === 0) return;
   let allTabs = [];
   try {
     allTabs = await api.tabs.query({});
@@ -79,10 +112,9 @@ async function pruneClosedTabs() {
   }
 
   let removed = false;
-  for (const id of Array.from(tabStates.keys())) {
+  for (const id of new Set([...tabStates.keys(), ...tabFrames.keys(), ...tabMeta.keys()])) {
     if (!liveIds.has(id)) {
-      tabStates.delete(id);
-      removed = true;
+      if (removeTabTracking(id)) removed = true;
     }
   }
   if (removed) scheduleFlush();
@@ -266,13 +298,33 @@ async function applyTabVolumeCommand(tabId, action, delta) {
 async function forwardCommand(tabId, action, delta) {
   if (!tabId) return;
   const payload = { type: "wmr_cmd", action, delta: delta || 0 };
+  const frameId = tabStates.get(tabId)?._frameId;
+  const sendOpts = Number.isInteger(frameId) && frameId >= 0 ? { frameId } : undefined;
+
+  if (frameId === -1 && action === "toggle_mute") {
+    try {
+      const t = await api.tabs.get(tabId);
+      await api.tabs.update(tabId, { muted: !t?.mutedInfo?.muted });
+    } catch {}
+    return;
+  }
+
   try {
-    await api.tabs.sendMessage(tabId, payload);
+    if (sendOpts) await api.tabs.sendMessage(tabId, payload, sendOpts);
+    else await api.tabs.sendMessage(tabId, payload);
   } catch {
     try {
       await injectContentScript(tabId);
-      await api.tabs.sendMessage(tabId, payload);
-    } catch {}
+      if (sendOpts) await api.tabs.sendMessage(tabId, payload, sendOpts);
+      else await api.tabs.sendMessage(tabId, payload);
+    } catch {
+      if (action === "toggle_mute") {
+        try {
+          const t = await api.tabs.get(tabId);
+          await api.tabs.update(tabId, { muted: !t?.mutedInfo?.muted });
+        } catch {}
+      }
+    }
   }
 }
 
@@ -396,37 +448,261 @@ function normHost(rawUrl) {
   }
 }
 
+function getEffectiveMeta(tabId, tabObj) {
+  const prev = tabMeta.get(tabId) || { url: "", title: "", siteName: "", favIconUrl: "", audible: false };
+  if (tabObj) {
+    if (tabObj.url && (tabObj.url.startsWith("http://") || tabObj.url.startsWith("https://"))) {
+      const clean = sanitizeUrl(tabObj.url);
+      const prevHost = normHost(prev.url);
+      const nextHost = normHost(clean);
+      if (prevHost && nextHost && prevHost !== nextHost) {
+        prev.siteName = "";
+        prev.favIconUrl = "";
+      }
+      prev.url = clean;
+    }
+    if (tabObj.title) prev.title = tabObj.title;
+    if (tabObj.favIconUrl) prev.favIconUrl = tabObj.favIconUrl;
+    if (typeof tabObj.audible === "boolean") prev.audible = tabObj.audible;
+    tabMeta.set(tabId, prev);
+  }
+  return prev;
+}
+
+function pickWinningFrame(framesMap) {
+  if (!framesMap || framesMap.size === 0) return null;
+  let best = null;
+  let bestScore = -1;
+  for (const fr of framesMap.values()) {
+    if (!fr || !fr.hasMedia) continue;
+    let score = 1;
+    if (fr.isPlaying && !fr.isMuted) score += 1000;
+    else if (fr.isPlaying) score += 400;
+    if (fr.frameId === 0) score += 60;
+    if (fr.hasVideo) score += 40;
+    if ((fr.duration || 0) >= 120) score += 120;
+    if (!best || score > bestScore || (score === bestScore && (fr.updatedAt || 0) > (best.updatedAt || 0))) {
+      best = fr;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+async function convertFaviconUrlToPngDataUrl(rawUrl) {
+  if (!rawUrl || (!rawUrl.startsWith("data:image/") && !rawUrl.startsWith("http://") && !rawUrl.startsWith("https://"))) {
+    return "";
+  }
+  const resp = await fetch(rawUrl, { cache: "force-cache", credentials: "omit" });
+  if (!resp.ok) return "";
+  const blob = await resp.blob();
+  if (!blob || blob.size === 0 || blob.size > 512 * 1024) return "";
+
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const size = 48;
+    const canvas = new OffscreenCanvas(size, size);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return "";
+    ctx.clearRect(0, 0, size, size);
+    const bw = Math.max(1, bitmap.width);
+    const bh = Math.max(1, bitmap.height);
+    const pad = 2;
+    const avail = size - pad * 2;
+    const ratio = Math.min(avail / bw, avail / bh);
+    const dw = Math.max(1, Math.round(bw * ratio));
+    const dh = Math.max(1, Math.round(bh * ratio));
+    const dx = Math.round((size - dw) / 2);
+    const dy = Math.round((size - dh) / 2);
+    ctx.drawImage(bitmap, dx, dy, dw, dh);
+
+    const pngBlob = await canvas.convertToBlob({ type: "image/png" });
+    const ab = await pngBlob.arrayBuffer();
+    const bytes = new Uint8Array(ab);
+    if (bytes.length === 0 || bytes.length > 49152) return "";
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return "data:image/png;base64," + btoa(bin);
+  } finally {
+    bitmap.close?.();
+  }
+}
+
+async function ensureFaviconForTab(tabId, tabUrl, rawFavIconUrl) {
+  const host = normHost(tabUrl);
+  if (!host || BUILTIN_ICON_HOSTS.test(host) || hostIconCache.has(host) || hostIconPending.has(host)) {
+    return;
+  }
+  if ((hostIconAttempts.get(host) || 0) >= 2) return;
+
+  let iconUrl = rawFavIconUrl || "";
+  if (!iconUrl) {
+    try {
+      const t = await api.tabs.get(tabId);
+      iconUrl = t?.favIconUrl || "";
+      if (iconUrl) {
+        const meta = getEffectiveMeta(tabId, t);
+        meta.favIconUrl = iconUrl;
+      }
+    } catch {}
+  }
+  if (!iconUrl) return;
+
+  hostIconPending.add(host);
+  hostIconAttempts.set(host, (hostIconAttempts.get(host) || 0) + 1);
+  try {
+    const dataUrl = await convertFaviconUrlToPngDataUrl(iconUrl);
+    if (dataUrl) {
+      if (hostIconCache.size >= 64) {
+        const oldest = hostIconCache.keys().next().value;
+        if (oldest) hostIconCache.delete(oldest);
+      }
+      hostIconCache.set(host, dataUrl);
+      let updated = false;
+      for (const [id, st] of tabStates.entries()) {
+        if (normHost(st.url) === host && st.iconDataUrl !== dataUrl) {
+          st.iconDataUrl = dataUrl;
+          tabStates.set(id, st);
+          updated = true;
+        }
+      }
+      if (updated) scheduleFlush();
+    }
+  } catch {
+  } finally {
+    hostIconPending.delete(host);
+  }
+}
+
+function recomputeTabState(tabId, tabObj) {
+  const meta = getEffectiveMeta(tabId, tabObj);
+  const frames = tabFrames.get(tabId);
+  const best = pickWinningFrame(frames);
+
+  if (!best) {
+    if (meta.audible && meta.url) {
+      const prev = tabStates.get(tabId);
+      const host = normHost(meta.url);
+      const iconDataUrl = hostIconCache.get(host) || prev?.iconDataUrl || "";
+      tabStates.set(tabId, {
+        tabId,
+        windowId: tabObj?.windowId || prev?.windowId || 0,
+        url: meta.url,
+        title: tabObj?.title || meta.title || prev?.title || "",
+        artist: prev?.artist || "",
+        siteName: meta.siteName || prev?.siteName || "",
+        iconDataUrl,
+        isPlaying: true,
+        isPaused: false,
+        isMuted: Boolean(tabObj?.mutedInfo?.muted ?? prev?.isMuted),
+        volume: prev?.volume ?? 1,
+        hasVideo: true,
+        hasAudio: true,
+        duration: 0,
+        currentTime: 0,
+        _frameId: -1
+      });
+      ensureFaviconForTab(tabId, meta.url, meta.favIconUrl);
+      scheduleFlush();
+      return;
+    }
+
+    if (tabStates.delete(tabId)) {
+      scheduleFlush();
+    }
+    return;
+  }
+
+  const finalUrl = sanitizeUrl(tabObj?.url || meta.url || best.url || "");
+  if (!finalUrl) return;
+  const host = normHost(finalUrl);
+  const siteName = meta.siteName || (best.frameId === 0 ? best.siteName : "") || "";
+  const title = best.frameId === 0
+    ? (best.title || tabObj?.title || meta.title || "")
+    : (tabObj?.title || meta.title || best.title || "");
+  const iconDataUrl = hostIconCache.get(host) || tabStates.get(tabId)?.iconDataUrl || "";
+
+  tabStates.set(tabId, {
+    tabId,
+    windowId: tabObj?.windowId || tabStates.get(tabId)?.windowId || 0,
+    url: finalUrl,
+    title,
+    artist: best.artist || "",
+    siteName,
+    iconDataUrl,
+    isPlaying: Boolean(best.isPlaying),
+    isPaused: Boolean(best.isPaused),
+    isMuted: Boolean(best.isMuted),
+    volume: Number.isFinite(Number(best.volume)) ? Math.max(0, Math.min(1, Number(best.volume))) : 1,
+    hasVideo: Boolean(best.hasVideo),
+    hasAudio: best.hasAudio !== false,
+    duration: Number(best.duration) || 0,
+    currentTime: Number(best.currentTime) || 0,
+    _frameId: best.frameId
+  });
+
+  ensureFaviconForTab(tabId, finalUrl, meta.favIconUrl);
+  scheduleFlush();
+}
+
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
 
+  if (msg.type === "page_meta" && sender.tab?.id) {
+    const tabId = sender.tab.id;
+    const meta = getEffectiveMeta(tabId, sender.tab);
+    if (msg.url) {
+      const clean = sanitizeUrl(msg.url);
+      if (clean) meta.url = clean;
+    }
+    if (msg.title) meta.title = msg.title;
+    if (msg.siteName) meta.siteName = msg.siteName;
+    if (sender.tab.favIconUrl) meta.favIconUrl = sender.tab.favIconUrl;
+    tabMeta.set(tabId, meta);
+    if (tabStates.has(tabId)) {
+      recomputeTabState(tabId, sender.tab);
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+
   if (msg.type === "media_state" && sender.tab?.id) {
     const tabId = sender.tab.id;
+    const frameId = typeof sender.frameId === "number" ? sender.frameId : 0;
     const st = msg.state;
+    getEffectiveMeta(tabId, sender.tab);
+
+    let frames = tabFrames.get(tabId);
+    if (!frames) {
+      frames = new Map();
+      tabFrames.set(tabId, frames);
+    }
+
     if (st && st.hasMedia) {
-      tabStates.set(tabId, {
-        tabId,
-        windowId: sender.tab.windowId || 0,
-        url: sanitizeUrl(st.url || sender.tab.url || ""),
-        title: st.title || sender.tab.title || "",
-        artist: st.artist || "",
-        isPlaying: Boolean(st.isPlaying),
-        isPaused: Boolean(st.isPaused),
-        isMuted: Boolean(st.isMuted),
-        volume: Number.isFinite(Number(st.volume)) ? Math.max(0, Math.min(1, Number(st.volume))) : 1,
-        hasVideo: Boolean(st.hasVideo),
-        hasAudio: st.hasAudio !== false,
-        duration: Number(st.duration) || 0,
-        currentTime: Number(st.currentTime) || 0
+      if (frameId === 0 && st.siteName) {
+        const meta = tabMeta.get(tabId);
+        if (meta) meta.siteName = st.siteName;
+      }
+      frames.set(frameId, {
+        ...st,
+        frameId,
+        updatedAt: Date.now()
       });
-    } else if (tabStates.has(tabId) && st?.keepSticky) {
-      const existing = tabStates.get(tabId);
+      recomputeTabState(tabId, sender.tab);
+    } else if (frames.has(frameId) && st?.keepSticky) {
+      const existing = frames.get(frameId);
       existing.isPlaying = false;
       existing.isPaused = true;
-      tabStates.set(tabId, existing);
+      existing.updatedAt = Date.now();
+      frames.set(frameId, existing);
+      recomputeTabState(tabId, sender.tab);
     } else {
-      tabStates.delete(tabId);
+      const deleted = frames.delete(frameId);
+      if (frames.size === 0) tabFrames.delete(tabId);
+      if (deleted || tabStates.has(tabId)) {
+        recomputeTabState(tabId, sender.tab);
+      }
     }
-    scheduleFlush();
     sendResponse({ ok: true });
     return true;
   }
@@ -435,7 +711,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({
       connected,
       browser: BROWSER_KEY,
-      tabs: Array.from(tabStates.values())
+      tabs: Array.from(tabStates.values(), serializeTabState)
     });
     return true;
   }
@@ -461,72 +737,65 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 api.tabs.onRemoved.addListener((tabId) => {
-  if (tabStates.delete(tabId)) {
+  if (removeTabTracking(tabId)) {
     scheduleFlush();
   }
 });
 
 api.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.discarded === true && tabStates.has(tabId)) {
-    tabStates.delete(tabId);
-    scheduleFlush();
+  if (changeInfo.discarded === true) {
+    if (removeTabTracking(tabId)) {
+      scheduleFlush();
+    }
     return;
   }
 
-  if (changeInfo.url && tabStates.has(tabId)) {
+  if (changeInfo.url) {
     const newUrl = changeInfo.url;
     if (!newUrl.startsWith("http://") && !newUrl.startsWith("https://")) {
-      tabStates.delete(tabId);
-      scheduleFlush();
-    } else {
-      const cur = tabStates.get(tabId);
-      const oldHost = normHost(cur?.url);
-      const newHost = normHost(newUrl);
-      if (oldHost && newHost && oldHost !== newHost) {
-        tabStates.delete(tabId);
+      if (removeTabTracking(tabId)) {
         scheduleFlush();
-      } else {
-        api.tabs.sendMessage(tabId, { type: "query_state" }).catch(() => {});
       }
+      return;
+    }
+
+    const cur = tabStates.get(tabId);
+    const oldHost = normHost(cur?.url || tabMeta.get(tabId)?.url);
+    const newHost = normHost(newUrl);
+    if (oldHost && newHost && oldHost !== newHost) {
+      if (removeTabTracking(tabId)) {
+        scheduleFlush();
+      }
+    } else {
+      getEffectiveMeta(tabId, tab);
+      api.tabs.sendMessage(tabId, { type: "query_state" }).catch(() => {});
     }
   }
 
   const tabUrl = tab?.url || "";
   const isHttp = tabUrl.startsWith("http://") || tabUrl.startsWith("https://");
 
-  if (changeInfo.status === "complete" && tabStates.has(tabId) && isHttp) {
-    api.tabs.sendMessage(tabId, { type: "query_state" }).catch(() => {});
+  if (isHttp && (changeInfo.favIconUrl || changeInfo.title)) {
+    getEffectiveMeta(tabId, tab);
+    if (tabStates.has(tabId)) {
+      recomputeTabState(tabId, tab);
+    }
   }
 
-  if (changeInfo.audible === true) {
+  if (changeInfo.status === "complete" && isHttp) {
+    getEffectiveMeta(tabId, tab);
     if (tabStates.has(tabId)) {
-      const cur = tabStates.get(tabId);
-      if (cur && !cur.isPlaying) {
-        cur.isPlaying = true;
-        cur.isPaused = false;
-        tabStates.set(tabId, cur);
-        scheduleFlush();
-      }
-    } else if (isHttp) {
-      tabStates.set(tabId, {
-        tabId,
-        windowId: tab?.windowId || 0,
-        url: sanitizeUrl(tabUrl),
-        title: tab?.title || "",
-        artist: "",
-        isPlaying: true,
-        isPaused: false,
-        isMuted: Boolean(tab?.mutedInfo?.muted),
-        volume: 1,
-        hasVideo: true,
-        hasAudio: true,
-        duration: 0,
-        currentTime: 0
-      });
-      scheduleFlush();
+      recomputeTabState(tabId, tab);
+      api.tabs.sendMessage(tabId, { type: "query_state" }).catch(() => {});
     }
+  }
 
-    if (isHttp) {
+  if (typeof changeInfo.audible === "boolean" && isHttp) {
+    const meta = getEffectiveMeta(tabId, tab);
+    meta.audible = changeInfo.audible;
+    recomputeTabState(tabId, tab);
+
+    if (changeInfo.audible === true) {
       api.tabs.sendMessage(tabId, { type: "query_state" }).catch(() => {
         injectContentScript(tabId)
           .then(() => api.tabs.sendMessage(tabId, { type: "query_state" }))

@@ -688,6 +688,8 @@ internal sealed unsafe class MainWindow : IDisposable
         DrawText(dc, glyph, x, y, x + size, y + size, ptSize, Win32.FW_BOLD, Theme.Accent, centered: true);
     }
 
+    public void RefreshVisuals() => BeginInvoke(RequestRepaint);
+
     private void RequestRepaint()
     {
         if (_hwnd != 0 && Win32.IsWindowVisible(_hwnd))
@@ -1660,26 +1662,36 @@ internal sealed unsafe class MainWindow : IDisposable
 
             int textX = cx + pad + icoBox + S(10);
             int textRight = ctrlLeft - S(8);
+            bool isWeb = IsBrowserOrigin(s.AppKey, s.IsBrowser);
+            int globeSz = isWeb ? S(11) : 0;
+            int globeGap = isWeb ? S(4) : 0;
             string badgeText = isLocked ? Strings.BtnLocked : "#1";
             int badgePillW = isPriority
                 ? Math.Max(S(26), MeasureTextWidth(dc, badgeText, 9, Win32.FW_BOLD) + S(12))
                 : 0;
             int arrowSz = S(10);
-            int reserveRight = arrowSz + S(4) + (isPriority ? badgePillW + S(6) : 0);
+            int reserveRight = globeSz + globeGap + arrowSz + S(4) + (isPriority ? badgePillW + S(6) : 0);
             int titleW = MeasureTextWidth(dc, s.DisplayName, 13, Win32.FW_BOLD) + S(4);
             int nameMaxRight = Math.Min(textRight - reserveRight, textX + titleW);
 
             DrawText(dc, s.DisplayName, textX, y + S(11), textRight - reserveRight, y + S(30), 13, Win32.FW_BOLD,
                 focusHovered ? Theme.Accent : Theme.TextPrimary);
 
-            if (nameMaxRight + arrowSz + S(2) <= textRight)
+            int curX = nameMaxRight + S(2);
+            if (isWeb && curX + globeSz <= textRight)
             {
-                DrawFocusArrowGlyph(gfx, nameMaxRight + S(2), y + S(16), arrowSz, focusHovered ? Theme.Accent : Theme.TextMuted);
+                DrawGlobeGlyph(gfx, curX, y + S(15), globeSz, Theme.TextMuted);
+                curX += globeSz + globeGap;
+            }
+
+            if (curX + arrowSz <= textRight)
+            {
+                DrawFocusArrowGlyph(gfx, curX, y + S(16), arrowSz, focusHovered ? Theme.Accent : Theme.TextMuted);
             }
 
             if (isPriority)
             {
-                int badgeX = nameMaxRight + arrowSz + S(6);
+                int badgeX = curX + arrowSz + S(4);
                 if (badgeX + badgePillW <= textRight)
                 {
                     int badgeH = S(18);
@@ -1818,20 +1830,37 @@ internal sealed unsafe class MainWindow : IDisposable
 
         // Center info (click anywhere on icon/title to focus app/tab window when live)
         int textX = x + pad + iconBox + S(16);
+        bool isWeb = IsBrowserOrigin(playing.AppKey, playing.IsBrowser);
+        int globeSz = isWeb ? S(13) : 0;
+        int globeGap = isWeb ? S(5) : 0;
         int arrowSz = isClosed ? 0 : S(13);
         int arrowGap = isClosed ? 0 : S(6);
         int titleW = MeasureTextWidth(dc, playing.DisplayName, 16, Win32.FW_BOLD) + S(6);
-        int nameMaxRight = Math.Min(textRight - arrowSz - arrowGap, textX + titleW);
+        int nameMaxRight = Math.Min(textRight - globeSz - globeGap - arrowSz - arrowGap, textX + titleW);
 
         DrawText(dc, playing.DisplayName, textX, y + S(20), nameMaxRight, y + S(46), 16, Win32.FW_BOLD,
             focusHovered ? Theme.Accent : Theme.TextPrimary);
 
-        if (!isClosed)
+        int bx = nameMaxRight + S(2);
+        if (isWeb && bx + globeSz <= textRight)
         {
-            DrawFocusArrowGlyph(gfx, nameMaxRight + S(2), y + S(26), arrowSz, focusHovered ? Theme.Accent : Theme.TextMuted);
+            DrawGlobeGlyph(gfx, bx, y + S(26), globeSz, Theme.TextMuted);
+            bx += globeSz + globeGap;
         }
 
-        int bx = nameMaxRight + (isClosed ? S(8) : arrowSz + S(10));
+        if (!isClosed)
+        {
+            DrawFocusArrowGlyph(gfx, bx, y + S(26), arrowSz, focusHovered ? Theme.Accent : Theme.TextMuted);
+            bx += arrowSz + S(8);
+        }
+        else if (!isWeb)
+        {
+            bx = nameMaxRight + S(8);
+        }
+        else
+        {
+            bx += S(3);
+        }
         (string statusText, uint statusFg, uint statusBg) = isClosed
             ? (Strings.StatusClosed, Theme.TextMuted, Theme.BgControl)
             : (playing.IsEffectivelyPlaying
@@ -1956,24 +1985,34 @@ internal sealed unsafe class MainWindow : IDisposable
         string tag = session.IsVideoLikely ? $" • {Strings.TagVideo}" : "";
         string headerText = session.DisplayName + tag;
 
+        bool isWeb = IsBrowserOrigin(session.AppKey, session.IsBrowser);
+        int globeSz = isWeb ? S(12) : 0;
+        int globeGap = isWeb ? S(5) : 0;
         string prioText = isLocked ? Strings.BtnLocked : Strings.BadgePriorityTarget;
         int prioPillW = isTarget
             ? Math.Max(S(54), MeasureTextWidth(dc, prioText, 10, Win32.FW_SEMIBOLD) + S(20))
             : 0;
         int arrowSz = S(11);
-        int reserveRight = arrowSz + S(4) + (isTarget ? prioPillW + S(8) : 0);
+        int reserveRight = globeSz + globeGap + arrowSz + S(4) + (isTarget ? prioPillW + S(8) : 0);
         int titleMeasured = MeasureTextWidth(dc, headerText, 13, Win32.FW_SEMIBOLD) + S(4);
         int titleDrawRight = Math.Min(textRight - reserveRight, textX + titleMeasured);
 
         DrawText(dc, headerText, textX, y + S(11), textRight - reserveRight, y + S(31), 13, Win32.FW_SEMIBOLD,
             focusHovered ? Theme.Accent : Theme.TextPrimary);
-        if (titleDrawRight + arrowSz + S(2) <= textRight)
+
+        int curX = titleDrawRight + S(2);
+        if (isWeb && curX + globeSz <= textRight)
         {
-            DrawFocusArrowGlyph(gfx, titleDrawRight + S(2), y + S(16), arrowSz, focusHovered ? Theme.Accent : Theme.TextMuted);
+            DrawGlobeGlyph(gfx, curX, y + S(15), globeSz, Theme.TextMuted);
+            curX += globeSz + globeGap;
+        }
+        if (curX + arrowSz <= textRight)
+        {
+            DrawFocusArrowGlyph(gfx, curX, y + S(16), arrowSz, focusHovered ? Theme.Accent : Theme.TextMuted);
         }
         if (isTarget)
         {
-            int pillX = titleDrawRight + arrowSz + S(8);
+            int pillX = curX + arrowSz + S(6);
             if (pillX + prioPillW <= textRight)
             {
                 DrawPillBadge(dc, gfx, pillX, y + S(10), prioText,
@@ -2154,6 +2193,53 @@ internal sealed unsafe class MainWindow : IDisposable
         }
     }
 
+    private static bool IsBrowserOrigin(string? appKey, bool sessionIsBrowser = false)
+    {
+        if (sessionIsBrowser)
+            return true;
+        if (string.IsNullOrWhiteSpace(appKey))
+            return false;
+        if (BrowserSiteScanner.ExtractBrowserKeyFromAppKey(appKey) != null)
+            return true;
+
+        return appKey.ToLowerInvariant() switch
+        {
+            "zen" or "firefox" or "msedge" or "chrome" or "brave" or
+            "opera" or "opera_gx" or "vivaldi" or "arc" or
+            "waterfox" or "floorp" or "librewolf" => true,
+            _ => false
+        };
+    }
+
+    private void DrawGlobeGlyph(nint gfx, int x, int y, int sz, uint colorRgb)
+    {
+        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.1f, SF(1.15f)), GdiPlus.UnitPixel, out nint pen) != 0 || pen == 0)
+            return;
+
+        try
+        {
+            GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
+            GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
+
+            float pad = sz * 0.10f;
+            float left = x + pad;
+            float top = y + pad;
+            float d = MathF.Max(4f, sz - pad * 2f);
+            float right = left + d;
+            float midX = left + d * 0.5f;
+            float midY = top + d * 0.5f;
+            float mw = d * 0.46f;
+
+            GdiPlus.GdipDrawEllipse(gfx, pen, left, top, d, d);
+            GdiPlus.GdipDrawLine(gfx, pen, left, midY, right, midY);
+            GdiPlus.GdipDrawEllipse(gfx, pen, midX - mw * 0.5f, top, mw, d);
+        }
+        finally
+        {
+            GdiPlus.GdipDeletePen(pen);
+        }
+    }
+
     private void DrawFocusArrowGlyph(nint gfx, int x, int y, int sz, uint colorRgb)
     {
         if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.25f, SF(1.25f)), GdiPlus.UnitPixel, out nint pen) != 0 || pen == 0)
@@ -2267,7 +2353,18 @@ internal sealed unsafe class MainWindow : IDisposable
 
         int textX = icoX + icoSz + S(12);
         int textRight = showDirBadge ? (dirBadgeX - S(8)) : (hkX - S(12));
-        DrawText(dc, app.DisplayName, textX, drawY + S(8), textRight, drawY + S(28), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        bool isWeb = IsBrowserOrigin(app.AppKey);
+        int globeSz = isWeb ? S(12) : 0;
+        int globeGap = isWeb ? S(5) : 0;
+        int nameReserve = globeSz + globeGap;
+        int titleMeasured = MeasureTextWidth(dc, app.DisplayName, 13, Win32.FW_SEMIBOLD) + S(4);
+        int nameDrawRight = Math.Min(textRight - nameReserve, textX + titleMeasured);
+
+        DrawText(dc, app.DisplayName, textX, drawY + S(8), textRight - nameReserve, drawY + S(28), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        if (isWeb && nameDrawRight + globeSz + S(2) <= textRight)
+        {
+            DrawGlobeGlyph(gfx, nameDrawRight + S(3), drawY + S(12), globeSz, Theme.TextMuted);
+        }
         string? browserKey = BrowserSiteScanner.ExtractBrowserKeyFromAppKey(app.AppKey);
         string exeSub = string.IsNullOrWhiteSpace(app.ExePath) ? app.AppKey : app.ExePath;
         if (!string.IsNullOrEmpty(browserKey))
