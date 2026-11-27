@@ -39,7 +39,6 @@ internal sealed unsafe class MainWindow : IDisposable
     {
         None = 0,
         Language = 1,
-        Theme = 2,
         TaskInstall = 3,
         SessionOutputDevice = 4
     }
@@ -166,7 +165,7 @@ internal sealed unsafe class MainWindow : IDisposable
     private readonly Dictionary<string, float> _prioTargetY = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _animKeyScratch = new(32);
     private readonly List<string> _animPruneScratch = new(16);
-    private static readonly string[] FeaturedThemeIds = ["midnight", "dark", "light", "emerald"];
+    private static readonly uint[] WhatsNewCardAccents = [0x6366F1, 0x22C55E, 0x38BDF8, 0xF59E0B, 0xA855F7, 0xF43F5E];
 
     private Func<nuint, bool>? _timerCallback;
     private Action? _wakeOrUnlockCallback;
@@ -572,12 +571,15 @@ internal sealed unsafe class MainWindow : IDisposable
         if (_uiDataDirty)
         {
             _priorityApps = _stateStore.GetPriorityAppsSnapshot();
-            _settings = _stateStore.GetSettingsSnapshot();
             _uiDataDirty = false;
         }
+        _settings = _stateStore.GetSettingsSnapshot();
+        string curVer = !string.IsNullOrEmpty(_updateSnapshot.CurrentVersion)
+            ? _updateSnapshot.CurrentVersion
+            : AppUpdateService.GetCurrentAppVersion();
         if (!_showWhatsNew &&
-            !string.IsNullOrEmpty(_updateSnapshot.CurrentVersion) &&
-            !string.Equals(_settings.LastSeenVersion, _updateSnapshot.CurrentVersion, StringComparison.OrdinalIgnoreCase))
+            !string.IsNullOrEmpty(curVer) &&
+            !string.Equals(_settings.LastSeenVersion, curVer, StringComparison.OrdinalIgnoreCase))
         {
             CancelHotkeyCapture();
             CloseOpenDropdown();
@@ -3474,98 +3476,166 @@ internal sealed unsafe class MainWindow : IDisposable
 
     private int DrawThemeGalleryCard(int x, int y, int w, int headerH)
     {
-        int cardH = S(124);
-        _d2d.FillAndStrokeRoundedRect(x, y, w, cardH, SF(11), Theme.BgCard, 1f, Theme.BorderSubtle, 1f);
+        var presets = Theme.Presets;
+        var customs = Theme.CustomPalettes;
+        int customCount = Math.Min(customs.Count, 12);
+        int totalItems = presets.Length + customCount;
 
         int pad = S(16);
+        int cols = w >= S(640) ? 4 : (w >= S(440) ? 3 : 2);
+        int colGap = S(12);
+        int rowGap = S(12);
+        int previewH = S(58);
+        int labelH = S(22);
+        int tileH = previewH + labelH;
+        int rows = Math.Max(1, (totalItems + cols - 1) / cols);
+        int gridTopOffset = S(58);
+        int cardH = gridTopOffset + rows * tileH + Math.Max(0, rows - 1) * rowGap + S(16);
+
+        _d2d.FillAndStrokeRoundedRect(x, y, w, cardH, SF(11), Theme.BgCard, 1f, Theme.BorderSubtle, 1f);
+
         int customBtnW = S(92);
-        int comboW = S(176);
-        int comboH = S(32);
-        int comboX = x + w - pad - comboW;
-        int comboY = y + S(12);
-        int customBtnX = comboX - S(8) - customBtnW;
-        int textRight = customBtnX - S(14);
+        int activePillW = S(168);
+        int ctrlH = S(30);
+        int customBtnX = x + w - pad - customBtnW;
+        int ctrlY = y + S(12);
+        int activePillX = customBtnX - S(8) - activePillW;
+        int textRight = activePillX - S(14);
 
         _d2d.DrawText(Strings.ThemeTitle, x + pad, y + S(10), textRight, y + S(30), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary, _dpi);
         _d2d.DrawText(Strings.ThemeSub, x + pad, y + S(30), textRight, y + S(48), 11, Win32.FW_NORMAL, Theme.TextSecondary, _dpi);
 
-        if (y + cardH > headerH)
+        var active = Theme.FindById(Theme.CurrentId) ?? presets[0];
+        _d2d.FillAndStrokeRoundedRect(activePillX, ctrlY, activePillW, ctrlH, SF(8), Theme.BgCardElevated, 1f, Theme.BorderSubtle, 1f);
+        int pillSwSz = S(14);
+        int pillSwX = activePillX + S(10);
+        int pillSwY = ctrlY + (ctrlH - pillSwSz) / 2;
+        _d2d.FillCircle(pillSwX, pillSwY, pillSwSz, active.SwatchBg);
+        _d2d.StrokeCircle(pillSwX, pillSwY, pillSwSz, Theme.BorderStrong, MathF.Max(1.1f, SF(1.1f)));
+        _d2d.FillCircle(pillSwX + (pillSwSz - S(6)) * 0.5f, pillSwY + (pillSwSz - S(6)) * 0.5f, S(6), active.SwatchAccent);
+        _d2d.DrawText(Strings.ThemeName(active.Id), pillSwX + pillSwSz + S(8), ctrlY, activePillX + activePillW - S(10), ctrlY + ctrlH,
+            11, Win32.FW_SEMIBOLD, Theme.TextPrimary, _dpi);
+
+        if (ctrlY + ctrlH > headerH)
         {
             DrawActionButton("btn_open_theme_studio", Strings.BtnCustomTheme,
-                customBtnX, comboY, customBtnW, comboH,
+                customBtnX, ctrlY, customBtnW, ctrlH,
                 Theme.BgControl, Theme.BgControlHover, Theme.Accent, Theme.BorderStrong,
                 () => OpenThemeStudio(null));
         }
 
-        var active = Theme.FindById(Theme.CurrentId) ?? Theme.Presets[0];
-        const string triggerId = "dd_trigger_theme";
-        bool isOpen = _openDropdown == DropdownKind.Theme;
-        float hovT = isOpen ? 1f : GetHoverT(triggerId);
+        int gridW = w - pad * 2;
+        int colW = (gridW - colGap * (cols - 1)) / cols;
+        int gridY = y + gridTopOffset;
 
-        _d2d.FillAndStrokeRoundedRect(comboX, comboY, comboW, comboH, SF(8),
-            Theme.BlendRgb(Theme.BgControl, Theme.BgControlHover, hovT), 1f,
-            Theme.BlendRgb(Theme.BorderStrong, Theme.Accent, isOpen ? 1f : hovT * 0.4f), 1f);
-
-        int swSz = S(15);
-        int swX = comboX + S(10);
-        int swY = comboY + (comboH - swSz) / 2;
-        _d2d.FillCircle(swX, swY, swSz, active.SwatchBg);
-        _d2d.StrokeCircle(swX, swY, swSz, Theme.BorderStrong, MathF.Max(1.2f, SF(1.2f)));
-        _d2d.FillCircle(swX + (swSz - S(6)) * 0.5f, swY + (swSz - S(6)) * 0.5f, S(6), active.SwatchAccent);
-
-        _d2d.DrawText(Strings.ThemeName(active.Id), swX + swSz + S(8), comboY, comboX + comboW - S(26), comboY + comboH,
-            11, Win32.FW_SEMIBOLD, Theme.TextPrimary, _dpi);
-        _d2d.DrawDropdownChevron(comboX + comboW - S(15), comboY + comboH * 0.5f, isOpen,
-            isOpen ? Theme.Accent : Theme.TextSecondary, _dpi);
-
-        if (isOpen)
-            _openDropdownAnchor = new Win32.RECT { Left = comboX, Top = comboY, Right = comboX + comboW, Bottom = comboY + comboH };
-
-        if (y + cardH > headerH)
+        for (int i = 0; i < totalItems; i++)
         {
-            RegisterScrollableHit(
-                new Win32.RECT { Left = comboX, Top = comboY, Right = comboX + comboW, Bottom = comboY + comboH },
-                triggerId,
-                () => ToggleDropdown(DropdownKind.Theme));
-        }
+            var pal = i < presets.Length ? presets[i] : customs[i - presets.Length];
+            int row = i / cols;
+            int col = i % cols;
+            int tx = x + pad + col * (colW + colGap);
+            int tw = col == cols - 1 ? (x + w - pad - tx) : colW;
+            int ty = gridY + row * (tileH + rowGap);
 
-        // Visual quick-pick 4 theme cards (Midnight OLED, Dark, Light, Emerald)
-        int swatchY = y + S(58);
-        int swatchH = S(52);
-        int gap = S(10);
-        int swCardW = (w - pad * 2 - gap * 3) / 4;
-
-        for (int i = 0; i < FeaturedThemeIds.Length; i++)
-        {
-            var pal = Theme.FindById(FeaturedThemeIds[i]) ?? Theme.Presets[0];
-            int sx = x + pad + i * (swCardW + gap);
-            int swActual = i == FeaturedThemeIds.Length - 1 ? (x + w - pad - sx) : swCardW;
             bool selected = string.Equals(Theme.CurrentId, pal.Id, StringComparison.OrdinalIgnoreCase);
             string hitId = $"theme_card_{pal.Id}";
-            float cardHovT = GetHoverT(hitId);
+            float hovT = GetHoverT(hitId);
 
-            _d2d.FillAndStrokeRoundedRect(sx, swatchY, swActual, swatchH, SF(9),
-                Theme.BlendRgb(Theme.BgCardElevated, Theme.BgCardHover, cardHovT * 0.6f), 1f,
-                selected ? Theme.Accent : Theme.BlendRgb(Theme.BorderSubtle, Theme.BorderStrong, cardHovT), 1f, selected ? 1.5f : 1f);
+            if (selected || hovT > 0.01f)
+            {
+                _d2d.FillRoundedRect(tx - S(1), ty - S(1), tw + S(2), previewH + S(2), SF(9),
+                    Theme.Accent, selected ? 0.22f : hovT * 0.12f);
+            }
 
-            int previewW = S(34);
-            int previewH = S(26);
-            int px = sx + S(10);
-            int py = swatchY + (swatchH - previewH) / 2;
-            _d2d.FillAndStrokeRoundedRect(px, py, previewW, previewH, SF(6), pal.BgWindow, 1f, Theme.BorderSubtle, 0.7f);
-            _d2d.FillRoundedRect(px + S(4), py + S(6), S(14), S(10), SF(3), pal.BgCard);
-            _d2d.FillCircle(px + previewW - S(11), py + (previewH - S(8)) * 0.5f, S(8), pal.Accent);
+            uint frameStroke = selected
+                ? Theme.Accent
+                : Theme.BlendRgb(pal.BorderStrong, Theme.Accent, hovT * 0.45f);
+            _d2d.FillAndStrokeRoundedRect(tx, ty, tw, previewH, SF(8),
+                pal.BgWindow, 1f, frameStroke, 1f, selected ? 1.8f : 1.0f);
 
-            _d2d.DrawText(Strings.ThemeName(pal.Id), px + previewW + S(8), swatchY, sx + swActual - S(8), swatchY + swatchH,
-                11, selected ? Win32.FW_BOLD : Win32.FW_SEMIBOLD, selected ? Theme.Accent : Theme.TextPrimary, _dpi);
+            // Mini Kopuz-style UI preview inside tile
+            int sideX = tx + S(4);
+            int sideY = ty + S(4);
+            int sideW = Math.Max(S(24), (int)(tw * 0.24f));
+            int sideH = previewH - S(8);
+            _d2d.FillRoundedRect(sideX, sideY, sideW, sideH, SF(5), pal.BgHeader);
 
-            if (y + cardH > headerH)
+            float sBarW = Math.Max(S(10), sideW - S(8));
+            _d2d.FillRoundedRect(sideX + S(4), sideY + S(5), sBarW, SF(3f), SF(1.5f), pal.Accent);
+            _d2d.FillRoundedRect(sideX + S(4), sideY + S(12), sBarW * 0.80f, SF(2.5f), SF(1.25f), pal.TextMuted, 0.55f);
+            _d2d.FillRoundedRect(sideX + S(4), sideY + S(18), sBarW * 0.65f, SF(2.5f), SF(1.25f), pal.TextMuted, 0.45f);
+
+            int mainX = sideX + sideW + S(5);
+            int mainW = Math.Max(S(30), tx + tw - S(5) - mainX);
+            int miniCardH = S(28);
+            _d2d.FillRoundedRect(mainX, sideY, mainW, miniCardH, SF(5), pal.BgCard);
+            _d2d.FillRoundedRect(mainX + S(6), sideY + S(7), Math.Max(S(14), (mainW - S(12)) * 0.64f), SF(3f), SF(1.5f), pal.TextPrimary, 0.85f);
+            _d2d.FillRoundedRect(mainX + S(6), sideY + S(15), Math.Max(S(10), (mainW - S(12)) * 0.44f), SF(2.5f), SF(1.25f), pal.TextSecondary, 0.55f);
+
+            // Mini bottom playback / volume bar
+            int barY = ty + previewH - S(15);
+            _d2d.FillCircle(mainX + S(1), barY, S(9), pal.Accent);
+            int trackX = mainX + S(14);
+            int trackW = Math.Max(S(14), mainW - S(25));
+            float trackY = barY + SF(2.5f);
+            _d2d.FillRoundedRect(trackX, trackY, trackW, SF(4f), SF(2f), pal.BgControl);
+            _d2d.FillRoundedRect(trackX, trackY, trackW * 0.58f, SF(4f), SF(2f), pal.Accent);
+            _d2d.FillCircle(mainX + mainW - S(6), barY + S(2), S(5), pal.Green);
+
+            if (selected)
+            {
+                int chkSz = S(16);
+                float chkX = tx + tw - chkSz - S(4);
+                float chkY = ty + S(4);
+                _d2d.FillCircle(chkX, chkY, chkSz, pal.Accent);
+                float cx = chkX + chkSz * 0.5f;
+                float cy = chkY + chkSz * 0.5f;
+                _d2d.DrawLine(cx - SF(3.2f), cy + SF(0.2f), cx - SF(0.8f), cy + SF(2.6f), pal.OnAccent, SF(1.6f));
+                _d2d.DrawLine(cx - SF(0.8f), cy + SF(2.6f), cx + SF(3.4f), cy - SF(2.4f), pal.OnAccent, SF(1.6f));
+            }
+
+            int labelY = ty + previewH + S(2);
+            int delW = pal.IsCustom ? S(20) : 0;
+            int labelRight = tx + tw - delW;
+            string labelText = pal.IsCustom ? (pal.CustomName ?? pal.Id) : Strings.ThemeName(pal.Id);
+            _d2d.DrawText(labelText, tx + S(2), labelY, labelRight, ty + tileH,
+                11, selected ? Win32.FW_SEMIBOLD : Win32.FW_MEDIUM,
+                selected ? Theme.Accent : Theme.TextPrimary, _dpi);
+
+            if (ty + tileH > headerH)
             {
                 string targetThemeId = pal.Id;
                 RegisterScrollableHit(
-                    new Win32.RECT { Left = sx, Top = swatchY, Right = sx + swActual, Bottom = swatchY + swatchH },
+                    new Win32.RECT { Left = tx, Top = ty, Right = tx + tw - delW, Bottom = ty + tileH },
                     hitId,
                     () => _stateStore.UpdateSettings(s => s.Theme = targetThemeId));
+
+                if (pal.IsCustom)
+                {
+                    int delSz = S(18);
+                    int delX = tx + tw - delSz;
+                    int delY = labelY + (labelH - delSz) / 2;
+                    string delId = $"theme_del_{pal.Id}";
+                    bool delHovered = string.Equals(_hoverId, delId, StringComparison.Ordinal);
+
+                    if (delHovered)
+                        _d2d.FillRoundedRect(delX, delY, delSz, delSz, SF(4), Theme.RedSoft);
+                    _d2d.DrawText("×", delX, delY, delX + delSz, delY + delSz,
+                        11, Win32.FW_BOLD, delHovered ? Theme.Red : Theme.TextMuted, _dpi, centered: true);
+
+                    string removedName = pal.CustomName ?? pal.Id;
+                    string removeId = pal.Id;
+                    RegisterScrollableHit(
+                        new Win32.RECT { Left = delX, Top = delY, Right = delX + delSz, Bottom = delY + delSz },
+                        delId,
+                        () =>
+                        {
+                            Theme.SetPreviewPalette(null);
+                            _stateStore.DeleteCustomTheme(removeId);
+                            ApplyDwmTheme();
+                            ShowStatusBanner(Strings.MsgCustomThemeDeleted(removedName), isError: false);
+                        });
+                }
             }
         }
 
@@ -3963,9 +4033,6 @@ internal sealed unsafe class MainWindow : IDisposable
             _ => S(32)
         };
         int padV = S(6);
-        int customThemesCount = _openDropdown == DropdownKind.Theme ? Math.Min(_settings.CustomThemes.Count, 12) : 0;
-        int totalThemeItems = Theme.Presets.Length + customThemesCount;
-        int themeGridRows = (totalThemeItems + 1) / 2;
         int sessHdrH = S(26);
         int sessMaxDevs = _openDropdown == DropdownKind.SessionOutputDevice
             ? Math.Min(_openDropdownOutputDevices.Count, 8)
@@ -3995,7 +4062,6 @@ internal sealed unsafe class MainWindow : IDisposable
             menuW = _openDropdown switch
             {
                 DropdownKind.TaskInstall => Math.Max(S(392), _openDropdownAnchor.Right - _openDropdownAnchor.Left),
-                DropdownKind.Theme => S(396),
                 DropdownKind.Language => S(340),
                 _ => Math.Max(S(216), _openDropdownAnchor.Right - _openDropdownAnchor.Left)
             };
@@ -4004,9 +4070,7 @@ internal sealed unsafe class MainWindow : IDisposable
         int menuX = Math.Clamp(_openDropdownAnchor.Right - menuW, S(12), Math.Max(S(12), w - menuW - S(12)));
 
         int menuH;
-        if (_openDropdown == DropdownKind.Theme)
-            menuH = themeGridRows * itemH + S(10) + S(34) + padV * 2;
-        else if (_openDropdown == DropdownKind.Language)
+        if (_openDropdown == DropdownKind.Language)
             menuH = ((Strings.Languages.Length + 1) / 2) * itemH + padV * 2;
         else if (_openDropdown == DropdownKind.SessionOutputDevice)
             menuH = padV * 2 + sessHdrH + S(5) + itemH + S(7) + sessMaxDevs * itemH + sessNoticeGap + sessNoticeH;
@@ -4218,121 +4282,6 @@ internal sealed unsafe class MainWindow : IDisposable
                             ShowStatusBanner(message, !success);
                         }));
                 });
-        }
-        else if (_openDropdown == DropdownKind.Theme)
-        {
-            var presets = Theme.Presets;
-            int colGap = S(6);
-            int colW = (iw - colGap) / 2;
-            for (int i = 0; i < totalThemeItems; i++)
-            {
-                int row = i / 2;
-                int col = i % 2;
-                int cx = ix + col * (colW + colGap);
-                int iy = menuY + padV + row * itemH;
-
-                if (i < presets.Length)
-                {
-                    var preset = presets[i];
-                    bool selected = string.Equals(Theme.CurrentId, preset.Id, StringComparison.OrdinalIgnoreCase);
-                    string itemId = $"dd_item_theme_{preset.Id}";
-                    bool hovered = string.Equals(_hoverId, itemId, StringComparison.Ordinal);
-
-                    if (selected || hovered)
-                        _d2d.FillRoundedRect(cx, iy + S(1), colW, itemH - S(2), SF(7), selected ? Theme.AccentSoft : Theme.BgControlHover);
-
-                    int swSz = S(16);
-                    int swX = cx + S(8);
-                    int swY = iy + (itemH - swSz) / 2;
-                    _d2d.FillCircle(swX, swY, swSz, preset.SwatchBg);
-                    _d2d.StrokeCircle(swX, swY, swSz, selected ? Theme.Accent : Theme.BorderStrong, MathF.Max(1.2f, SF(1.2f)));
-                    _d2d.FillCircle(swX + (swSz - S(7)) * 0.5f, swY + (swSz - S(7)) * 0.5f, S(7), preset.SwatchAccent);
-
-                    _d2d.DrawText(Strings.ThemeName(preset.Id), swX + swSz + S(8), iy, cx + colW - S(18), iy + itemH,
-                        12, selected ? Win32.FW_SEMIBOLD : Win32.FW_MEDIUM, selected ? Theme.Accent : Theme.TextPrimary, _dpi);
-
-                    if (selected)
-                        _d2d.FillCircle(cx + colW - S(11), iy + (itemH - S(5)) * 0.5f, S(5), Theme.Accent);
-
-                    string themeId = preset.Id;
-                    _hitRegions.Add(new HitRegion(
-                        new Win32.RECT { Left = cx, Top = iy, Right = cx + colW, Bottom = iy + itemH },
-                        itemId,
-                        () =>
-                        {
-                            CloseOpenDropdown();
-                            _stateStore.UpdateSettings(s => s.Theme = themeId);
-                        }));
-                }
-                else
-                {
-                    var ct = _settings.CustomThemes[i - presets.Length];
-                    bool selected = string.Equals(Theme.CurrentId, ct.Id, StringComparison.OrdinalIgnoreCase);
-                    string itemId = $"dd_item_theme_{ct.Id}";
-                    string delId = $"dd_del_theme_{ct.Id}";
-                    bool hovered = string.Equals(_hoverId, itemId, StringComparison.Ordinal);
-                    bool delHovered = string.Equals(_hoverId, delId, StringComparison.Ordinal);
-
-                    if (selected || hovered || delHovered)
-                        _d2d.FillRoundedRect(cx, iy + S(1), colW, itemH - S(2), SF(7), selected ? Theme.AccentSoft : Theme.BgControlHover);
-
-                    uint swBg = Theme.TryParseHex(ct.BgHex, out uint b) ? b : Theme.BgCard;
-                    uint swAc = Theme.TryParseHex(ct.AccentHex, out uint a) ? a : Theme.Accent;
-                    int swSz = S(16);
-                    int swX = cx + S(8);
-                    int swY = iy + (itemH - swSz) / 2;
-                    _d2d.FillCircle(swX, swY, swSz, swBg);
-                    _d2d.StrokeCircle(swX, swY, swSz, selected ? Theme.Accent : Theme.BorderStrong, MathF.Max(1.2f, SF(1.2f)));
-                    _d2d.FillCircle(swX + (swSz - S(7)) * 0.5f, swY + (swSz - S(7)) * 0.5f, S(7), swAc);
-
-                    int delSz = S(20);
-                    int delX = cx + colW - S(5) - delSz;
-                    int delY = iy + (itemH - delSz) / 2;
-
-                    _d2d.DrawText(ct.Name, swX + swSz + S(8), iy, delX - S(4), iy + itemH,
-                        12, selected ? Win32.FW_SEMIBOLD : Win32.FW_MEDIUM, selected ? Theme.Accent : Theme.TextPrimary, _dpi);
-
-                    var capturedPreset = ct;
-                    _hitRegions.Add(new HitRegion(
-                        new Win32.RECT { Left = cx, Top = iy, Right = delX - S(2), Bottom = iy + itemH },
-                        itemId,
-                        () =>
-                        {
-                            CloseOpenDropdown();
-                            _stateStore.UpdateSettings(s => s.Theme = capturedPreset.Id);
-                        }));
-
-                    if (delHovered)
-                        _d2d.FillRoundedRect(delX, delY, delSz, delSz, SF(5), Theme.RedSoft);
-                    _d2d.DrawText("×", delX, delY, delX + delSz, delY + delSz,
-                        12, Win32.FW_BOLD, delHovered ? Theme.Red : Theme.TextMuted, _dpi, centered: true);
-                    _hitRegions.Add(new HitRegion(
-                        new Win32.RECT { Left = delX, Top = delY, Right = delX + delSz, Bottom = delY + delSz },
-                        delId,
-                        () =>
-                        {
-                            string removedName = capturedPreset.Name;
-                            Theme.SetPreviewPalette(null);
-                            _stateStore.DeleteCustomTheme(capturedPreset.Id);
-                            ApplyDwmTheme();
-                            ShowStatusBanner(Strings.MsgCustomThemeDeleted(removedName), isError: false);
-                        }));
-                }
-            }
-
-            int cy = menuY + padV + themeGridRows * itemH;
-            _d2d.FillRect(ix + S(4), cy + S(4), iw - S(8), 1, Theme.BorderSubtle);
-            cy += S(10);
-            const string createId = "dd_create_custom_theme";
-            int createH = S(34);
-            bool createHovered = string.Equals(_hoverId, createId, StringComparison.Ordinal);
-            _d2d.FillRoundedRect(ix, cy + S(1), iw, createH - S(2), SF(7), createHovered ? Theme.AccentSoft : Theme.BgControl);
-            _d2d.DrawText(Strings.MenuCreateCustomTheme, ix, cy, ix + iw, cy + createH,
-                12, Win32.FW_SEMIBOLD, Theme.Accent, _dpi, centered: true);
-            _hitRegions.Add(new HitRegion(
-                new Win32.RECT { Left = ix, Top = cy, Right = ix + iw, Bottom = cy + createH },
-                createId,
-                () => OpenThemeStudio(null)));
         }
 
         _d2d.ResetTransform();
@@ -4954,7 +4903,9 @@ internal sealed unsafe class MainWindow : IDisposable
     private void DismissWhatsNew()
     {
         _showWhatsNew = false;
-        string curVer = _updateSnapshot.CurrentVersion;
+        string curVer = !string.IsNullOrEmpty(_updateSnapshot.CurrentVersion)
+            ? _updateSnapshot.CurrentVersion
+            : AppUpdateService.GetCurrentAppVersion();
         if (!string.IsNullOrEmpty(curVer) &&
             !string.Equals(_settings.LastSeenVersion, curVer, StringComparison.OrdinalIgnoreCase))
         {
@@ -4970,7 +4921,7 @@ internal sealed unsafe class MainWindow : IDisposable
             ? EaseOutCubic(_whatsNewOpenMs, nowMs, UI_MODAL_DURATION_MS)
             : 1f;
 
-        _d2d.FillRect(0, 0, w, h, 0x000000, (Theme.IsLight ? 0.38f : 0.58f) * modalEase);
+        _d2d.FillRect(0, 0, w, h, 0x000000, (Theme.IsLight ? 0.42f : 0.64f) * modalEase);
 
         _hitRegions.Add(new HitRegion(
             new Win32.RECT { Left = 0, Top = 0, Right = w, Bottom = h },
@@ -4978,24 +4929,26 @@ internal sealed unsafe class MainWindow : IDisposable
             DismissWhatsNew,
             IsButton: false));
 
-        string curVer = _updateSnapshot.CurrentVersion;
+        string curVer = !string.IsNullOrEmpty(_updateSnapshot.CurrentVersion)
+            ? _updateSnapshot.CurrentVersion
+            : AppUpdateService.GetCurrentAppVersion();
         var release = WhatsNewCatalog.GetForVersion(curVer);
 
         bool twoCol = release.Items.Length > 4 && w >= S(620);
         int cols = twoCol ? 2 : 1;
         int rows = (release.Items.Length + cols - 1) / cols;
-        int cardW = twoCol ? Math.Clamp(w - S(48), S(580), S(740)) : Math.Clamp(w - S(56), S(420), S(548));
-        int itemH = twoCol ? S(88) : S(66);
-        int itemGap = twoCol ? S(10) : S(8);
-        int colGap = S(10);
-        int headerBandH = S(74);
-        int footerBandH = S(58);
+        int cardW = twoCol ? Math.Clamp(w - S(48), S(600), S(768)) : Math.Clamp(w - S(56), S(420), S(560));
+        int itemH = twoCol ? S(94) : S(70);
+        int itemGap = twoCol ? S(11) : S(9);
+        int colGap = S(11);
+        int headerBandH = S(82);
+        int footerBandH = S(62);
         int padX = S(22);
         int listTopPad = S(14);
-        int listBottomPad = S(10);
+        int listBottomPad = S(12);
         int listH = rows * itemH + Math.Max(0, rows - 1) * itemGap;
         int desiredH = headerBandH + listTopPad + listH + listBottomPad + footerBandH;
-        int cardH = Math.Min(desiredH, h - S(32));
+        int cardH = Math.Min(desiredH, h - S(28));
 
         int cardX = (w - cardW) / 2;
         int cardY = (h - cardH) / 2;
@@ -5007,11 +4960,19 @@ internal sealed unsafe class MainWindow : IDisposable
             _d2d.SetTransform(Direct2D.D2D1_MATRIX_3X2_F.TranslateAndScaleAt(0f, dy, scale, scale, cardX + cardW * 0.5f, cardY + cardH * 0.5f));
         }
 
-        _d2d.FillRoundedRect(cardX - S(4), cardY + S(6), cardW + S(8), cardH + S(8), SF(16), 0x000000, 0.28f * modalEase);
-        _d2d.FillRoundedRect(cardX - S(1), cardY + S(2), cardW + S(2), cardH + S(4), SF(14), 0x000000, 0.15f * modalEase);
+        _d2d.FillRoundedRect(cardX - S(6), cardY + S(8), cardW + S(12), cardH + S(12), SF(18), 0x000000, 0.30f * modalEase);
+        _d2d.FillRoundedRect(cardX - S(2), cardY + S(3), cardW + S(4), cardH + S(5), SF(16), 0x000000, 0.16f * modalEase);
 
-        _d2d.FillAndStrokeRoundedRect(cardX, cardY, cardW, cardH, SF(14),
-            Theme.BgCardElevated, 1f, Theme.BorderStrong, 1f, 1.3f);
+        uint shellBg = Theme.BlendRgb(Theme.BgWindow, Theme.BgCardElevated, 0.55f);
+        _d2d.FillAndStrokeRoundedRect(cardX, cardY, cardW, cardH, SF(16),
+            shellBg, 1f, Theme.BorderStrong, 1f, 1.35f);
+
+        // Ambient Aura Deck backdrop glow + top specular gradient rim inside the modal
+        _d2d.PushClip(cardX + 1, cardY + 1, cardW - 2, cardH - 2);
+        _d2d.FillRadialAura(cardX + S(85), cardY + S(36), S(190), S(95), Theme.Accent, Theme.IsLight ? 0.10f : 0.16f);
+        _d2d.FillRadialAura(cardX + cardW - S(110), cardY + S(44), S(160), S(85), Theme.Green, Theme.IsLight ? 0.07f : 0.11f);
+        _d2d.FillSpecularRim(cardX + S(16), cardY, cardW - S(32), MathF.Max(1.5f, SF(2)), Theme.Accent, Theme.Green, 0.72f);
+        _d2d.PopClip();
 
         _hitRegions.Add(new HitRegion(
             new Win32.RECT { Left = cardX, Top = cardY, Right = cardX + cardW, Bottom = cardY + cardH },
@@ -5019,34 +4980,41 @@ internal sealed unsafe class MainWindow : IDisposable
             () => { },
             IsButton: false));
 
-        int icoBox = S(40);
+        int icoBox = S(44);
         int icoBoxX = cardX + padX;
         int icoBoxY = cardY + (headerBandH - icoBox) / 2;
-        _d2d.FillAndStrokeRoundedRect(icoBoxX, icoBoxY, icoBox, icoBox, SF(10),
-            Theme.BgCard, 1f, Theme.BorderSubtle, 1f);
+        _d2d.FillAndStrokeRoundedRect(icoBoxX, icoBoxY, icoBox, icoBox, SF(12),
+            Theme.BlendRgb(Theme.BgCard, Theme.Accent, Theme.IsLight ? 0.08f : 0.14f), 1f,
+            Theme.BlendRgb(Theme.BorderStrong, Theme.Accent, 0.45f), 1f, 1.2f);
 
-        int brandSz = S(24);
+        int brandSz = S(26);
         nint brandIcon = _iconRenderer.GetBrandIcon(brandSz);
         if (brandIcon != 0)
             _d2d.DrawIcon(brandIcon, icoBoxX + (icoBox - brandSz) * 0.5f, icoBoxY + (icoBox - brandSz) * 0.5f, brandSz);
 
-        int closeSz = S(28);
+        int closeSz = S(30);
         int closeX = cardX + cardW - padX - closeSz;
-        int closeY = cardY + S(18);
+        int closeY = cardY + (headerBandH - closeSz) / 2;
         DrawIconButton("whatsnew_close", SmallButtonGlyph.Close, closeX, closeY, closeSz, true, DismissWhatsNew, scrollable: false);
 
         int titleX = icoBoxX + icoBox + S(14);
         int titleRight = closeX - S(10);
-        int titleW = _d2d.MeasureTextWidth(Strings.WhatsNewTitle, 16, Win32.FW_BOLD, _dpi) + S(6);
+        int titleW = _d2d.MeasureTextWidth(Strings.WhatsNewTitle, 17, Win32.FW_BOLD, _dpi) + S(6);
         int titleEnd = Math.Min(titleRight, titleX + titleW);
-        _d2d.DrawText(Strings.WhatsNewTitle, titleX, cardY + S(16), titleEnd, cardY + S(40), 16, Win32.FW_BOLD, Theme.TextPrimary, _dpi);
+        _d2d.DrawText(Strings.WhatsNewTitle, titleX, cardY + S(17), titleEnd, cardY + S(43), 17, Win32.FW_BOLD, Theme.TextPrimary, _dpi);
 
         string verPill = $"v{release.Version}";
-        int pillW = Math.Max(S(48), _d2d.MeasureTextWidth(verPill, 10, Win32.FW_BOLD, _dpi) + S(16));
-        if (titleEnd + S(6) + pillW <= titleRight)
-            DrawPillBadge(titleEnd + S(6), cardY + S(17), verPill, Theme.Accent, Theme.AccentSoft);
+        int pillW = Math.Max(S(50), _d2d.MeasureTextWidth(verPill, 10, Win32.FW_BOLD, _dpi) + S(18));
+        if (titleEnd + S(8) + pillW <= titleRight)
+        {
+            int pX = titleEnd + S(8);
+            int pY = cardY + S(20);
+            int pH = S(22);
+            _d2d.FillLinearGradientRoundedRect(pX, pY, pillW, pH, pH * 0.5f, Theme.Accent, 1f, Theme.AccentHover, 1f);
+            _d2d.DrawText(verPill, pX, pY, pX + pillW, pY + pH, 10, Win32.FW_BOLD, Theme.OnAccent, _dpi, centered: true);
+        }
 
-        _d2d.DrawText(Strings.WhatsNewSubtitle(release.Version), titleX, cardY + S(41), titleRight, cardY + S(61),
+        _d2d.DrawText(Strings.WhatsNewSubtitle(release.Version), titleX, cardY + S(45), titleRight, cardY + S(66),
             12, Win32.FW_NORMAL, Theme.TextSecondary, _dpi);
 
         _d2d.FillRect(cardX + padX, cardY + headerBandH - 1, cardW - padX * 2, 1, Theme.BorderSubtle);
@@ -5066,32 +5034,52 @@ internal sealed unsafe class MainWindow : IDisposable
                 break;
 
             var item = release.Items[i];
-            _d2d.FillAndStrokeRoundedRect(ix, iy, colW, itemH, SF(10), Theme.BgCard, 1f, Theme.BorderSubtle, 1f);
+            uint itemAccent = i == 0 ? Theme.Accent : WhatsNewCardAccents[i % WhatsNewCardAccents.Length];
+            string cardHitId = $"wn_item_{i}";
+            float cardHovT = GetHoverT(cardHitId);
 
-            int badgeSz = S(24);
-            int badgeX = ix + S(12);
+            uint itemBg = Theme.BlendRgb(Theme.BgCard, itemAccent, (Theme.IsLight ? 0.03f : 0.05f) + 0.05f * cardHovT);
+            uint itemBorder = Theme.BlendRgb(Theme.BorderSubtle, itemAccent, 0.25f + 0.50f * cardHovT);
+            _d2d.FillAndStrokeRoundedRect(ix, iy, colW, itemH, SF(12), itemBg, 1f, itemBorder, 1f, 1.05f);
+
+            // Left colored indicator bar matching the Aura Deck card language
+            _d2d.FillRoundedRect(ix + S(4), iy + S(12), S(3), itemH - S(24), SF(1.5f), itemAccent, 0.85f);
+
+            int badgeSz = S(28);
+            int badgeX = ix + S(14);
             int badgeY = iy + S(12);
-            _d2d.FillRoundedRect(badgeX, badgeY, badgeSz, badgeSz, SF(7), Theme.AccentSoft);
-            _d2d.FillCircle(badgeX + (badgeSz - S(7)) * 0.5f, badgeY + (badgeSz - S(7)) * 0.5f, S(7), Theme.Accent);
+            uint badgeBg = Theme.BlendRgb(Theme.BgCardElevated, itemAccent, Theme.IsLight ? 0.16f : 0.24f);
+            _d2d.FillAndStrokeRoundedRect(badgeX, badgeY, badgeSz, badgeSz, SF(8), badgeBg, 1f, itemAccent, 0.35f);
+            _d2d.DrawText($"0{i + 1}", badgeX, badgeY, badgeX + badgeSz, badgeY + badgeSz, 10, Win32.FW_BOLD, itemAccent, _dpi, centered: true);
 
-            int textX = badgeX + badgeSz + S(12);
+            int textX = badgeX + badgeSz + S(11);
             int textRight = ix + colW - S(12);
-            _d2d.DrawText(item.Title, textX, iy + S(9), textRight, iy + S(29), 12, Win32.FW_SEMIBOLD, Theme.TextPrimary, _dpi);
-            _d2d.DrawWrappedText(item.Description, textX, iy + S(29), textRight, iy + itemH - S(6),
+            _d2d.DrawText(item.Title, textX, iy + S(10), textRight, iy + S(31), 12, Win32.FW_SEMIBOLD, Theme.TextPrimary, _dpi);
+            _d2d.DrawWrappedText(item.Description, textX, iy + S(31), textRight, iy + itemH - S(7),
                 11, Win32.FW_NORMAL, Theme.TextSecondary, _dpi);
+
+            _hitRegions.Add(new HitRegion(
+                new Win32.RECT { Left = ix, Top = iy, Right = ix + colW, Bottom = iy + itemH },
+                cardHitId,
+                () => { },
+                IsButton: false));
         }
 
         int footY = cardY + cardH - footerBandH;
         _d2d.FillRect(cardX + padX, footY, cardW - padX * 2, 1, Theme.BorderSubtle);
 
-        int gotW = Math.Clamp(_d2d.MeasureTextWidth(Strings.WhatsNewBtnGotIt, 12, Win32.FW_SEMIBOLD, _dpi) + S(36), S(112), S(168));
-        int gotH = S(34);
+        string footMeta = $"Cueway v{release.Version}";
+        _d2d.DrawText(footMeta, cardX + padX, footY, cardX + cardW - padX - S(190), footY + footerBandH,
+            11, Win32.FW_MEDIUM, Theme.TextMuted, _dpi);
+
+        int gotW = Math.Clamp(_d2d.MeasureTextWidth(Strings.WhatsNewBtnGotIt, 12, Win32.FW_SEMIBOLD, _dpi) + S(42), S(120), S(176));
+        int gotH = S(36);
         int gotX = cardX + cardW - padX - gotW;
         int gotY = footY + (footerBandH - gotH) / 2;
 
-        bool gotHovered = string.Equals(_hoverId, "whatsnew_gotit", StringComparison.Ordinal);
-        _d2d.FillAndStrokeRoundedRect(gotX, gotY, gotW, gotH, SF(8),
-            gotHovered ? Theme.AccentHover : Theme.Accent, 1f, Theme.Accent, 1f);
+        float gotHovT = GetHoverT("whatsnew_gotit");
+        _d2d.FillLinearGradientRoundedRect(gotX, gotY, gotW, gotH, SF(9),
+            Theme.BlendRgb(Theme.Accent, Theme.AccentHover, gotHovT), 1f, Theme.AccentHover, 1f);
         _d2d.DrawText(Strings.WhatsNewBtnGotIt, gotX, gotY, gotX + gotW, gotY + gotH,
             12, Win32.FW_SEMIBOLD, Theme.OnAccent, _dpi, centered: true);
         _hitRegions.Add(new HitRegion(

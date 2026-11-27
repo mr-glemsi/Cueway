@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Cueway.Audio;
@@ -10,18 +11,26 @@ using Cueway.Routing;
 namespace Cueway.UI;
 
 /// <summary>
-/// Compact EarTrumpet-style tray flyout providing quick per-session playback, lock, mute, and volume controls.
+/// GPU-accelerated Direct2D tray flyout matching Cueway's Aura Deck design with VSync-paced animations.
 /// </summary>
 internal sealed unsafe class TrayFlyoutWindow : IDisposable
 {
     private const string ClassName = "Cueway_TrayFlyout";
     private const uint WM_APP_FLYOUT_REFRESH = Win32.WM_APP + 216;
-    private const int FlyoutWidthPx = 372;
-    private const int HeaderHeightPx = 46;
-    private const int FooterHeightPx = 42;
-    private const int CardHeightPx = 88;
-    private const int CardGapPx = 8;
+    private const uint WM_APP_ANIM_FRAME = Win32.WM_APP + 217;
+    private const nuint TIMER_UI_ANIM = 9002;
+    private const uint UI_ANIM_FALLBACK_MS = 8;
+
+    private const int FlyoutWidthPx = 392;
+    private const int HeaderHeightPx = 52;
+    private const int FooterHeightPx = 48;
+    private const int CardHeightPx = 96;
+    private const int CardGapPx = 10;
     private const int MaxVisibleCards = 4;
+
+    private const int OPEN_ANIM_MS = 190;
+    private const int DRAWER_ANIM_MS = 170;
+    private const int CARD_STAGGER_STEP_MS = 22;
 
     private enum FlyoutDrawer
     {
@@ -46,25 +55,28 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     private readonly MediaRouterEngine _engine;
     private readonly DynamicIconRenderer _iconRenderer;
     private readonly Func<Win32.RECT?> _getTrayRect;
+    private readonly D2DRenderer _d2d = new();
+
     private readonly List<HitRegion> _hitRegions = [];
     private readonly List<SliderRegion> _sliderRegions = [];
-    private readonly Dictionary<(int PtSize, int Weight, string Face, uint Dpi), nint> _fontCache = new();
+    private readonly Dictionary<string, float> _hoverAnim = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, float> _volAnim = new(StringComparer.Ordinal);
+    private readonly List<string> _animKeyScratch = new(32);
+    private readonly List<string> _animPruneScratch = new(16);
 
     private nint _hwnd;
     private nint _cursorArrow;
     private nint _cursorHand;
-    private nint _backDc;
-    private nint _backBmp;
-    private nint _backOldBmp;
-    private int _backW;
-    private int _backH;
     private uint _dpi = 96;
     private int _clientW = FlyoutWidthPx;
-    private int _clientH = 180;
+    private int _clientH = 200;
     private int _scrollY;
+    private float _scrollYFloat;
+    private int _scrollTargetY;
     private int _contentTotalH;
 
     private string? _hoverId;
+    private string? _pressedHitId;
     private bool _trackingMouse;
     private string? _draggingSliderId;
     private string? _draggingSessionId;
@@ -73,9 +85,13 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     private float _dragPreviewVolume;
     private long _lastSliderDispatchTick;
     private long _lastDeactivateTick;
+
     private RouterStateSnapshot _snapshot;
+    private AppSettings _settings;
+    private string _lastLanguage = string.Empty;
     private uint _lastDwmBorder = uint.MaxValue;
     private bool _lastDwmIsLight;
+
     private FlyoutDrawer _openDrawer = FlyoutDrawer.None;
     private string? _drawerTargetSessionId;
     private string? _drawerTargetAppName;
@@ -84,22 +100,16 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     private Dictionary<string, uint> _deviceColors = new(StringComparer.OrdinalIgnoreCase);
     private string? _defaultOutputDeviceId;
     private bool _deviceColorsForLight;
+
+    private double _openAnimStartMs;
+    private double _drawerAnimStartMs;
+    private double _lastFrameMs;
+    private float _lastFrameDt = 0.016f;
+    private bool _anySpringAnimating;
+    private bool _animFramePosted;
+    private bool _uiAnimTimerActive;
+    private byte _lastAppliedAlpha = 255;
     private bool _disposed;
-
-    private void RebuildOutputDeviceColorCache()
-    {
-        _defaultOutputDeviceId = AudioDeviceColors.GetDefaultDeviceId(_outputDevices);
-        _deviceColors = AudioDeviceColors.BuildDeviceColorMap(_outputDevices, Theme.IsLight);
-        _deviceColorsForLight = Theme.IsLight;
-    }
-
-    private uint GetEffectiveDeviceColor(string? deviceId)
-    {
-        if (_deviceColorsForLight != Theme.IsLight)
-            RebuildOutputDeviceColorCache();
-        string? effective = string.IsNullOrWhiteSpace(deviceId) ? _defaultOutputDeviceId : deviceId;
-        return effective != null && _deviceColors.TryGetValue(effective, out uint color) ? color : Theme.Accent;
-    }
 
     public event Action? OpenDashboardRequested;
     public event Action? OpenSettingsRequested;
@@ -115,6 +125,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         _iconRenderer = iconRenderer;
         _getTrayRect = getTrayRect;
         _snapshot = _engine.GetSnapshot();
+        _settings = _stateStore.GetSettingsSnapshot();
+        _lastLanguage = _settings.Language;
         _instance = this;
 
         CreateFlyoutWindow();
@@ -124,6 +136,26 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     }
 
     public bool IsVisible => _hwnd != 0 && Win32.IsWindowVisible(_hwnd);
+
+    private static double NowMs() => Stopwatch.GetTimestamp() * (1000.0 / Stopwatch.Frequency);
+
+    private int S(int px) => Theme.Scale(px, _dpi);
+    private float SF(float px) => Theme.ScaleF(px, _dpi);
+
+    private void RebuildOutputDeviceColorCache()
+    {
+        _defaultOutputDeviceId = AudioDeviceColors.GetDefaultDeviceId(_outputDevices);
+        _deviceColors = AudioDeviceColors.BuildDeviceColorMap(_outputDevices, Theme.IsLight);
+        _deviceColorsForLight = Theme.IsLight;
+    }
+
+    private uint GetEffectiveDeviceColor(string? deviceId)
+    {
+        if (_deviceColorsForLight != Theme.IsLight)
+            RebuildOutputDeviceColorCache();
+        string? effective = string.IsNullOrWhiteSpace(deviceId) ? _defaultOutputDeviceId : deviceId;
+        return effective != null && _deviceColors.TryGetValue(effective, out uint color) ? color : Theme.Accent;
+    }
 
     private void CreateFlyoutWindow()
     {
@@ -146,15 +178,17 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         }
 
         _hwnd = Win32.CreateWindowExW(
-            Win32.WS_EX_TOPMOST | Win32.WS_EX_TOOLWINDOW,
+            Win32.WS_EX_TOPMOST | Win32.WS_EX_TOOLWINDOW | Win32.WS_EX_LAYERED,
             ClassName,
             "Cueway",
             Win32.WS_POPUP,
-            0, 0, FlyoutWidthPx, 180,
+            0, 0, FlyoutWidthPx, 200,
             0, 0, hInst, 0);
 
         if (_hwnd != 0)
         {
+            Win32.SetLayeredWindowAttributes(_hwnd, 0, 255, Win32.LWA_ALPHA);
+            _lastAppliedAlpha = 255;
             uint d = Win32.GetDpiForWindow(_hwnd);
             if (d >= 96) _dpi = d;
             ApplyDwmStyle();
@@ -181,6 +215,14 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             ApplyDwmStyle();
     }
 
+    private void SetWindowAlpha(byte alpha)
+    {
+        if (_hwnd == 0 || _lastAppliedAlpha == alpha)
+            return;
+        _lastAppliedAlpha = alpha;
+        Win32.SetLayeredWindowAttributes(_hwnd, 0, alpha, Win32.LWA_ALPHA);
+    }
+
     public void Toggle()
     {
         if (_disposed || _hwnd == 0) return;
@@ -201,18 +243,47 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     {
         if (_disposed || _hwnd == 0) return;
         _snapshot = _engine.GetSnapshot();
+        _settings = _stateStore.GetSettingsSnapshot();
+        if (!string.Equals(_lastLanguage, _settings.Language, StringComparison.OrdinalIgnoreCase))
+        {
+            _lastLanguage = _settings.Language;
+            _d2d.ClearTextFormatCache();
+        }
+
         _openDrawer = FlyoutDrawer.None;
+        _drawerAnimStartMs = 0;
         _outputDevices = _engine.GetOutputDevices();
         RebuildOutputDeviceColorCache();
         _scrollY = 0;
+        _scrollYFloat = 0f;
+        _scrollTargetY = 0;
         _hoverId = null;
+        _pressedHitId = null;
+        _hoverAnim.Clear();
+        _volAnim.Clear();
+        _anySpringAnimating = false;
+        _animFramePosted = false;
 
         ApplyDwmStyle();
         PositionAndResize();
 
+        if (!_settings.ReducedAnimations)
+        {
+            double now = NowMs();
+            _openAnimStartMs = now;
+            _lastFrameMs = now;
+            SetWindowAlpha(12);
+        }
+        else
+        {
+            _openAnimStartMs = 0;
+            _lastFrameMs = 0;
+            SetWindowAlpha(255);
+        }
+
         Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
         Win32.SetForegroundWindow(_hwnd);
-        Win32.InvalidateRect(_hwnd, null, false);
+        KickAnimations();
     }
 
     public void Hide()
@@ -226,19 +297,32 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             Win32.ReleaseCapture();
         }
 
+        StopUiAnimTimer();
+        _animFramePosted = false;
+        _anySpringAnimating = false;
+        _openAnimStartMs = 0;
+        _drawerAnimStartMs = 0;
+        _lastFrameMs = 0;
         _openDrawer = FlyoutDrawer.None;
         _hoverId = null;
+        _pressedHitId = null;
+        _hoverAnim.Clear();
+        _volAnim.Clear();
+
         Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
-        ReleaseBackBuffer();
-        ClearFontCache();
+        _d2d.ReleaseDeviceResources();
+        _d2d.ClearTextFormatCache();
         _hitRegions.Clear();
+        _hitRegions.TrimExcess();
         _sliderRegions.Clear();
+        _sliderRegions.TrimExcess();
     }
 
     public void RefreshVisuals()
     {
-        if (!_disposed && _hwnd != 0 && Win32.IsWindowVisible(_hwnd))
-            Win32.PostMessageW(_hwnd, WM_APP_FLYOUT_REFRESH, 0, 0);
+        if (_disposed || _hwnd == 0) return;
+        if (Win32.IsWindowVisible(_hwnd))
+            Win32.PostMessageW(_hwnd, WM_APP_FLYOUT_REFRESH, 1, 0);
     }
 
     public void RefreshAudioDevices()
@@ -248,54 +332,72 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         RebuildOutputDeviceColorCache();
         if (Win32.IsWindowVisible(_hwnd))
         {
-            if (_openDrawer == FlyoutDrawer.AudioDevices)
+            if (_openDrawer == FlyoutDrawer.AudioDevices || _openDrawer == FlyoutDrawer.AppOutputDevice)
                 PositionAndResize();
-            Win32.InvalidateRect(_hwnd, null, false);
+            KickAnimations();
         }
     }
 
-    private void OnSleepTimerChanged() => RefreshVisuals();
+    private void OnSleepTimerChanged() => NotifyVisualRefresh(clearIcons: false);
+    private void OnStateChanged(RouterStateSnapshot snap) => NotifyVisualRefresh(clearIcons: false);
+    private void OnStoreChanged() => NotifyVisualRefresh(clearIcons: false);
 
-    private void OnStateChanged(RouterStateSnapshot snap)
+    private void NotifyVisualRefresh(bool clearIcons)
     {
         if (!_disposed && _hwnd != 0 && Win32.IsWindowVisible(_hwnd))
-            Win32.PostMessageW(_hwnd, WM_APP_FLYOUT_REFRESH, 0, 0);
+            Win32.PostMessageW(_hwnd, WM_APP_FLYOUT_REFRESH, clearIcons ? (nuint)1 : 0, 0);
     }
 
-    private void OnStoreChanged()
-    {
-        if (!_disposed && _hwnd != 0 && Win32.IsWindowVisible(_hwnd))
-            Win32.PostMessageW(_hwnd, WM_APP_FLYOUT_REFRESH, 0, 0);
-    }
-
-    private void HandleAsyncRefresh()
+    private void HandleAsyncRefresh(bool clearIcons)
     {
         if (_disposed || _hwnd == 0 || !Win32.IsWindowVisible(_hwnd))
             return;
 
-        ClearFontCache();
+        if (clearIcons)
+            _d2d.ClearIconCache();
+
+        _settings = _stateStore.GetSettingsSnapshot();
+        if (!string.Equals(_lastLanguage, _settings.Language, StringComparison.OrdinalIgnoreCase))
+        {
+            _lastLanguage = _settings.Language;
+            _d2d.ClearTextFormatCache();
+        }
+
         int prevCount = _snapshot.Sessions.Count;
         _snapshot = _engine.GetSnapshot();
         if (_snapshot.Sessions.Count != prevCount)
-        {
             PositionAndResize();
+        else
+            SyncDwmStyleIfNeeded();
+
+        KickAnimations();
+    }
+
+    private void OpenOrToggleDrawer(FlyoutDrawer target)
+    {
+        if (_openDrawer == target && target != FlyoutDrawer.AppOutputDevice)
+        {
+            _openDrawer = FlyoutDrawer.None;
+            _drawerAnimStartMs = 0;
         }
         else
         {
-            SyncDwmStyleIfNeeded();
+            _openDrawer = target;
+            _drawerAnimStartMs = _settings.ReducedAnimations ? 0 : NowMs();
         }
-        Win32.InvalidateRect(_hwnd, null, false);
+        PositionAndResize();
+        KickAnimations();
     }
 
     private bool ShouldShowBrowserOutputNotice()
         => !string.IsNullOrEmpty(_drawerTargetBrowserName) &&
-           !_stateStore.GetSettingsSnapshot().SuppressBrowserOutputNotice;
+           !_settings.SuppressBrowserOutputNotice;
 
     private int ComputeDrawerHeightPx() => _openDrawer switch
     {
-        FlyoutDrawer.AudioDevices => Math.Max(1, Math.Min(_outputDevices.Count, 5)) * 32 + 12,
-        FlyoutDrawer.SleepTimer => 46,
-        FlyoutDrawer.AppOutputDevice => 24 + Math.Min(_outputDevices.Count + 1, 6) * 30 + 12 + (ShouldShowBrowserOutputNotice() ? 64 : 0),
+        FlyoutDrawer.AudioDevices => Math.Max(1, Math.Min(_outputDevices.Count, 5)) * 34 + 14,
+        FlyoutDrawer.SleepTimer => 50,
+        FlyoutDrawer.AppOutputDevice => 26 + Math.Min(_outputDevices.Count + 1, 6) * 32 + 14 + (ShouldShowBrowserOutputNotice() ? 66 : 0),
         _ => 0
     };
 
@@ -305,7 +407,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         int count = _snapshot.Sessions.Count;
         int padV = 12;
         if (count == 0)
-            return HeaderHeightPx + padV * 2 + 86 + extra;
+            return HeaderHeightPx + padV * 2 + 92 + extra;
 
         int visible = Math.Min(count, MaxVisibleCards);
         return HeaderHeightPx + padV * 2 + visible * CardHeightPx + Math.Max(0, visible - 1) * CardGapPx + extra;
@@ -348,34 +450,28 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         if (trayRect.HasValue && trayRect.Value.Width > 0 && trayRect.Value.Height > 0)
         {
             var tr = trayRect.Value;
-            // Detect taskbar edge relative to work area
             if (tr.Top >= mi.rcWork.Bottom)
             {
-                // Bottom taskbar
                 x = tr.Left + tr.Width / 2 - w / 2;
                 y = mi.rcWork.Bottom - h - margin;
             }
             else if (tr.Bottom <= mi.rcWork.Top)
             {
-                // Top taskbar
                 x = tr.Left + tr.Width / 2 - w / 2;
                 y = mi.rcWork.Top + margin;
             }
             else if (tr.Left >= mi.rcWork.Right)
             {
-                // Right taskbar
                 x = mi.rcWork.Right - w - margin;
                 y = tr.Top + tr.Height / 2 - h / 2;
             }
             else if (tr.Right <= mi.rcWork.Left)
             {
-                // Left taskbar
                 x = mi.rcWork.Left + margin;
                 y = tr.Top + tr.Height / 2 - h / 2;
             }
             else
             {
-                // Inside work area (e.g. overflow or auto-hide taskbar)
                 x = mi.rcWork.Right - w - margin;
                 y = mi.rcWork.Bottom - h - margin;
             }
@@ -396,18 +492,194 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         if (updatedDpi >= 96 && updatedDpi != _dpi)
         {
             _dpi = updatedDpi;
-            ClearFontCache();
+            _d2d.ClearTextFormatCache();
         }
+        _d2d.Resize(w, h);
         ClampScroll();
     }
-
-    private int S(int px) => Theme.Scale(px, _dpi);
-    private float SF(float px) => Theme.ScaleF(px, _dpi);
 
     private void RequestRepaint()
     {
         if (_hwnd != 0 && Win32.IsWindowVisible(_hwnd))
             Win32.InvalidateRect(_hwnd, null, false);
+    }
+
+    private void KickAnimations()
+    {
+        if (!_settings.ReducedAnimations && _hwnd != 0 && Win32.IsWindowVisible(_hwnd) && _lastFrameMs <= 0)
+            _lastFrameMs = NowMs();
+        RequestRepaint();
+    }
+
+    private static float EaseOutCubic(double startMs, double nowMs, int durationMs)
+    {
+        if (startMs <= 0)
+            return 1f;
+        double elapsed = nowMs - startMs;
+        if (elapsed <= 0)
+            return 0f;
+        if (elapsed >= durationMs)
+            return 1f;
+        float t = (float)(elapsed / durationMs);
+        return 1f - MathF.Pow(1f - t, 3f);
+    }
+
+    private void StepAnimations(float dt, double nowMs)
+    {
+        _anySpringAnimating = false;
+        _lastFrameDt = dt;
+
+        if (_settings.ReducedAnimations)
+        {
+            _scrollYFloat = _scrollTargetY;
+            _scrollY = _scrollTargetY;
+            _hoverAnim.Clear();
+            return;
+        }
+
+        float scrollDiff = _scrollTargetY - _scrollYFloat;
+        if (MathF.Abs(scrollDiff) > 0.35f)
+        {
+            _scrollYFloat += scrollDiff * (1f - MathF.Exp(-18f * dt));
+            _anySpringAnimating = true;
+        }
+        else
+        {
+            _scrollYFloat = _scrollTargetY;
+        }
+        _scrollY = (int)MathF.Round(_scrollYFloat);
+
+        if (_hoverId != null && !_hoverAnim.ContainsKey(_hoverId))
+            _hoverAnim[_hoverId] = 0f;
+
+        if (_hoverAnim.Count > 0)
+        {
+            _animKeyScratch.Clear();
+            foreach (string k in _hoverAnim.Keys)
+                _animKeyScratch.Add(k);
+            _animPruneScratch.Clear();
+
+            for (int i = 0; i < _animKeyScratch.Count; i++)
+            {
+                string key = _animKeyScratch[i];
+                float prev = _hoverAnim[key];
+                bool isHov = string.Equals(_hoverId, key, StringComparison.Ordinal);
+                float target = isHov ? 1f : 0f;
+                float speed = isHov ? 24f : 14f;
+                float next = prev + (target - prev) * (1f - MathF.Exp(-speed * dt));
+                if (MathF.Abs(target - next) <= 0.004f)
+                {
+                    if (!isHov)
+                        _animPruneScratch.Add(key);
+                    else
+                        _hoverAnim[key] = 1f;
+                }
+                else
+                {
+                    _hoverAnim[key] = next;
+                    _anySpringAnimating = true;
+                }
+            }
+
+            for (int i = 0; i < _animPruneScratch.Count; i++)
+                _hoverAnim.Remove(_animPruneScratch[i]);
+        }
+
+        if (_openAnimStartMs > 0)
+        {
+            int staggerWindow = OPEN_ANIM_MS + Math.Min(_snapshot.Sessions.Count, MaxVisibleCards) * CARD_STAGGER_STEP_MS;
+            if ((nowMs - _openAnimStartMs) >= staggerWindow)
+                _openAnimStartMs = 0;
+        }
+        if (_drawerAnimStartMs > 0 && (nowMs - _drawerAnimStartMs) >= DRAWER_ANIM_MS)
+            _drawerAnimStartMs = 0;
+    }
+
+    private float GetHoverT(string id)
+    {
+        if (_settings.ReducedAnimations)
+            return string.Equals(_hoverId, id, StringComparison.Ordinal) ? 1f : 0f;
+
+        if (string.Equals(_hoverId, id, StringComparison.Ordinal))
+        {
+            if (!_hoverAnim.TryGetValue(id, out float v))
+            {
+                _hoverAnim[id] = 0f;
+                _anySpringAnimating = true;
+                return 0f;
+            }
+            return v;
+        }
+        return _hoverAnim.TryGetValue(id, out float decay) ? decay : 0f;
+    }
+
+    private float GetAnimatedVolume(string sessionId, float targetVol, bool isDraggingThis, float dragVol)
+    {
+        if (isDraggingThis)
+        {
+            _volAnim[sessionId] = dragVol;
+            return dragVol;
+        }
+        if (_settings.ReducedAnimations)
+        {
+            _volAnim[sessionId] = targetVol;
+            return targetVol;
+        }
+        if (!_volAnim.TryGetValue(sessionId, out float cur))
+        {
+            _volAnim[sessionId] = targetVol;
+            return targetVol;
+        }
+        float diff = targetVol - cur;
+        if (MathF.Abs(diff) <= 0.003f)
+        {
+            _volAnim[sessionId] = targetVol;
+            return targetVol;
+        }
+        float next = cur + diff * (1f - MathF.Exp(-18f * _lastFrameDt));
+        _volAnim[sessionId] = next;
+        _anySpringAnimating = true;
+        return next;
+    }
+
+    private bool HasActiveUiAnimation(double nowMs)
+    {
+        if (_settings.ReducedAnimations)
+            return false;
+
+        int openWindow = OPEN_ANIM_MS + Math.Min(_snapshot.Sessions.Count, MaxVisibleCards) * CARD_STAGGER_STEP_MS;
+        return _anySpringAnimating ||
+               (_openAnimStartMs > 0 && (nowMs - _openAnimStartMs) < openWindow) ||
+               (_drawerAnimStartMs > 0 && (nowMs - _drawerAnimStartMs) < DRAWER_ANIM_MS);
+    }
+
+    private void StartUiAnimTimer()
+    {
+        if (_hwnd != 0 && Win32.IsWindowVisible(_hwnd) && !_uiAnimTimerActive)
+        {
+            Win32.SetTimer(_hwnd, TIMER_UI_ANIM, UI_ANIM_FALLBACK_MS, 0);
+            _uiAnimTimerActive = true;
+        }
+    }
+
+    private void StopUiAnimTimer()
+    {
+        if (_uiAnimTimerActive && _hwnd != 0)
+        {
+            Win32.KillTimer(_hwnd, TIMER_UI_ANIM);
+            _uiAnimTimerActive = false;
+        }
+    }
+
+    private void HandleUiAnimTimer()
+    {
+        if (!Win32.IsWindowVisible(_hwnd) || !HasActiveUiAnimation(NowMs()))
+        {
+            StopUiAnimTimer();
+            _animFramePosted = false;
+            return;
+        }
+        RequestRepaint();
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
@@ -420,20 +692,36 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         switch (msg)
         {
             case WM_APP_FLYOUT_REFRESH:
-                inst.HandleAsyncRefresh();
+                inst.HandleAsyncRefresh(wParam != 0);
                 return 0;
+
+            case WM_APP_ANIM_FRAME:
+                inst._animFramePosted = false;
+                if (Win32.IsWindowVisible(hwnd) && inst.HasActiveUiAnimation(NowMs()))
+                    Win32.InvalidateRect(hwnd, null, false);
+                return 0;
+
+            case Win32.WM_TIMER:
+                if (wParam == TIMER_UI_ANIM)
+                {
+                    inst.HandleUiAnimTimer();
+                    return 0;
+                }
+                break;
 
             case Win32.WM_DPICHANGED:
                 inst._dpi = (uint)(wParam & 0xFFFF);
-                inst.ClearFontCache();
+                inst._d2d.ClearTextFormatCache();
                 inst.PositionAndResize();
                 Win32.InvalidateRect(hwnd, null, false);
                 return 0;
 
             case Win32.WM_SIZE:
-                inst._clientW = (int)(lParam & 0xFFFF);
-                inst._clientH = (int)((lParam >> 16) & 0xFFFF);
+                inst._clientW = Math.Max(1, (int)(lParam & 0xFFFF));
+                inst._clientH = Math.Max(1, (int)((lParam >> 16) & 0xFFFF));
+                inst._d2d.Resize(inst._clientW, inst._clientH);
                 inst.ClampScroll();
+                Win32.InvalidateRect(hwnd, null, false);
                 return 0;
 
             case Win32.WM_ERASEBKGND:
@@ -452,16 +740,19 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                 if (inst._hoverId != null && inst._draggingSliderId == null)
                 {
                     inst._hoverId = null;
-                    inst.RequestRepaint();
+                    inst.KickAnimations();
                 }
                 return 0;
 
             case Win32.WM_LBUTTONDOWN:
                 if (inst.HandleLeftButtonDown(lParam))
                     return 0;
+                if (inst._pressedHitId != null)
+                    inst.RequestRepaint();
                 break;
 
             case Win32.WM_CAPTURECHANGED:
+                inst._pressedHitId = null;
                 if (inst._draggingSliderId != null)
                 {
                     inst._draggingSliderId = null;
@@ -490,6 +781,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             case Win32.WM_ACTIVATE:
                 if ((wParam & 0xFFFF) == Win32.WA_INACTIVE)
                 {
+                    inst._pressedHitId = null;
                     inst._lastDeactivateTick = Environment.TickCount64;
                     inst.Hide();
                 }
@@ -536,26 +828,38 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             return;
         }
 
+        // Check embedded left mute button BEFORE slider hit region so clicking speaker toggles mute cleanly
+        var topHit = FindHit(x, y);
+        if (topHit != null && topHit.Id.EndsWith("_mute", StringComparison.Ordinal))
+        {
+            Win32.SetCursor(_cursorHand != 0 ? _cursorHand : _cursorArrow);
+            if (!string.Equals(_hoverId, topHit.Id, StringComparison.Ordinal))
+            {
+                _hoverId = topHit.Id;
+                KickAnimations();
+            }
+            return;
+        }
+
         var slider = FindSliderHit(x, y);
-        if (slider != null)
+        if (slider != null && (topHit == null || !topHit.IsButton))
         {
             Win32.SetCursor(_cursorHand != 0 ? _cursorHand : _cursorArrow);
             if (!string.Equals(_hoverId, slider.Id, StringComparison.Ordinal))
             {
                 _hoverId = slider.Id;
-                RequestRepaint();
+                KickAnimations();
             }
             return;
         }
 
-        var hit = FindHit(x, y);
-        string? nextHover = hit?.Id;
-        Win32.SetCursor(hit != null && hit.IsButton && _cursorHand != 0 ? _cursorHand : _cursorArrow);
+        string? nextHover = topHit?.Id;
+        Win32.SetCursor(topHit != null && topHit.IsButton && _cursorHand != 0 ? _cursorHand : _cursorArrow);
 
         if (!string.Equals(_hoverId, nextHover, StringComparison.Ordinal))
         {
             _hoverId = nextHover;
-            RequestRepaint();
+            KickAnimations();
         }
     }
 
@@ -563,22 +867,33 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     {
         int x = unchecked((short)(lParam & 0xFFFF));
         int y = unchecked((short)((lParam >> 16) & 0xFFFF));
-        var slider = FindSliderHit(x, y);
-        if (slider == null)
+
+        var topHit = FindHit(x, y);
+        if (topHit != null && topHit.Id.EndsWith("_mute", StringComparison.Ordinal))
+        {
+            _pressedHitId = topHit.Id;
             return false;
+        }
 
-        float vol = Math.Clamp((float)(x - slider.TrackLeft) / Math.Max(1, slider.TrackWidth), 0f, 1f);
-        _draggingSliderId = slider.Id;
-        _draggingSessionId = slider.SessionId;
-        _dragTrackLeft = slider.TrackLeft;
-        _dragTrackWidth = slider.TrackWidth;
-        _dragPreviewVolume = vol;
-        _lastSliderDispatchTick = Environment.TickCount64;
+        var slider = FindSliderHit(x, y);
+        if (slider != null && (topHit == null || !topHit.IsButton))
+        {
+            float vol = Math.Clamp((float)(x - slider.TrackLeft) / Math.Max(1, slider.TrackWidth), 0f, 1f);
+            _draggingSliderId = slider.Id;
+            _draggingSessionId = slider.SessionId;
+            _dragTrackLeft = slider.TrackLeft;
+            _dragTrackWidth = slider.TrackWidth;
+            _dragPreviewVolume = vol;
+            _lastSliderDispatchTick = Environment.TickCount64;
 
-        Win32.SetCapture(_hwnd);
-        _ = _engine.SetSessionVolumeAsync(slider.SessionId, vol, commitMemory: false);
-        RequestRepaint();
-        return true;
+            Win32.SetCapture(_hwnd);
+            _ = _engine.SetSessionVolumeAsync(slider.SessionId, vol, commitMemory: false);
+            RequestRepaint();
+            return true;
+        }
+
+        _pressedHitId = topHit?.Id;
+        return false;
     }
 
     private void HandleLeftButtonUp(nint lParam)
@@ -598,8 +913,11 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             return;
         }
 
+        string? pressedId = _pressedHitId;
+        _pressedHitId = null;
+
         var hit = FindHit(x, y);
-        if (hit != null)
+        if (hit != null && pressedId != null && string.Equals(pressedId, hit.Id, StringComparison.Ordinal))
         {
             hit.OnClick();
             RequestRepaint();
@@ -609,9 +927,14 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     private void HandleMouseWheel(short delta)
     {
         int step = S(36);
-        _scrollY -= (delta / 120) * step;
+        _scrollTargetY -= (delta / 120) * step;
         ClampScroll();
-        RequestRepaint();
+        if (_settings.ReducedAnimations)
+        {
+            _scrollYFloat = _scrollTargetY;
+            _scrollY = _scrollTargetY;
+        }
+        KickAnimations();
     }
 
     private void ClampScroll()
@@ -620,7 +943,9 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         int bottomH = S(FooterHeightPx + ComputeDrawerHeightPx());
         int viewH = Math.Max(1, _clientH - headerH - bottomH);
         int maxScroll = Math.Max(0, _contentTotalH - viewH);
-        _scrollY = Math.Clamp(_scrollY, 0, maxScroll);
+        _scrollTargetY = Math.Clamp(_scrollTargetY, 0, maxScroll);
+        _scrollYFloat = Math.Clamp(_scrollYFloat, 0f, maxScroll);
+        _scrollY = Math.Clamp((int)MathF.Round(_scrollYFloat), 0, maxScroll);
     }
 
     private HitRegion? FindHit(int x, int y)
@@ -645,60 +970,6 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         return null;
     }
 
-    private bool EnsureBackBuffer(nint referenceDc, int w, int h)
-    {
-        if (_backDc != 0 && _backBmp != 0 && _backW == w && _backH == h)
-            return true;
-
-        ReleaseBackBuffer();
-        nint memDc = Win32.CreateCompatibleDC(referenceDc);
-        if (memDc == 0) return false;
-
-        var bmi = new Win32.BITMAPINFO();
-        bmi.bmiHeader.biSize = (uint)sizeof(Win32.BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = w;
-        bmi.bmiHeader.biHeight = -h;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-
-        nint hBmp = Win32.CreateDIBSection(memDc, &bmi, 0, out _, 0, 0);
-        if (hBmp == 0)
-        {
-            Win32.DeleteDC(memDc);
-            return false;
-        }
-
-        nint oldBmp = Win32.SelectObject(memDc, hBmp);
-        Win32.SetBkMode(memDc, Win32.TRANSPARENT);
-        _backDc = memDc;
-        _backBmp = hBmp;
-        _backOldBmp = oldBmp;
-        _backW = w;
-        _backH = h;
-        return true;
-    }
-
-    private void ReleaseBackBuffer()
-    {
-        if (_backDc != 0)
-        {
-            if (_backOldBmp != 0)
-            {
-                Win32.SelectObject(_backDc, _backOldBmp);
-                _backOldBmp = 0;
-            }
-            Win32.DeleteDC(_backDc);
-            _backDc = 0;
-        }
-        if (_backBmp != 0)
-        {
-            Win32.DeleteObject(_backBmp);
-            _backBmp = 0;
-        }
-        _backW = 0;
-        _backH = 0;
-    }
-
     private void HandlePaint(nint hwnd)
     {
         SyncDwmStyleIfNeeded();
@@ -711,100 +982,151 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
 
         try
         {
-            if (!EnsureBackBuffer(hdc, w, h))
-                return;
+            double nowMs = NowMs();
+            float dt = _lastFrameMs > 0 ? Math.Clamp((float)((nowMs - _lastFrameMs) / 1000.0), 0.001f, 0.05f) : 0.016f;
+            _lastFrameMs = nowMs;
+            StepAnimations(dt, nowMs);
 
-            _hitRegions.Clear();
-            _sliderRegions.Clear();
-            Win32.SetBkMode(_backDc, Win32.TRANSPARENT);
-
-            if (GdiPlus.GdipCreateFromHDC(_backDc, out nint gfx) == 0 && gfx != 0)
+            if (!_settings.ReducedAnimations && _openAnimStartMs > 0)
             {
-                try
-                {
-                    GdiPlus.GdipSetSmoothingMode(gfx, GdiPlus.SmoothingModeAntiAlias);
-                    GdiPlus.GdipGraphicsClear(gfx, GdiPlus.Argb(Theme.BgWindow));
-
-                    int headerH = S(HeaderHeightPx);
-                    int footerH = S(FooterHeightPx);
-                    int drawerH = S(ComputeDrawerHeightPx());
-                    int bodyBottom = Math.Max(headerH + 1, h - footerH - drawerH);
-                    DrawBody(_backDc, gfx, w, bodyBottom, headerH);
-                    DrawHeader(_backDc, gfx, w, headerH);
-                    if (drawerH > 0)
-                        DrawDrawer(_backDc, gfx, w, bodyBottom, drawerH);
-                    DrawFooter(_backDc, gfx, w, h - footerH, footerH);
-
-                    // Crisp outer border matching the window edge
-                    GdiPlus.DrawRoundedRect(gfx, 0.5f, 0.5f, w - 1f, h - 1f, SF(8),
-                        GdiPlus.Argb(Theme.BorderStrong, 180), 1f);
-                }
-                finally
-                {
-                    GdiPlus.GdipDeleteGraphics(gfx);
-                }
+                float openEase = EaseOutCubic(_openAnimStartMs, nowMs, OPEN_ANIM_MS);
+                SetWindowAlpha((byte)Math.Clamp((int)MathF.Round(255f * openEase), 16, 255));
+            }
+            else
+            {
+                SetWindowAlpha(255);
             }
 
-            Win32.BitBlt(hdc, 0, 0, w, h, _backDc, 0, 0, Win32.SRCCOPY);
+            if (_d2d.BeginFrame(hwnd, w, h))
+            {
+                _hitRegions.Clear();
+                _sliderRegions.Clear();
+
+                _d2d.Clear(Theme.BgWindow);
+
+                if (!_settings.ReducedAnimations && _openAnimStartMs > 0)
+                {
+                    float openEase = EaseOutCubic(_openAnimStartMs, nowMs, OPEN_ANIM_MS);
+                    if (openEase < 0.999f)
+                    {
+                        float dy = SF(10) * (1f - openEase);
+                        float scale = 0.975f + 0.025f * openEase;
+                        _d2d.SetTransform(Direct2D.D2D1_MATRIX_3X2_F.TranslateAndScaleAt(0f, dy, scale, scale, w * 0.5f, h * 0.5f));
+                    }
+                }
+
+                // Ambient Aura Deck backdrop glow + top specular gradient rim
+                int headerH = S(HeaderHeightPx);
+                _d2d.PushClip(0, 0, w, h);
+                _d2d.FillRadialAura(S(68), S(20), S(130), S(56), Theme.Accent, Theme.IsLight ? 0.08f : 0.13f);
+                _d2d.FillSpecularRim(S(14), 0, Math.Max(1f, w - S(28)), MathF.Max(1.5f, SF(1.8f)), Theme.Accent, Theme.Green, 0.72f);
+                _d2d.PopClip();
+
+                int footerH = S(FooterHeightPx);
+                int drawerH = S(ComputeDrawerHeightPx());
+                int bodyBottom = Math.Max(headerH + 1, h - footerH - drawerH);
+
+                DrawBody(w, bodyBottom, headerH, nowMs);
+                DrawHeader(w, headerH);
+                if (drawerH > 0)
+                    DrawDrawer(w, bodyBottom, drawerH, nowMs);
+                DrawFooter(w, h - footerH, footerH);
+
+                _d2d.ResetTransform();
+                _d2d.DrawRoundedRect(0.5f, 0.5f, w - 1f, h - 1f, SF(10), Theme.BorderStrong, 1f, 0.72f);
+
+                _d2d.EndFrame(out _);
+            }
         }
         finally
         {
             Win32.EndPaint(hwnd, &ps);
         }
+
+        double afterMs = NowMs();
+        if (HasActiveUiAnimation(afterMs))
+        {
+            double frameElapsedMs = afterMs - _lastFrameMs;
+            if (frameElapsedMs >= 2.5)
+            {
+                StopUiAnimTimer();
+                if (!_animFramePosted && _hwnd != 0)
+                {
+                    _animFramePosted = true;
+                    Win32.PostMessageW(_hwnd, WM_APP_ANIM_FRAME, 0, 0);
+                }
+            }
+            else
+            {
+                StartUiAnimTimer();
+            }
+        }
+        else
+        {
+            StopUiAnimTimer();
+            _animFramePosted = false;
+            _lastFrameMs = 0;
+        }
     }
 
-    private void DrawHeader(nint dc, nint gfx, int w, int headerH)
+    private void DrawHeader(int w, int headerH)
     {
-        GdiPlus.FillRoundedRect(gfx, 0, 0, w, headerH, 0, GdiPlus.Argb(Theme.BgHeader));
-        GdiPlus.FillRoundedRect(gfx, 0, headerH - 1, w, 1, 0, GdiPlus.Argb(Theme.BorderSubtle));
+        _d2d.FillRect(0, headerH - 1, w, 1, Theme.BorderSubtle, 0.85f);
 
         int padX = S(14);
+        int icoBox = S(28);
+        int icoBoxY = (headerH - icoBox) / 2;
+        _d2d.FillAndStrokeRoundedRect(padX, icoBoxY, icoBox, icoBox, SF(8),
+            Theme.BlendRgb(Theme.BgCardElevated, Theme.Accent, Theme.IsLight ? 0.08f : 0.14f), 1f,
+            Theme.BlendRgb(Theme.BorderSubtle, Theme.Accent, 0.35f), 1f, 1f);
+
         int iconSz = S(18);
-        int iconY = (headerH - iconSz) / 2;
         nint brandIcon = _iconRenderer.GetBrandIcon(iconSz);
         if (brandIcon != 0)
-            Win32.DrawIconEx(dc, padX, iconY, brandIcon, iconSz, iconSz, 0, 0, Win32.DI_NORMAL);
+            _d2d.DrawIcon(brandIcon, padX + (icoBox - iconSz) * 0.5f, icoBoxY + (icoBox - iconSz) * 0.5f, iconSz);
         else
-            GdiPlus.FillRoundedRect(gfx, padX, iconY, iconSz, iconSz, SF(4), GdiPlus.Argb(Theme.Accent));
+            _d2d.FillRoundedRect(padX + S(6), icoBoxY + S(6), icoBox - S(12), icoBox - S(12), SF(4), Theme.Accent);
 
-        int titleX = padX + iconSz + S(8);
-        int btnH = S(26);
+        int titleX = padX + icoBox + S(10);
+        int btnH = S(28);
         int btnY = (headerH - btnH) / 2;
-        int setW = Math.Clamp(MeasureTextWidth(dc, Strings.FlyoutBtnSettings, 10, Win32.FW_SEMIBOLD) + S(18), S(64), S(92));
-        int dashW = Math.Clamp(MeasureTextWidth(dc, Strings.FlyoutBtnDashboard, 10, Win32.FW_SEMIBOLD) + S(18), S(74), S(104));
+        int setW = Math.Clamp(_d2d.MeasureTextWidth(Strings.FlyoutBtnSettings, 10, Win32.FW_SEMIBOLD, _dpi) + S(20), S(64), S(96));
+        int dashW = Math.Clamp(_d2d.MeasureTextWidth(Strings.FlyoutBtnDashboard, 10, Win32.FW_SEMIBOLD, _dpi) + S(22), S(78), S(112));
         int setX = w - padX - setW;
         int dashX = setX - S(6) - dashW;
 
-        DrawHeaderButton(dc, gfx, "fly_dash", Strings.FlyoutBtnDashboard, dashX, btnY, dashW, btnH, () =>
+        DrawHeaderPillButton("fly_dash", Strings.FlyoutBtnDashboard, dashX, btnY, dashW, btnH, () =>
         {
             Hide();
             OpenDashboardRequested?.Invoke();
         });
-        DrawHeaderButton(dc, gfx, "fly_set", Strings.FlyoutBtnSettings, setX, btnY, setW, btnH, () =>
+        DrawHeaderPillButton("fly_set", Strings.FlyoutBtnSettings, setX, btnY, setW, btnH, () =>
         {
             Hide();
             OpenSettingsRequested?.Invoke();
         });
 
         int titleRight = dashX - S(8);
-        int titleW = MeasureTextWidth(dc, "Cueway", 13, Win32.FW_BOLD) + S(6);
-        int nameEnd = Math.Min(titleRight, titleX + titleW);
-        DrawText(dc, "Cueway", titleX, 0, nameEnd, headerH, 13, Win32.FW_BOLD, Theme.TextPrimary);
+        _d2d.DrawText("Cueway", titleX, 0, titleRight, headerH, 13, Win32.FW_BOLD, Theme.TextPrimary, _dpi);
     }
 
-    private void DrawHeaderButton(nint dc, nint gfx, string id, string text, int x, int y, int w, int h, Action onClick)
+    private void DrawHeaderPillButton(string id, string text, int x, int y, int w, int h, Action onClick)
     {
-        bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
-        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, h, SF(6),
-            GdiPlus.Argb(hovered ? Theme.BgControlHover : Theme.BgCard),
-            GdiPlus.Argb(Theme.BorderStrong));
-        DrawText(dc, text, x + S(4), y, x + w - S(4), y + h, 10, Win32.FW_SEMIBOLD,
-            hovered ? Theme.Accent : Theme.TextPrimary, centered: true);
+        float hovT = GetHoverT(id);
+        uint bg = Theme.BlendRgb(Theme.BgCard, Theme.BgControlHover, hovT);
+        uint border = Theme.BlendRgb(Theme.BorderSubtle, Theme.Accent, hovT * 0.65f);
+        uint fg = Theme.BlendRgb(Theme.TextSecondary, Theme.TextPrimary, hovT);
+
+        _d2d.FillAndStrokeRoundedRect(x, y, w, h, h * 0.5f, bg, 1f, border, 1f, 1f);
+        _d2d.DrawText(text, x + S(6), y, x + w - S(6), y + h, 10, Win32.FW_SEMIBOLD, fg, _dpi, centered: true);
         _hitRegions.Add(new HitRegion(new Win32.RECT { Left = x, Top = y, Right = x + w, Bottom = y + h }, id, onClick));
     }
 
-    private void DrawBody(nint dc, nint gfx, int w, int bodyBottom, int headerH)
+    private void DrawBody(int w, int bodyBottom, int headerH, double nowMs)
     {
+        int viewH = Math.Max(1, bodyBottom - headerH);
+        _d2d.PushClip(0, headerH, w, viewH);
+
         int padX = S(12);
         int padV = S(12);
         int contentW = w - padX * 2;
@@ -814,14 +1136,14 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         var sessions = _snapshot.Sessions;
         if (sessions.Count == 0)
         {
-            int emptyH = S(86);
-            GdiPlus.FillAndStrokeRoundedRect(gfx, padX, y, contentW, emptyH, SF(10),
-                GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
-            DrawText(dc, Strings.FlyoutEmptyTitle, padX + S(14), y + S(20), padX + contentW - S(14), y + S(42),
-                12, Win32.FW_SEMIBOLD, Theme.TextPrimary);
-            DrawText(dc, Strings.FlyoutEmptySub, padX + S(14), y + S(46), padX + contentW - S(14), y + S(66),
-                11, Win32.FW_NORMAL, Theme.TextSecondary);
+            int emptyH = S(92);
+            _d2d.FillAndStrokeRoundedRect(padX, y, contentW, emptyH, SF(12), Theme.BgCard, 1f, Theme.BorderSubtle, 1f);
+            _d2d.DrawText(Strings.FlyoutEmptyTitle, padX + S(16), y + S(20), padX + contentW - S(16), y + S(44),
+                12, Win32.FW_SEMIBOLD, Theme.TextPrimary, _dpi);
+            _d2d.DrawText(Strings.FlyoutEmptySub, padX + S(16), y + S(48), padX + contentW - S(16), y + S(70),
+                11, Win32.FW_NORMAL, Theme.TextSecondary, _dpi);
             _contentTotalH = emptyH + padV * 2;
+            _d2d.PopClip();
             return;
         }
 
@@ -829,7 +1151,14 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         int gap = S(CardGapPx);
         for (int i = 0; i < sessions.Count; i++)
         {
-            y = DrawSessionCard(dc, gfx, padX, y, contentW, cardH, sessions[i], headerH, bodyBottom);
+            float staggerOffsetY = 0f;
+            if (!_settings.ReducedAnimations && _openAnimStartMs > 0 && i < MaxVisibleCards)
+            {
+                float cardEase = EaseOutCubic(_openAnimStartMs + i * CARD_STAGGER_STEP_MS, nowMs, OPEN_ANIM_MS);
+                staggerOffsetY = SF(8) * (1f - cardEase);
+            }
+
+            y = DrawSessionCard(padX, y, contentW, cardH, sessions[i], headerH, bodyBottom, staggerOffsetY);
             if (i < sessions.Count - 1)
                 y += gap;
         }
@@ -837,77 +1166,110 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         _contentTotalH = (y - startY) + padV * 2;
         ClampScroll();
 
-        int viewH = bodyBottom - headerH;
         if (_contentTotalH > viewH && viewH > 20)
         {
             float ratio = (float)viewH / _contentTotalH;
             int thumbH = Math.Max(S(24), (int)(viewH * ratio));
-            int maxScroll = _contentTotalH - viewH;
+            int maxScroll = Math.Max(1, _contentTotalH - viewH);
             int thumbY = headerH + (int)((viewH - thumbH) * ((float)_scrollY / maxScroll));
-            GdiPlus.FillRoundedRect(gfx, w - S(5), thumbY, S(3), thumbH, SF(1.5f), GdiPlus.Argb(Theme.BorderStrong, 180));
+            _d2d.FillRoundedRect(w - S(5), thumbY, S(3), thumbH, SF(1.5f), Theme.BorderStrong, 0.72f);
         }
+
+        _d2d.PopClip();
     }
 
     private int DrawSessionCard(
-        nint dc, nint gfx, int x, int y, int w, int cardH, MediaSessionInfo s, int headerH, int bodyBottom)
+        int x, int y, int w, int cardH, MediaSessionInfo s, int headerH, int bodyBottom, float staggerOffsetY)
     {
         bool isTarget = _snapshot.ActiveTarget != null &&
                         string.Equals(_snapshot.ActiveTarget.SessionId, s.SessionId, StringComparison.Ordinal);
         bool isLocked = _snapshot.IsManualLock && isTarget;
 
         string focusId = $"fly_focus_{s.SessionId}";
-        bool focusHovered = string.Equals(_hoverId, focusId, StringComparison.Ordinal);
+        float focusHov = GetHoverT(focusId);
 
-        uint tint = isLocked ? Theme.Amber : Theme.Accent;
+        string? assignedOutId = _engine.GetSessionOutputDeviceId(s.SessionId);
+        uint devColor = GetEffectiveDeviceColor(assignedOutId);
+
+        uint tint = isLocked
+            ? Theme.Amber
+            : (s.IsEffectivelyPlaying ? Theme.Green : Theme.Accent);
         uint cardBg = isTarget
-            ? Theme.BlendRgb(Theme.BgCardElevated, tint, Theme.IsLight ? 0.07f : 0.12f)
-            : Theme.BgCard;
-        uint border = isTarget ? tint : (focusHovered ? Theme.Accent : Theme.BorderSubtle);
+            ? Theme.BlendRgb(Theme.BgCardElevated, tint, (Theme.IsLight ? 0.06f : 0.11f) + 0.03f * focusHov)
+            : Theme.BlendRgb(Theme.BgCard, Theme.BgCardElevated, focusHov * 0.65f);
+        uint border = isTarget
+            ? Theme.BlendRgb(tint, Theme.Accent, isLocked ? 0f : focusHov * 0.2f)
+            : Theme.BlendRgb(Theme.BorderSubtle, Theme.Accent, focusHov * 0.55f);
 
-        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, cardH, SF(10),
-            GdiPlus.Argb(cardBg), GdiPlus.Argb(border, isTarget ? (byte)220 : (byte)255),
-            isTarget ? 1.4f : 1f);
+        float drawY = y + staggerOffsetY;
+        _d2d.FillAndStrokeRoundedRect(x, drawY, w, cardH, SF(12),
+            cardBg, 1f, border, isTarget ? 0.90f : 1f, isTarget ? 1.35f : 1f);
 
-        int pad = S(10);
-        int icoSz = S(26);
-        int icoX = x + pad;
-        int icoY = y + S(12);
-        DrawAppIconOrMonogram(dc, gfx, s.AppKey, s.ExePath, s.DisplayName, icoX, icoY, icoSz, SF(6));
+        if (isTarget)
+        {
+            _d2d.PushClip(x + 1, drawY + 1, w - 2, cardH - 2);
+            _d2d.FillRadialAura(x + S(32), drawY + S(28), S(96), S(56), tint, Theme.IsLight ? 0.08f : 0.14f);
+            _d2d.PopClip();
+            _d2d.FillRoundedRect(x + S(3), drawY + S(10), S(3), cardH - S(20), SF(1.5f), tint, 0.90f);
+        }
 
-        int btnSz = S(24);
-        int btnY = y + S(13);
+        int pad = S(11);
+        int icoBox = S(34);
+        int icoX = x + pad + (isTarget ? S(3) : 0);
+        int icoY = (int)MathF.Round(drawY + S(10));
+        _d2d.FillAndStrokeRoundedRect(icoX, icoY, icoBox, icoBox, SF(9),
+            Theme.BgControl, 0.85f,
+            Theme.BlendRgb(Theme.BorderSubtle, tint, isTarget ? 0.45f : focusHov * 0.45f), 1f);
+
+        int icoSz = S(20);
+        DrawAppIconOrMonogram(s.AppKey, s.ExePath, s.DisplayName,
+            icoX + (icoBox - icoSz) * 0.5f, icoY + (icoBox - icoSz) * 0.5f, icoSz, SF(6));
+
+        int btnSz = S(26);
+        int playSz = S(28);
+        int btnY = (int)MathF.Round(drawY + S(13));
+        int playY = btnY - (playSz - btnSz) / 2;
         int lockX = x + w - pad - btnSz;
         int nextX = lockX - S(4) - btnSz;
-        int playX = nextX - S(4) - btnSz;
+        int playX = nextX - S(4) - playSz;
         int prevX = playX - S(4) - btnSz;
 
-        int textX = icoX + icoSz + S(10);
+        int textX = icoX + icoBox + S(10);
         int textRight = prevX - S(8);
         bool isWeb = s.IsBrowser || BrowserSiteScanner.ExtractBrowserKeyFromAppKey(s.AppKey) != null;
         int globeSz = isWeb ? S(11) : 0;
         int globeGap = isWeb ? S(4) : 0;
-        int titleMeasured = MeasureTextWidth(dc, s.DisplayName, 12, Win32.FW_SEMIBOLD) + S(4);
-        int nameMaxRight = Math.Min(textRight - globeSz - globeGap, textX + titleMeasured);
+        int dotSz = S(7);
+        int dotReserve = dotSz + S(5);
+        int titleMeasured = _d2d.MeasureTextWidth(s.DisplayName, 12, Win32.FW_SEMIBOLD, _dpi) + S(4);
+        int nameMaxRight = Math.Min(textRight - globeSz - globeGap - dotReserve, textX + titleMeasured);
 
-        DrawText(dc, s.DisplayName, textX, y + S(9), textRight - globeSz - globeGap, y + S(27),
-            12, Win32.FW_SEMIBOLD, focusHovered ? Theme.Accent : Theme.TextPrimary);
+        _d2d.DrawText(s.DisplayName, textX, drawY + S(9), textRight - globeSz - globeGap - dotReserve, drawY + S(27),
+            12, Win32.FW_SEMIBOLD, Theme.BlendRgb(Theme.TextPrimary, Theme.Accent, focusHov), _dpi);
 
-        if (isWeb && nameMaxRight + globeSz + S(2) <= textRight)
+        int metaX = nameMaxRight + S(3);
+        if (isWeb && metaX + globeSz <= textRight - dotReserve)
         {
-            DrawGlobeGlyph(gfx, nameMaxRight + S(2), y + S(13), globeSz, Theme.TextMuted);
+            _d2d.DrawGlobeGlyph(metaX, drawY + SF(12.5f), globeSz, Theme.TextMuted, _dpi);
+            metaX += globeSz + globeGap;
+        }
+        uint stDotColor = s.IsEffectivelyPlaying
+            ? Theme.Green
+            : (s.IsMuted || s.Volume <= 0.005f ? Theme.Red : Theme.TextMuted);
+        if (metaX + dotSz <= textRight)
+        {
+            _d2d.FillCircle(metaX, drawY + SF(15f), dotSz, stDotColor);
         }
 
-        DrawText(dc, s.FormattedMediaTitle, textX, y + S(28), textRight, y + S(45),
-            11, Win32.FW_NORMAL, Theme.TextSecondary);
+        _d2d.DrawText(s.FormattedMediaTitle, textX, drawY + S(28), textRight, drawY + S(46),
+            11, Win32.FW_NORMAL, Theme.TextSecondary, _dpi);
 
-        GdiPlus.FillRoundedRect(gfx, x + pad, y + S(50), w - pad * 2, Math.Max(1, S(1)), 0f,
-            GdiPlus.Argb(Theme.BorderSubtle, 140));
-
+        int botY = (int)MathF.Round(drawY + cardH - pad - S(28));
         if (y + cardH > headerH && y < bodyBottom)
         {
             var captured = s;
             RegisterScrollableHit(
-                new Win32.RECT { Left = x, Top = y, Right = prevX - S(4), Bottom = y + S(50) },
+                new Win32.RECT { Left = x, Top = y, Right = prevX - S(4), Bottom = y + S(52) },
                 focusId,
                 () =>
                 {
@@ -917,227 +1279,191 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                 headerH,
                 bodyBottom);
 
-            DrawTransportBtn(gfx, $"fly_prev_{s.SessionId}", 0, prevX, btnY, btnSz, false, headerH, bodyBottom,
+            DrawTransportBtn($"fly_prev_{s.SessionId}", 0, prevX, btnY, btnSz, accent: false, circular: false, headerH, bodyBottom,
                 () => _ = _engine.DispatchMediaActionToSessionAsync(captured.SessionId, MediaActionKind.Previous));
-            DrawTransportBtn(gfx, $"fly_play_{s.SessionId}", captured.IsPlaying ? 2 : 1, playX, btnY, btnSz, true, headerH, bodyBottom,
+            DrawTransportBtn($"fly_play_{s.SessionId}", captured.IsPlaying ? 2 : 1, playX, playY, playSz, accent: true, circular: true, headerH, bodyBottom,
                 () => _ = _engine.DispatchMediaActionToSessionAsync(captured.SessionId, MediaActionKind.PlayPause));
-            DrawTransportBtn(gfx, $"fly_next_{s.SessionId}", 3, nextX, btnY, btnSz, false, headerH, bodyBottom,
+            DrawTransportBtn($"fly_next_{s.SessionId}", 3, nextX, btnY, btnSz, accent: false, circular: false, headerH, bodyBottom,
                 () => _ = _engine.DispatchMediaActionToSessionAsync(captured.SessionId, MediaActionKind.Next));
-            DrawLockBtn(gfx, $"fly_lock_{s.SessionId}", lockX, btnY, btnSz, isLocked, headerH, bodyBottom,
+            DrawLockBtn($"fly_lock_{s.SessionId}", lockX, btnY, btnSz, isLocked, headerH, bodyBottom,
                 () => _engine.ToggleManualLockOnActiveOrSelected(captured.SessionId));
 
-            DrawVolumeRow(dc, gfx, $"fly_vol_{s.SessionId}", captured,
-                x + pad, y + S(55), w - pad * 2, S(26), headerH, bodyBottom);
+            DrawControlCenterVolumeBar($"fly_vol_{s.SessionId}", captured,
+                x + pad + (isTarget ? S(3) : 0), botY, w - pad * 2 - (isTarget ? S(3) : 0), S(28),
+                devColor, headerH, bodyBottom);
         }
 
         return y + cardH;
     }
 
-    private void DrawTransportBtn(nint gfx, string id, int kind, int x, int y, int sz, bool accent, int headerH, int bodyBottom, Action onClick)
+    private void DrawTransportBtn(
+        string id, int kind, int x, int y, int sz, bool accent, bool circular,
+        int headerH, int bodyBottom, Action onClick)
     {
-        bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
-        uint bg = accent
-            ? (hovered ? Theme.AccentHover : Theme.Accent)
-            : (hovered ? Theme.BgControlHover : Theme.BgControl);
-        uint border = accent ? Theme.Accent : Theme.BorderStrong;
+        float hovT = GetHoverT(id);
+        float radius = circular ? sz * 0.5f : SF(8);
         uint fg = accent ? Theme.OnAccent : Theme.TextPrimary;
 
-        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, sz, sz, SF(6), GdiPlus.Argb(bg), GdiPlus.Argb(border));
-
-        if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(fg), out nint brush) == 0 && brush != 0)
+        if (accent)
         {
-            try
-            {
-                float cx = x + sz / 2f;
-                float cy = y + sz / 2f;
-                float r = sz * 0.18f;
-                switch (kind)
-                {
-                    case 0: // Previous
-                        float barW = MathF.Max(1.8f, sz * 0.075f);
-                        GdiPlus.GdipFillRectangle(gfx, brush, cx - r * 0.85f, cy - r * 0.85f, barW, r * 1.7f);
-                        FillTriangle(gfx, brush, cx + r * 0.9f, cy - r * 0.85f, cx + r * 0.9f, cy + r * 0.85f, cx - r * 0.45f, cy);
-                        break;
-                    case 1: // Play
-                        FillTriangle(gfx, brush, cx - r * 0.55f, cy - r, cx - r * 0.55f, cy + r, cx + r * 1.1f, cy);
-                        break;
-                    case 2: // Pause
-                        float bw = MathF.Max(2f, sz * 0.085f);
-                        float bh = r * 1.85f;
-                        GdiPlus.GdipFillRectangle(gfx, brush, cx - bw * 1.35f, cy - bh / 2f, bw, bh);
-                        GdiPlus.GdipFillRectangle(gfx, brush, cx + bw * 0.35f, cy - bh / 2f, bw, bh);
-                        break;
-                    case 3: // Next
-                        FillTriangle(gfx, brush, cx - r * 0.9f, cy - r * 0.85f, cx - r * 0.9f, cy + r * 0.85f, cx + r * 0.45f, cy);
-                        GdiPlus.GdipFillRectangle(gfx, brush, cx + r * 0.55f, cy - r * 0.85f, MathF.Max(1.8f, sz * 0.075f), r * 1.7f);
-                        break;
-                }
-            }
-            finally
-            {
-                GdiPlus.GdipDeleteBrush(brush);
-            }
+            _d2d.FillLinearGradientRoundedRect(x, y, sz, sz, radius,
+                Theme.BlendRgb(Theme.Accent, Theme.AccentHover, hovT * 0.6f), 1f, Theme.AccentHover, 1f);
+            if (hovT > 0.01f)
+                _d2d.DrawRoundedRect(x, y, sz, sz, radius, Theme.AccentHover, 1.2f, hovT);
+        }
+        else
+        {
+            uint bg = Theme.BlendRgb(Theme.BgControl, Theme.BgControlHover, hovT);
+            uint border = Theme.BlendRgb(Theme.BorderStrong, Theme.Accent, hovT * 0.55f);
+            _d2d.FillAndStrokeRoundedRect(x, y, sz, sz, radius, bg, 1f, border, 1f, 1f);
+        }
+
+        float cx = x + sz * 0.5f;
+        float cy = y + sz * 0.5f;
+        float r = sz * 0.18f;
+        switch (kind)
+        {
+            case 0: // Previous
+                float prevBarW = MathF.Max(1.8f, sz * 0.075f);
+                _d2d.FillRoundedRect(cx - r * 0.9f, cy - r * 0.85f, prevBarW, r * 1.7f, 0.8f, fg);
+                _d2d.FillTriangle(cx + r * 0.9f, cy - r * 0.85f, cx + r * 0.9f, cy + r * 0.85f, cx - r * 0.45f, cy, fg);
+                break;
+            case 1: // Play
+                _d2d.FillTriangle(cx - r * 0.45f, cy - r * 1.05f, cx - r * 0.45f, cy + r * 1.05f, cx + r * 1.15f, cy, fg);
+                break;
+            case 2: // Pause
+                float bw = MathF.Max(2.1f, sz * 0.088f);
+                float bh = r * 1.9f;
+                _d2d.FillRoundedRect(cx - bw * 1.45f, cy - bh * 0.5f, bw, bh, 0.9f, fg);
+                _d2d.FillRoundedRect(cx + bw * 0.45f, cy - bh * 0.5f, bw, bh, 0.9f, fg);
+                break;
+            case 3: // Next
+                _d2d.FillTriangle(cx - r * 0.9f, cy - r * 0.85f, cx - r * 0.9f, cy + r * 0.85f, cx + r * 0.45f, cy, fg);
+                _d2d.FillRoundedRect(cx + r * 0.55f, cy - r * 0.85f, MathF.Max(1.8f, sz * 0.075f), r * 1.7f, 0.8f, fg);
+                break;
         }
 
         RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + sz, Bottom = y + sz }, id, onClick, headerH, bodyBottom);
     }
 
-    private void DrawLockBtn(nint gfx, string id, int x, int y, int sz, bool isLocked, int headerH, int bodyBottom, Action onClick)
+    private void DrawLockBtn(string id, int x, int y, int sz, bool isLocked, int headerH, int bodyBottom, Action onClick)
     {
-        bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
-        uint bg = isLocked ? Theme.AmberSoft : (hovered ? Theme.BgControlHover : Theme.BgControl);
-        uint border = isLocked ? Theme.Amber : Theme.BorderStrong;
-        uint fg = isLocked ? Theme.Amber : (hovered ? Theme.TextPrimary : Theme.TextSecondary);
+        float hovT = GetHoverT(id);
+        uint bg = isLocked
+            ? Theme.AmberSoft
+            : Theme.BlendRgb(Theme.BgControl, Theme.BgControlHover, hovT);
+        uint border = isLocked
+            ? Theme.Amber
+            : Theme.BlendRgb(Theme.BorderStrong, Theme.Accent, hovT * 0.55f);
+        uint fg = isLocked
+            ? Theme.Amber
+            : Theme.BlendRgb(Theme.TextSecondary, Theme.TextPrimary, hovT);
 
-        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, sz, sz, SF(6), GdiPlus.Argb(bg), GdiPlus.Argb(border));
+        _d2d.FillAndStrokeRoundedRect(x, y, sz, sz, SF(8), bg, 1f, border, 1f, 1f);
+        _d2d.DrawLockGlyph(x + sz * 0.5f, y + sz * 0.5f, sz, fg, _dpi);
 
-        float cx = x + sz / 2f;
-        float cy = y + sz / 2f;
-        float bw = sz * 0.42f;
-        float bh = sz * 0.34f;
-        float bx = cx - bw / 2f;
-        float by = cy - bh * 0.15f;
-
-        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(fg), MathF.Max(1.3f, SF(1.35f)), GdiPlus.UnitPixel, out nint pen) == 0 && pen != 0)
-        {
-            try
-            {
-                float sw = bw * 0.62f;
-                float sh = sz * 0.24f;
-                float sx = cx - sw / 2f;
-                float sy = by - sh * 0.65f;
-                GdiPlus.GdipDrawArc(gfx, pen, sx, sy, sw, sh * 1.3f, 180f, 180f);
-            }
-            finally
-            {
-                GdiPlus.GdipDeletePen(pen);
-            }
-        }
-
-        GdiPlus.FillRoundedRect(gfx, bx, by, bw, bh, SF(2f), GdiPlus.Argb(fg));
         RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + sz, Bottom = y + sz }, id, onClick, headerH, bodyBottom);
     }
 
-    private void DrawVolumeRow(
-        nint dc, nint gfx, string idPrefix, MediaSessionInfo session,
-        int x, int y, int w, int h, int headerH, int bodyBottom)
+    private void DrawControlCenterVolumeBar(
+        string idPrefix, MediaSessionInfo session,
+        int x, int y, int w, int h, uint deviceRgb, int headerH, int bodyBottom)
     {
         string sessionId = session.SessionId;
-        float volume = session.Volume;
-        bool isMuted = session.IsMuted;
+        bool showOutBtn = _engine.IsPerAppAudioRoutingSupported &&
+                          _outputDevices.Count > 1 &&
+                          session.ProcessIds.Length > 0;
+        int outSz = showOutBtn ? S(28) : 0;
+        int outGap = showOutBtn ? S(6) : 0;
+        int barW = Math.Max(S(80), w - outSz - outGap);
+        int outX = x + barW + outGap;
 
-        int muteSz = S(22);
-        int muteX = x;
-        int muteY = y + (h - muteSz) / 2;
+        string sliderId = $"{idPrefix}_slider";
         string muteId = $"{idPrefix}_mute";
-        bool muteHovered = string.Equals(_hoverId, muteId, StringComparison.Ordinal);
+        bool isDraggingThis = string.Equals(_draggingSliderId, sliderId, StringComparison.Ordinal);
+        float sliderHovT = isDraggingThis ? 1f : GetHoverT(sliderId);
+        float muteHovT = GetHoverT(muteId);
 
-        uint muteBg = isMuted ? Theme.RedSoft : (muteHovered ? Theme.BgControlHover : Theme.BgControl);
-        uint muteBorder = isMuted ? Theme.Red : Theme.BorderSubtle;
-        uint muteFg = isMuted ? Theme.Red : Theme.TextPrimary;
-        GdiPlus.FillAndStrokeRoundedRect(gfx, muteX, muteY, muteSz, muteSz, SF(5),
-            GdiPlus.Argb(muteBg), GdiPlus.Argb(muteBorder));
-        DrawSpeakerGlyph(gfx, muteX, muteY, muteSz, isMuted, muteFg);
+        float targetVol = session.IsMuted ? 0f : Math.Clamp(session.Volume, 0f, 1f);
+        float dispVol = GetAnimatedVolume(sessionId, targetVol, isDraggingThis, _dragPreviewVolume);
+
+        float radius = SF(9);
+        _d2d.FillAndStrokeRoundedRect(x, y, barW, h, radius,
+            Theme.BgControl, 0.88f,
+            Theme.BlendRgb(Theme.BorderSubtle, deviceRgb, sliderHovT), 0.72f + 0.28f * sliderHovT, 1f);
+
+        float fillW = barW * dispVol;
+        if (fillW > 2f)
+        {
+            uint fillStart = (session.IsMuted && !isDraggingThis) ? Theme.Red : Theme.BlendRgb(Theme.BgControl, deviceRgb, 0.65f);
+            uint fillEnd = (session.IsMuted && !isDraggingThis) ? Theme.Red : deviceRgb;
+            _d2d.PushClip(x, y, MathF.Min(barW, fillW), h);
+            _d2d.FillLinearGradientRoundedRect(x, y, barW, h, radius, fillStart, 0.92f, fillEnd, 0.96f);
+            _d2d.PopClip();
+        }
+
+        int muteW = Math.Min(barW / 2, S(28));
+        uint speakerColor = session.IsMuted && !isDraggingThis
+            ? Theme.Red
+            : (dispVol > 0.14f && !Theme.IsLight ? 0xFFFFFFu : Theme.TextPrimary);
+        if (muteHovT > 0.01f)
+            _d2d.FillRoundedRect(x + S(2), y + S(2), muteW - S(4), h - S(4), SF(6), 0xFFFFFF, (Theme.IsLight ? 0.32f : 0.16f) * muteHovT);
+
+        _d2d.DrawSpeakerGlyph(x + (muteW - S(18)) * 0.5f, y + (h - S(18)) * 0.5f, S(18), session.IsMuted && !isDraggingThis, speakerColor, _dpi);
+
+        int dispPct = (int)MathF.Round(dispVol * 100f);
+        string pctStr = Strings.FormatPercent(dispPct);
+        uint pctFg = session.IsMuted && !isDraggingThis
+            ? Theme.Red
+            : (dispVol > 0.80f && !Theme.IsLight ? 0xFFFFFFu : Theme.TextPrimary);
+        _d2d.DrawText(pctStr, x + muteW + S(4), y, x + barW - S(9), y + h, 10, Win32.FW_SEMIBOLD,
+            pctFg, _dpi, align: D2DRenderer.TextAlign.Right);
 
         RegisterScrollableHit(
-            new Win32.RECT { Left = muteX, Top = muteY, Right = muteX + muteSz, Bottom = muteY + muteSz },
+            new Win32.RECT { Left = x, Top = y, Right = x + muteW, Bottom = y + h },
             muteId,
             () => _ = _engine.ToggleSessionMuteAsync(sessionId),
             headerH,
             bodyBottom);
 
-        bool showOutBtn = _engine.IsPerAppAudioRoutingSupported &&
-                          _outputDevices.Count > 1 &&
-                          session.ProcessIds.Length > 0;
-        int outSz = showOutBtn ? S(22) : 0;
-        int outGap = showOutBtn ? S(4) : 0;
-        int outX = x + w - outSz;
-        int pctW = S(36);
-        int pctX = outX - outGap - pctW;
-        int trackX = muteX + muteSz + S(8);
-        int trackRight = pctX - S(6);
-        int trackW = Math.Max(S(40), trackRight - trackX);
-        int trackH = S(5);
-        int trackY = y + (h - trackH) / 2;
-
-        string sliderId = $"{idPrefix}_slider";
-        bool isDraggingThis = string.Equals(_draggingSliderId, sliderId, StringComparison.Ordinal);
-        bool sliderHovered = isDraggingThis || string.Equals(_hoverId, sliderId, StringComparison.Ordinal);
-
-        float dispVol = isDraggingThis
-            ? _dragPreviewVolume
-            : (isMuted ? 0f : Math.Clamp(volume, 0f, 1f));
-
-        GdiPlus.FillRoundedRect(gfx, trackX, trackY, trackW, trackH, trackH / 2f, GdiPlus.Argb(Theme.BgControl));
-        float fillW = trackW * dispVol;
-        if (fillW > 1f)
-        {
-            uint fillColor = (isMuted && !isDraggingThis) ? Theme.Red : Theme.Accent;
-            GdiPlus.FillRoundedRect(gfx, trackX, trackY, MathF.Max(trackH, fillW), trackH, trackH / 2f, GdiPlus.Argb(fillColor));
-        }
-
-        float thumbD = sliderHovered ? S(12) : S(10);
-        float cx = trackX + trackW * dispVol;
-        float cy = y + h / 2f;
-        if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(Theme.SwitchKnob), out nint kBr) == 0 && kBr != 0)
-        {
-            try { GdiPlus.GdipFillEllipse(gfx, kBr, cx - thumbD / 2f, cy - thumbD / 2f, thumbD, thumbD); }
-            finally { GdiPlus.GdipDeleteBrush(kBr); }
-        }
-        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(isDraggingThis ? Theme.Accent : Theme.BorderStrong),
-            MathF.Max(1.1f, SF(1.1f)), GdiPlus.UnitPixel, out nint kPen) == 0 && kPen != 0)
-        {
-            try { GdiPlus.GdipDrawEllipse(gfx, kPen, cx - thumbD / 2f, cy - thumbD / 2f, thumbD, thumbD); }
-            finally { GdiPlus.GdipDeletePen(kPen); }
-        }
-
+        int trackLeft = x + muteW;
+        int trackW = Math.Max(S(24), barW - muteW);
         int hitTop = Math.Max(headerH, y);
         int hitBottom = Math.Min(bodyBottom, y + h);
         if (hitBottom > hitTop)
         {
             _sliderRegions.Add(new SliderRegion(
-                new Win32.RECT { Left = trackX - S(4), Top = hitTop, Right = trackX + trackW + S(4), Bottom = hitBottom },
+                new Win32.RECT { Left = trackLeft, Top = hitTop, Right = x + barW, Bottom = hitBottom },
                 sliderId,
                 sessionId,
-                trackX,
+                trackLeft,
                 trackW));
         }
-
-        int dispPct = (int)MathF.Round(dispVol * 100f);
-        DrawText(dc, Strings.FormatPercent(dispPct), pctX, y, pctX + pctW, y + h, 10, Win32.FW_SEMIBOLD,
-            isMuted && !isDraggingThis ? Theme.Red : Theme.TextSecondary, centered: true);
 
         if (showOutBtn)
         {
             string outId = $"{idPrefix}_out";
-            string? assignedId = _engine.GetSessionOutputDeviceId(sessionId);
-            uint devColor = GetEffectiveDeviceColor(assignedId);
             bool isDrawerForThis = _openDrawer == FlyoutDrawer.AppOutputDevice &&
                                    string.Equals(_drawerTargetSessionId, sessionId, StringComparison.Ordinal);
-            bool outHover = string.Equals(_hoverId, outId, StringComparison.Ordinal);
-            bool solid = isDrawerForThis || outHover;
-            uint outBgArgb = solid
-                ? GdiPlus.Argb(devColor)
-                : GdiPlus.Argb(devColor, Theme.IsLight ? (byte)24 : (byte)32);
-            uint outBorderArgb = GdiPlus.Argb(devColor, solid ? (byte)255 : (byte)225);
-            uint outFg = solid ? Theme.OnAccent : devColor;
-            int outY = y + (h - outSz) / 2;
+            float outHovT = isDrawerForThis ? 1f : GetHoverT(outId);
+            uint outBg = Theme.BlendRgb(Theme.BlendRgb(Theme.BgControl, deviceRgb, Theme.IsLight ? 0.10f : 0.14f), deviceRgb, isDrawerForThis ? 1f : outHovT * 0.85f);
+            uint outBorder = Theme.BlendRgb(Theme.BorderStrong, deviceRgb, 0.72f + 0.28f * outHovT);
+            uint outFg = (isDrawerForThis || outHovT > 0.5f) ? Theme.OnAccent : deviceRgb;
 
-            GdiPlus.FillAndStrokeRoundedRect(gfx, outX, outY, outSz, outSz, SF(5),
-                outBgArgb, outBorderArgb, solid ? 1f : 1.2f);
-            DrawOutputSwitchGlyph(gfx, outX, outY, outSz, outFg);
+            _d2d.FillAndStrokeRoundedRect(outX, y, outSz, h, SF(8), outBg, 1f, outBorder, 1f, 1.1f);
+            _d2d.DrawAudioSwitchGlyph(outX + outSz * 0.5f, y + h * 0.5f, outSz * 0.78f, outFg, _dpi);
 
             string appName = session.DisplayName;
             string? browserName = ProcessResolver.ResolveBrowserDisplayName(session);
             RegisterScrollableHit(
-                new Win32.RECT { Left = outX, Top = outY, Right = outX + outSz, Bottom = outY + outSz },
+                new Win32.RECT { Left = outX, Top = y, Right = outX + outSz, Bottom = y + h },
                 outId,
                 () =>
                 {
                     if (_openDrawer == FlyoutDrawer.AppOutputDevice &&
                         string.Equals(_drawerTargetSessionId, sessionId, StringComparison.Ordinal))
                     {
-                        _openDrawer = FlyoutDrawer.None;
+                        OpenOrToggleDrawer(FlyoutDrawer.None);
                     }
                     else
                     {
@@ -1146,9 +1472,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                         _drawerTargetBrowserName = browserName;
                         _outputDevices = _engine.GetOutputDevices();
                         RebuildOutputDeviceColorCache();
-                        _openDrawer = FlyoutDrawer.AppOutputDevice;
+                        OpenOrToggleDrawer(FlyoutDrawer.AppOutputDevice);
                     }
-                    PositionAndResize();
                 },
                 headerH,
                 bodyBottom);
@@ -1165,74 +1490,70 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             _hitRegions.Add(new HitRegion(bounds, id, onClick));
     }
 
-    private void DrawDrawer(nint dc, nint gfx, int w, int drawerY, int drawerH)
+    private void DrawDrawer(int w, int drawerY, int drawerH, double nowMs)
     {
-        GdiPlus.FillRoundedRect(gfx, 0, drawerY, w, drawerH, 0, GdiPlus.Argb(Theme.BgWindow));
-        GdiPlus.FillRoundedRect(gfx, 0, drawerY, w, 1, 0, GdiPlus.Argb(Theme.BorderSubtle));
+        float drawerEase = (!_settings.ReducedAnimations && _drawerAnimStartMs > 0)
+            ? EaseOutCubic(_drawerAnimStartMs, nowMs, DRAWER_ANIM_MS)
+            : 1f;
 
-        int padX = S(10);
+        _d2d.PushClip(0, drawerY, w, drawerH);
+        _d2d.FillRect(0, drawerY, w, drawerH, Theme.BgWindow);
+        _d2d.FillRect(0, drawerY, w, 1, Theme.BorderSubtle, 0.85f);
+
+        float offsetY = SF(8) * (1f - drawerEase);
+        int padX = S(12);
+
         if (_openDrawer == FlyoutDrawer.AudioDevices)
         {
             if (_outputDevices.Count == 0)
             {
-                DrawText(dc, Strings.FlyoutNoAudioDevices, padX, drawerY, w - padX, drawerY + drawerH,
-                    11, Win32.FW_NORMAL, Theme.TextSecondary, centered: true);
+                _d2d.DrawText(Strings.FlyoutNoAudioDevices, padX, drawerY + offsetY, w - padX, drawerY + drawerH + offsetY,
+                    11, Win32.FW_NORMAL, Theme.TextSecondary, _dpi, centered: true, alpha: drawerEase);
+                _d2d.PopClip();
                 return;
             }
 
-            int rowH = S(28);
+            int rowH = S(30);
             int rowGap = S(4);
             int maxShow = Math.Min(_outputDevices.Count, 5);
-            int ry = drawerY + S(6);
+            float ry = drawerY + S(7) + offsetY;
             for (int i = 0; i < maxShow; i++)
             {
                 var dev = _outputDevices[i];
                 string id = $"fly_dev_{i}";
-                bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+                float hovT = GetHoverT(id);
                 uint devColor = GetEffectiveDeviceColor(dev.Id);
-                uint bgArgb = dev.IsDefault
-                    ? GdiPlus.Argb(devColor, Theme.IsLight ? (byte)28 : (byte)38)
-                    : GdiPlus.Argb(hovered ? Theme.BgControlHover : Theme.BgCard);
-                uint borderArgb = dev.IsDefault ? GdiPlus.Argb(devColor) : GdiPlus.Argb(Theme.BorderSubtle);
+                uint bg = dev.IsDefault
+                    ? Theme.BlendRgb(Theme.BgCardElevated, devColor, (Theme.IsLight ? 0.12f : 0.16f) + 0.05f * hovT)
+                    : Theme.BlendRgb(Theme.BgCard, Theme.BgControlHover, hovT);
+                uint border = dev.IsDefault ? devColor : Theme.BlendRgb(Theme.BorderSubtle, devColor, hovT * 0.55f);
 
-                GdiPlus.FillAndStrokeRoundedRect(gfx, padX, ry, w - padX * 2, rowH, SF(6),
-                    bgArgb, borderArgb);
+                _d2d.FillAndStrokeRoundedRect(padX, ry, w - padX * 2, rowH, SF(8),
+                    bg, drawerEase, border, drawerEase * (dev.IsDefault ? 0.9f : 1f), 1f);
 
                 int dotSz = S(7);
-                int dotX = padX + S(10);
-                int dotY = ry + (rowH - dotSz) / 2;
+                float dotX = padX + S(10);
+                float dotY = ry + (rowH - dotSz) * 0.5f;
                 if (dev.IsDefault)
-                {
-                    if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(devColor), out nint dBr) == 0 && dBr != 0)
-                    {
-                        try { GdiPlus.GdipFillEllipse(gfx, dBr, dotX, dotY, dotSz, dotSz); }
-                        finally { GdiPlus.GdipDeleteBrush(dBr); }
-                    }
-                }
+                    _d2d.FillCircle(dotX, dotY, dotSz, devColor, drawerEase);
                 else
-                {
-                    if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(devColor), MathF.Max(1.1f, SF(1.1f)), GdiPlus.UnitPixel, out nint dPen) == 0 && dPen != 0)
-                    {
-                        try { GdiPlus.GdipDrawEllipse(gfx, dPen, dotX, dotY, dotSz, dotSz); }
-                        finally { GdiPlus.GdipDeletePen(dPen); }
-                    }
-                }
+                    _d2d.StrokeCircle(dotX, dotY, dotSz, devColor, MathF.Max(1.1f, SF(1.1f)), drawerEase);
 
-                DrawText(dc, dev.Name, dotX + dotSz + S(8), ry, w - padX - S(10), ry + rowH,
+                _d2d.DrawText(dev.Name, dotX + dotSz + S(9), ry, w - padX - S(10), ry + rowH,
                     11, dev.IsDefault ? Win32.FW_SEMIBOLD : Win32.FW_NORMAL,
-                    dev.IsDefault ? devColor : Theme.TextPrimary);
+                    dev.IsDefault ? devColor : Theme.TextPrimary, _dpi, alpha: drawerEase);
 
                 var capturedDev = dev;
+                int hitTop = (int)MathF.Round(ry);
                 _hitRegions.Add(new HitRegion(
-                    new Win32.RECT { Left = padX, Top = ry, Right = w - padX, Bottom = ry + rowH },
+                    new Win32.RECT { Left = padX, Top = hitTop, Right = w - padX, Bottom = hitTop + rowH },
                     id,
                     () =>
                     {
                         _engine.SelectOutputDevice(capturedDev.Id, capturedDev.Name);
-                        _openDrawer = FlyoutDrawer.None;
+                        OpenOrToggleDrawer(FlyoutDrawer.None);
                         _outputDevices = _engine.GetOutputDevices();
                         RebuildOutputDeviceColorCache();
-                        PositionAndResize();
                     }));
 
                 ry += rowH + rowGap;
@@ -1246,29 +1567,31 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             int gap = S(6);
             int availW = w - padX * 2;
             int pillW = (availW - gap * (count - 1)) / count;
-            int pillH = S(28);
-            int pillY = drawerY + (drawerH - pillH) / 2;
+            int pillH = S(30);
+            float pillY = drawerY + (drawerH - pillH) * 0.5f + offsetY;
             int px = padX;
 
             foreach (int mins in presets)
             {
                 string id = $"fly_sleep_set_{mins}";
-                bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
-                GdiPlus.FillAndStrokeRoundedRect(gfx, px, pillY, pillW, pillH, SF(6),
-                    GdiPlus.Argb(hovered ? Theme.BgControlHover : Theme.BgCard),
-                    GdiPlus.Argb(hovered ? Theme.Accent : Theme.BorderStrong));
-                DrawText(dc, Strings.FlyoutSleepMinutes(mins), px + S(2), pillY, px + pillW - S(2), pillY + pillH,
-                    10, Win32.FW_SEMIBOLD, hovered ? Theme.Accent : Theme.TextPrimary, centered: true);
+                float hovT = GetHoverT(id);
+                uint bg = Theme.BlendRgb(Theme.BgCard, Theme.BgControlHover, hovT);
+                uint border = Theme.BlendRgb(Theme.BorderStrong, Theme.Accent, hovT);
+                uint fg = Theme.BlendRgb(Theme.TextPrimary, Theme.Accent, hovT);
+
+                _d2d.FillAndStrokeRoundedRect(px, pillY, pillW, pillH, SF(8), bg, drawerEase, border, drawerEase);
+                _d2d.DrawText(Strings.FlyoutSleepMinutes(mins), px + S(2), pillY, px + pillW - S(2), pillY + pillH,
+                    10, Win32.FW_SEMIBOLD, fg, _dpi, centered: true, alpha: drawerEase);
 
                 int capturedMins = mins;
+                int hitY = (int)MathF.Round(pillY);
                 _hitRegions.Add(new HitRegion(
-                    new Win32.RECT { Left = px, Top = pillY, Right = px + pillW, Bottom = pillY + pillH },
+                    new Win32.RECT { Left = px, Top = hitY, Right = px + pillW, Bottom = hitY + pillH },
                     id,
                     () =>
                     {
                         _engine.StartSleepTimer(capturedMins);
-                        _openDrawer = FlyoutDrawer.None;
-                        PositionAndResize();
+                        OpenOrToggleDrawer(FlyoutDrawer.None);
                     }));
                 px += pillW + gap;
             }
@@ -1276,20 +1599,20 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             if (hasActive)
             {
                 const string cancelId = "fly_sleep_cancel";
-                bool hovered = string.Equals(_hoverId, cancelId, StringComparison.Ordinal);
-                GdiPlus.FillAndStrokeRoundedRect(gfx, px, pillY, pillW, pillH, SF(6),
-                    GdiPlus.Argb(hovered ? Theme.RedSoft : Theme.BgCard),
-                    GdiPlus.Argb(Theme.Red));
-                DrawText(dc, Strings.FlyoutSleepCancel, px + S(2), pillY, px + pillW - S(2), pillY + pillH,
-                    10, Win32.FW_SEMIBOLD, Theme.Red, centered: true);
+                float hovT = GetHoverT(cancelId);
+                uint bg = Theme.BlendRgb(Theme.BgCard, Theme.RedSoft, hovT);
+                int hitY = (int)MathF.Round(pillY);
+
+                _d2d.FillAndStrokeRoundedRect(px, pillY, pillW, pillH, SF(8), bg, drawerEase, Theme.Red, drawerEase);
+                _d2d.DrawText(Strings.FlyoutSleepCancel, px + S(2), pillY, px + pillW - S(2), pillY + pillH,
+                    10, Win32.FW_SEMIBOLD, Theme.Red, _dpi, centered: true, alpha: drawerEase);
                 _hitRegions.Add(new HitRegion(
-                    new Win32.RECT { Left = px, Top = pillY, Right = px + pillW, Bottom = pillY + pillH },
+                    new Win32.RECT { Left = px, Top = hitY, Right = px + pillW, Bottom = hitY + pillH },
                     cancelId,
                     () =>
                     {
                         _engine.CancelSleepTimer();
-                        _openDrawer = FlyoutDrawer.None;
-                        PositionAndResize();
+                        OpenOrToggleDrawer(FlyoutDrawer.None);
                     }));
             }
         }
@@ -1297,52 +1620,40 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         {
             string targetSid = _drawerTargetSessionId ?? string.Empty;
             string headerTitle = Strings.FlyoutAppAudioTitle(_drawerTargetAppName ?? Strings.FlyoutAudioDeviceFallback);
-            DrawText(dc, headerTitle, padX + S(2), drawerY + S(5), w - padX, drawerY + S(23),
-                10, Win32.FW_BOLD, Theme.TextMuted);
+            _d2d.DrawText(headerTitle, padX + S(2), drawerY + S(5) + offsetY, w - padX, drawerY + S(24) + offsetY,
+                10, Win32.FW_BOLD, Theme.TextMuted, _dpi, alpha: drawerEase);
 
             string? assignedId = _engine.GetSessionOutputDeviceId(targetSid);
-            int rowH = S(26);
+            int rowH = S(28);
             int rowGap = S(4);
-            int ry = drawerY + S(24);
+            float ry = drawerY + S(26) + offsetY;
             int totalRows = Math.Min(_outputDevices.Count + 1, 6);
 
             void DrawAppOutRow(string id, string label, bool selected, uint rowColor, Action onPick)
             {
-                bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
-                uint bgArgb = selected
-                    ? GdiPlus.Argb(rowColor, Theme.IsLight ? (byte)28 : (byte)38)
-                    : GdiPlus.Argb(hovered ? Theme.BgControlHover : Theme.BgCard);
-                uint borderArgb = selected ? GdiPlus.Argb(rowColor) : GdiPlus.Argb(Theme.BorderSubtle);
+                float hovT = GetHoverT(id);
+                uint bg = selected
+                    ? Theme.BlendRgb(Theme.BgCardElevated, rowColor, (Theme.IsLight ? 0.12f : 0.16f) + 0.05f * hovT)
+                    : Theme.BlendRgb(Theme.BgCard, Theme.BgControlHover, hovT);
+                uint border = selected ? rowColor : Theme.BlendRgb(Theme.BorderSubtle, rowColor, hovT * 0.55f);
 
-                GdiPlus.FillAndStrokeRoundedRect(gfx, padX, ry, w - padX * 2, rowH, SF(6),
-                    bgArgb, borderArgb);
+                _d2d.FillAndStrokeRoundedRect(padX, ry, w - padX * 2, rowH, SF(8), bg, drawerEase, border, drawerEase);
 
                 int dotSz = S(7);
-                int dotX = padX + S(10);
-                int dotY = ry + (rowH - dotSz) / 2;
+                float dotX = padX + S(10);
+                float dotY = ry + (rowH - dotSz) * 0.5f;
                 if (selected)
-                {
-                    if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(rowColor), out nint dBr) == 0 && dBr != 0)
-                    {
-                        try { GdiPlus.GdipFillEllipse(gfx, dBr, dotX, dotY, dotSz, dotSz); }
-                        finally { GdiPlus.GdipDeleteBrush(dBr); }
-                    }
-                }
+                    _d2d.FillCircle(dotX, dotY, dotSz, rowColor, drawerEase);
                 else
-                {
-                    if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(rowColor), MathF.Max(1.1f, SF(1.1f)), GdiPlus.UnitPixel, out nint dPen) == 0 && dPen != 0)
-                    {
-                        try { GdiPlus.GdipDrawEllipse(gfx, dPen, dotX, dotY, dotSz, dotSz); }
-                        finally { GdiPlus.GdipDeletePen(dPen); }
-                    }
-                }
+                    _d2d.StrokeCircle(dotX, dotY, dotSz, rowColor, MathF.Max(1.1f, SF(1.1f)), drawerEase);
 
-                DrawText(dc, label, dotX + dotSz + S(8), ry, w - padX - S(10), ry + rowH,
+                _d2d.DrawText(label, dotX + dotSz + S(9), ry, w - padX - S(10), ry + rowH,
                     11, selected ? Win32.FW_SEMIBOLD : Win32.FW_NORMAL,
-                    selected ? rowColor : Theme.TextPrimary);
+                    selected ? rowColor : Theme.TextPrimary, _dpi, alpha: drawerEase);
 
+                int hitY = (int)MathF.Round(ry);
                 _hitRegions.Add(new HitRegion(
-                    new Win32.RECT { Left = padX, Top = ry, Right = w - padX, Bottom = ry + rowH },
+                    new Win32.RECT { Left = padX, Top = hitY, Right = w - padX, Bottom = hitY + rowH },
                     id,
                     onPick));
                 ry += rowH + rowGap;
@@ -1351,8 +1662,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             DrawAppOutRow("fly_appout_default", Strings.AudioDeviceSystemDefault, assignedId == null, GetEffectiveDeviceColor(null), () =>
             {
                 _engine.SetSessionOutputDevice(targetSid, null, Strings.AudioDeviceSystemDefault);
-                _openDrawer = FlyoutDrawer.None;
-                PositionAndResize();
+                OpenOrToggleDrawer(FlyoutDrawer.None);
             });
 
             for (int i = 0; i < Math.Min(_outputDevices.Count, totalRows - 1); i++)
@@ -1363,55 +1673,57 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                 DrawAppOutRow($"fly_appout_{i}", dev.Name, selected, GetEffectiveDeviceColor(dev.Id), () =>
                 {
                     _engine.SetSessionOutputDevice(targetSid, capturedDev.Id, capturedDev.Name);
-                    _openDrawer = FlyoutDrawer.None;
-                    PositionAndResize();
+                    OpenOrToggleDrawer(FlyoutDrawer.None);
                 });
             }
 
             if (ShouldShowBrowserOutputNotice() && _drawerTargetBrowserName != null)
             {
-                int noticeY = ry + S(2);
-                int noticeH = S(58);
+                float noticeY = ry + S(2);
+                int noticeH = S(60);
                 int noticeW = w - padX * 2;
-                GdiPlus.FillAndStrokeRoundedRect(gfx, padX, noticeY, noticeW, noticeH, SF(6),
-                    GdiPlus.Argb(Theme.AmberSoft), GdiPlus.Argb(Theme.Amber, 120));
+                _d2d.FillAndStrokeRoundedRect(padX, noticeY, noticeW, noticeH, SF(8),
+                    Theme.AmberSoft, drawerEase, Theme.Amber, 0.55f * drawerEase);
 
                 string noticeText = Strings.BrowserOutputScopeNotice(_drawerTargetBrowserName);
-                DrawWrappedText(dc, noticeText, padX + S(8), noticeY + S(5), padX + noticeW - S(8), noticeY + S(35),
-                    9, Win32.FW_MEDIUM, Theme.TextPrimary);
+                _d2d.DrawWrappedText(noticeText, padX + S(10), noticeY + S(6), padX + noticeW - S(10), noticeY + S(36),
+                    9, Win32.FW_MEDIUM, Theme.TextPrimary, _dpi, alpha: drawerEase);
 
                 const string dismissId = "fly_appout_dismiss_notice";
                 string dismissText = Strings.BtnDontShowAgain;
-                int dismissW = Math.Clamp(MeasureTextWidth(dc, dismissText, 9, Win32.FW_SEMIBOLD) + S(14), S(84), noticeW - S(16));
-                int dismissH = S(18);
-                int dismissX = padX + noticeW - S(7) - dismissW;
-                int dismissY = noticeY + noticeH - S(5) - dismissH;
-                bool dismissHover = string.Equals(_hoverId, dismissId, StringComparison.Ordinal);
+                int dismissW = Math.Clamp(_d2d.MeasureTextWidth(dismissText, 9, Win32.FW_SEMIBOLD, _dpi) + S(16), S(88), noticeW - S(16));
+                int dismissH = S(19);
+                int dismissX = padX + noticeW - S(8) - dismissW;
+                float dismissY = noticeY + noticeH - S(6) - dismissH;
+                float dismissHov = GetHoverT(dismissId);
 
-                GdiPlus.FillRoundedRect(gfx, dismissX, dismissY, dismissW, dismissH, SF(4),
-                    GdiPlus.Argb(Theme.Amber, dismissHover ? (byte)52 : (byte)26));
-                DrawText(dc, dismissText, dismissX, dismissY, dismissX + dismissW, dismissY + dismissH,
-                    9, Win32.FW_SEMIBOLD, Theme.Amber, centered: true);
+                _d2d.FillRoundedRect(dismissX, dismissY, dismissW, dismissH, SF(5),
+                    Theme.Amber, (0.12f + 0.14f * dismissHov) * drawerEase);
+                _d2d.DrawText(dismissText, dismissX, dismissY, dismissX + dismissW, dismissY + dismissH,
+                    9, Win32.FW_SEMIBOLD, Theme.Amber, _dpi, centered: true, alpha: drawerEase);
 
+                int hitDismissY = (int)MathF.Round(dismissY);
                 _hitRegions.Add(new HitRegion(
-                    new Win32.RECT { Left = dismissX, Top = dismissY, Right = dismissX + dismissW, Bottom = dismissY + dismissH },
+                    new Win32.RECT { Left = dismissX, Top = hitDismissY, Right = dismissX + dismissW, Bottom = hitDismissY + dismissH },
                     dismissId,
                     () =>
                     {
                         _stateStore.UpdateSettings(s => s.SuppressBrowserOutputNotice = true);
+                        _settings = _stateStore.GetSettingsSnapshot();
                         PositionAndResize();
                     }));
             }
         }
+
+        _d2d.PopClip();
     }
 
-    private void DrawFooter(nint dc, nint gfx, int w, int footerY, int footerH)
+    private void DrawFooter(int w, int footerY, int footerH)
     {
-        GdiPlus.FillRoundedRect(gfx, 0, footerY, w, footerH, 0, GdiPlus.Argb(Theme.BgHeader));
-        GdiPlus.FillRoundedRect(gfx, 0, footerY, w, 1, 0, GdiPlus.Argb(Theme.BorderSubtle));
+        _d2d.FillRect(0, footerY, w, 1, Theme.BorderSubtle, 0.85f);
 
-        int padX = S(10);
-        int btnH = S(28);
+        int padX = S(12);
+        int btnH = S(30);
         int btnY = footerY + (footerH - btnH) / 2;
 
         var sleepRem = _engine.GetSleepTimerRemaining();
@@ -1419,167 +1731,84 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             ? $"{(int)sleepRem.Value.TotalMinutes:D2}:{sleepRem.Value.Seconds:D2}"
             : Strings.FlyoutSleepLabel;
 
-        int sleepW = Math.Clamp(MeasureTextWidth(dc, sleepLabel, 10, Win32.FW_SEMIBOLD) + S(32), S(78), S(112));
+        int sleepW = Math.Clamp(_d2d.MeasureTextWidth(sleepLabel, 10, Win32.FW_SEMIBOLD, _dpi) + S(34), S(82), S(116));
         int sleepX = w - padX - sleepW;
         int devX = padX;
-        int devW = Math.Max(S(100), sleepX - S(6) - devX);
+        int devW = Math.Max(S(110), sleepX - S(8) - devX);
 
-        // Output device switcher button
         string activeDevName = Strings.FlyoutAudioDeviceFallback;
+        uint activeDevColor = Theme.Accent;
         foreach (var dev in _outputDevices)
         {
             if (dev.IsDefault)
             {
                 activeDevName = dev.Name;
+                activeDevColor = GetEffectiveDeviceColor(dev.Id);
                 break;
             }
         }
 
         const string devBtnId = "fly_footer_audio";
         bool devOpen = _openDrawer == FlyoutDrawer.AudioDevices;
-        bool devHover = string.Equals(_hoverId, devBtnId, StringComparison.Ordinal);
-        uint devBg = devOpen ? Theme.AccentSoft : (devHover ? Theme.BgControlHover : Theme.BgControl);
-        uint devBorder = devOpen ? Theme.Accent : Theme.BorderSubtle;
-        uint devFg = devOpen ? Theme.Accent : Theme.TextPrimary;
+        float devHovT = devOpen ? 1f : GetHoverT(devBtnId);
+        uint devBg = devOpen
+            ? Theme.BlendRgb(Theme.BgCardElevated, activeDevColor, Theme.IsLight ? 0.14f : 0.20f)
+            : Theme.BlendRgb(Theme.BgCard, Theme.BgControlHover, devHovT);
+        uint devBorder = Theme.BlendRgb(Theme.BorderSubtle, activeDevColor, devOpen ? 0.9f : devHovT * 0.65f);
+        uint devFg = devOpen ? activeDevColor : Theme.TextPrimary;
 
-        GdiPlus.FillAndStrokeRoundedRect(gfx, devX, btnY, devW, btnH, SF(7), GdiPlus.Argb(devBg), GdiPlus.Argb(devBorder));
-        DrawSpeakerGlyph(gfx, devX + S(6), btnY + (btnH - S(16)) / 2, S(16), isMuted: false, devFg);
-        DrawText(dc, activeDevName, devX + S(25), btnY, devX + devW - S(20), btnY + btnH,
-            10, Win32.FW_SEMIBOLD, devFg);
-        DrawSmallChevron(gfx, devX + devW - S(12), btnY + btnH / 2, pointingDown: devOpen, devOpen ? Theme.Accent : Theme.TextSecondary);
+        _d2d.FillAndStrokeRoundedRect(devX, btnY, devW, btnH, btnH * 0.5f, devBg, 1f, devBorder, 1f);
+        _d2d.DrawSpeakerGlyph(devX + S(10), btnY + (btnH - S(16)) * 0.5f, S(16), isMuted: false, devOpen ? activeDevColor : devFg, _dpi);
+        _d2d.DrawText(activeDevName, devX + S(30), btnY, devX + devW - S(22), btnY + btnH,
+            10, Win32.FW_SEMIBOLD, devFg, _dpi);
+        _d2d.DrawDropdownChevron(devX + devW - S(13), btnY + btnH * 0.5f, pointingUp: !devOpen,
+            devOpen ? activeDevColor : Theme.TextSecondary, _dpi);
 
         _hitRegions.Add(new HitRegion(
             new Win32.RECT { Left = devX, Top = btnY, Right = devX + devW, Bottom = btnY + btnH },
             devBtnId,
             () =>
             {
-                _openDrawer = _openDrawer == FlyoutDrawer.AudioDevices ? FlyoutDrawer.None : FlyoutDrawer.AudioDevices;
-                if (_openDrawer == FlyoutDrawer.AudioDevices)
+                if (_openDrawer != FlyoutDrawer.AudioDevices)
                 {
                     _outputDevices = _engine.GetOutputDevices();
                     RebuildOutputDeviceColorCache();
                 }
-                PositionAndResize();
+                OpenOrToggleDrawer(FlyoutDrawer.AudioDevices);
             }));
 
-        // Sleep timer button
         const string sleepBtnId = "fly_footer_sleep";
         bool sleepOpen = _openDrawer == FlyoutDrawer.SleepTimer;
         bool sleepActive = sleepRem.HasValue;
-        bool sleepHover = string.Equals(_hoverId, sleepBtnId, StringComparison.Ordinal);
+        float sleepHovT = (sleepOpen || sleepActive) ? 1f : GetHoverT(sleepBtnId);
         uint sleepBg = sleepActive
             ? Theme.AmberSoft
-            : (sleepOpen ? Theme.AccentSoft : (sleepHover ? Theme.BgControlHover : Theme.BgControl));
-        uint sleepBorder = sleepActive ? Theme.Amber : (sleepOpen ? Theme.Accent : Theme.BorderSubtle);
-        uint sleepFg = sleepActive ? Theme.Amber : (sleepOpen ? Theme.Accent : Theme.TextSecondary);
+            : (sleepOpen ? Theme.AccentSoft : Theme.BlendRgb(Theme.BgCard, Theme.BgControlHover, sleepHovT));
+        uint sleepBorder = sleepActive
+            ? Theme.Amber
+            : (sleepOpen ? Theme.Accent : Theme.BlendRgb(Theme.BorderSubtle, Theme.Accent, sleepHovT * 0.6f));
+        uint sleepFg = sleepActive ? Theme.Amber : (sleepOpen ? Theme.Accent : Theme.BlendRgb(Theme.TextSecondary, Theme.TextPrimary, sleepHovT));
 
-        GdiPlus.FillAndStrokeRoundedRect(gfx, sleepX, btnY, sleepW, btnH, SF(7), GdiPlus.Argb(sleepBg), GdiPlus.Argb(sleepBorder));
-        DrawClockGlyph(gfx, sleepX + S(8), btnY + (btnH - S(12)) / 2, S(12), sleepFg);
-        DrawText(dc, sleepLabel, sleepX + S(22), btnY, sleepX + sleepW - S(6), btnY + btnH,
-            10, Win32.FW_SEMIBOLD, sleepFg, centered: true);
+        _d2d.FillAndStrokeRoundedRect(sleepX, btnY, sleepW, btnH, btnH * 0.5f, sleepBg, 1f, sleepBorder, 1f);
+        _d2d.DrawClockGlyph(sleepX + S(10), btnY + (btnH - S(13)) * 0.5f, S(13), sleepFg, _dpi);
+        _d2d.DrawText(sleepLabel, sleepX + S(25), btnY, sleepX + sleepW - S(8), btnY + btnH,
+            10, Win32.FW_SEMIBOLD, sleepFg, _dpi, centered: true);
 
         _hitRegions.Add(new HitRegion(
             new Win32.RECT { Left = sleepX, Top = btnY, Right = sleepX + sleepW, Bottom = btnY + btnH },
             sleepBtnId,
-            () =>
-            {
-                _openDrawer = _openDrawer == FlyoutDrawer.SleepTimer ? FlyoutDrawer.None : FlyoutDrawer.SleepTimer;
-                PositionAndResize();
-            }));
-    }
-
-    private void DrawSmallChevron(nint gfx, int cx, int cy, bool pointingDown, uint colorRgb)
-    {
-        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.3f, SF(1.4f)), GdiPlus.UnitPixel, out nint pen) != 0 || pen == 0)
-            return;
-        try
-        {
-            GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
-            GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
-            float dx = S(3);
-            float dy = S(2);
-            if (pointingDown)
-            {
-                GdiPlus.GdipDrawLine(gfx, pen, cx - dx, cy - dy, cx, cy + dy);
-                GdiPlus.GdipDrawLine(gfx, pen, cx, cy + dy, cx + dx, cy - dy);
-            }
-            else
-            {
-                GdiPlus.GdipDrawLine(gfx, pen, cx - dx, cy + dy, cx, cy - dy);
-                GdiPlus.GdipDrawLine(gfx, pen, cx, cy - dy, cx + dx, cy + dy);
-            }
-        }
-        finally
-        {
-            GdiPlus.GdipDeletePen(pen);
-        }
-    }
-
-    private void DrawClockGlyph(nint gfx, int x, int y, int sz, uint colorRgb)
-    {
-        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.1f, SF(1.15f)), GdiPlus.UnitPixel, out nint pen) != 0 || pen == 0)
-            return;
-        try
-        {
-            GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
-            GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
-            GdiPlus.GdipDrawEllipse(gfx, pen, x, y, sz, sz);
-            float cx = x + sz / 2f;
-            float cy = y + sz / 2f;
-            GdiPlus.GdipDrawLine(gfx, pen, cx, cy, cx, y + sz * 0.24f);
-            GdiPlus.GdipDrawLine(gfx, pen, cx, cy, x + sz * 0.74f, cy);
-        }
-        finally
-        {
-            GdiPlus.GdipDeletePen(pen);
-        }
-    }
-
-    private void DrawOutputSwitchGlyph(nint gfx, int x, int y, int sz, uint colorRgb)
-    {
-        float cx = x + sz / 2f;
-        float cy = y + sz / 2f;
-        float hw = sz * 0.26f;
-        float ry = sz * 0.155f;
-        float ah = sz * 0.11f;
-
-        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.25f, SF(1.35f)), GdiPlus.UnitPixel, out nint pen) == 0 && pen != 0)
-        {
-            try
-            {
-                GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
-                GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
-
-                // Top arrow ->
-                GdiPlus.GdipDrawLine(gfx, pen, cx - hw, cy - ry, cx + hw, cy - ry);
-                GdiPlus.GdipDrawLine(gfx, pen, cx + hw - ah, cy - ry - ah, cx + hw, cy - ry);
-                GdiPlus.GdipDrawLine(gfx, pen, cx + hw - ah, cy - ry + ah, cx + hw, cy - ry);
-
-                // Bottom arrow <-
-                GdiPlus.GdipDrawLine(gfx, pen, cx + hw, cy + ry, cx - hw, cy + ry);
-                GdiPlus.GdipDrawLine(gfx, pen, cx - hw + ah, cy + ry - ah, cx - hw, cy + ry);
-                GdiPlus.GdipDrawLine(gfx, pen, cx - hw + ah, cy + ry + ah, cx - hw, cy + ry);
-            }
-            finally
-            {
-                GdiPlus.GdipDeletePen(pen);
-            }
-        }
+            () => OpenOrToggleDrawer(FlyoutDrawer.SleepTimer)));
     }
 
     private void DrawAppIconOrMonogram(
-        nint dc, nint gfx, string? appKey, string? exePath, string? displayName,
-        int x, int y, int size, float radius)
+        string? appKey, string? exePath, string? displayName,
+        float x, float y, float size, float radius)
     {
         nint hIcon = _iconRenderer.GetIconForApp(appKey, exePath);
-        if (hIcon != 0)
-        {
-            Win32.DrawIconEx(dc, x, y, hIcon, size, size, 0, 0, Win32.DI_NORMAL);
+        if (hIcon != 0 && _d2d.DrawIcon(hIcon, x, y, size))
             return;
-        }
 
-        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, size, size, radius,
-            GdiPlus.Argb(Theme.AccentSoft), GdiPlus.Argb(Theme.Accent, 95), 1f);
+        _d2d.FillAndStrokeRoundedRect(x, y, size, size, radius, Theme.AccentSoft, 1f, Theme.Accent, 0.42f);
 
         string glyph = "♪";
         if (!string.IsNullOrWhiteSpace(displayName))
@@ -1595,200 +1824,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         }
 
         int ptSize = Math.Max(9, (int)MathF.Round(size / (_dpi / 96f) * 0.44f));
-        DrawText(dc, glyph, x, y, x + size, y + size, ptSize, Win32.FW_BOLD, Theme.Accent, centered: true);
-    }
-
-    private void DrawSpeakerGlyph(nint gfx, int x, int y, int sz, bool isMuted, uint colorRgb)
-    {
-        float cx = x + sz / 2f;
-        float cy = y + sz / 2f;
-        float u = sz * 0.22f;
-
-        if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(colorRgb), out nint brush) == 0 && brush != 0)
-        {
-            try
-            {
-                if (GdiPlus.GdipCreatePath(GdiPlus.FillModeAlternate, out nint path) == 0 && path != 0)
-                {
-                    try
-                    {
-                        float x0 = cx - u * 1.15f;
-                        float x1 = cx - u * 0.55f;
-                        float x2 = cx + u * 0.12f;
-                        GdiPlus.GdipAddPathLine(path, x0, cy - u * 0.42f, x1, cy - u * 0.42f);
-                        GdiPlus.GdipAddPathLine(path, x1, cy - u * 0.42f, x2, cy - u * 0.95f);
-                        GdiPlus.GdipAddPathLine(path, x2, cy - u * 0.95f, x2, cy + u * 0.95f);
-                        GdiPlus.GdipAddPathLine(path, x2, cy + u * 0.95f, x1, cy + u * 0.42f);
-                        GdiPlus.GdipAddPathLine(path, x1, cy + u * 0.42f, x0, cy + u * 0.42f);
-                        GdiPlus.GdipClosePathFigure(path);
-                        GdiPlus.GdipFillPath(gfx, brush, path);
-                    }
-                    finally
-                    {
-                        GdiPlus.GdipDeletePath(path);
-                    }
-                }
-            }
-            finally
-            {
-                GdiPlus.GdipDeleteBrush(brush);
-            }
-        }
-
-        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.2f, SF(1.25f)), GdiPlus.UnitPixel, out nint pen) == 0 && pen != 0)
-        {
-            try
-            {
-                GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
-                GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
-
-                if (isMuted)
-                {
-                    float mx1 = cx + u * 0.48f;
-                    float mx2 = cx + u * 1.15f;
-                    GdiPlus.GdipDrawLine(gfx, pen, mx1, cy - u * 0.42f, mx2, cy + u * 0.42f);
-                    GdiPlus.GdipDrawLine(gfx, pen, mx2, cy - u * 0.42f, mx1, cy + u * 0.42f);
-                }
-                else
-                {
-                    GdiPlus.GdipDrawArc(gfx, pen, cx - u * 0.25f, cy - u * 0.55f, u * 0.95f, u * 1.1f, -50f, 100f);
-                    GdiPlus.GdipDrawArc(gfx, pen, cx - u * 0.45f, cy - u * 0.9f, u * 1.6f, u * 1.8f, -50f, 100f);
-                }
-            }
-            finally
-            {
-                GdiPlus.GdipDeletePen(pen);
-            }
-        }
-    }
-
-    private void DrawGlobeGlyph(nint gfx, int x, int y, int sz, uint colorRgb)
-    {
-        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.05f, SF(1.1f)), GdiPlus.UnitPixel, out nint pen) != 0 || pen == 0)
-            return;
-
-        try
-        {
-            float pad = sz * 0.10f;
-            float left = x + pad;
-            float top = y + pad;
-            float d = MathF.Max(4f, sz - pad * 2f);
-            float midX = left + d * 0.5f;
-            float midY = top + d * 0.5f;
-            float mw = d * 0.46f;
-
-            GdiPlus.GdipDrawEllipse(gfx, pen, left, top, d, d);
-            GdiPlus.GdipDrawLine(gfx, pen, left, midY, left + d, midY);
-            GdiPlus.GdipDrawEllipse(gfx, pen, midX - mw * 0.5f, top, mw, d);
-        }
-        finally
-        {
-            GdiPlus.GdipDeletePen(pen);
-        }
-    }
-
-    private static void FillTriangle(nint gfx, nint brush, float x1, float y1, float x2, float y2, float x3, float y3)
-    {
-        if (GdiPlus.GdipCreatePath(GdiPlus.FillModeAlternate, out nint path) != 0 || path == 0) return;
-        try
-        {
-            GdiPlus.GdipAddPathLine(path, x1, y1, x2, y2);
-            GdiPlus.GdipAddPathLine(path, x2, y2, x3, y3);
-            GdiPlus.GdipClosePathFigure(path);
-            GdiPlus.GdipFillPath(gfx, brush, path);
-        }
-        finally
-        {
-            GdiPlus.GdipDeletePath(path);
-        }
-    }
-
-    private nint GetOrCreateFont(int ptSize, int weight)
-    {
-        var (face, actualWeight) = Strings.ResolveFont(weight);
-        var key = (ptSize, actualWeight, face, _dpi);
-        if (_fontCache.TryGetValue(key, out nint cached) && cached != 0)
-            return cached;
-
-        if (_fontCache.Count >= 32)
-            ClearFontCache();
-
-        nint created = Win32.CreateFontW(
-            -S(ptSize), 0, 0, 0, actualWeight, 0, 0, 0,
-            1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, face);
-        if (created != 0)
-            _fontCache[key] = created;
-        return created;
-    }
-
-    private void ClearFontCache()
-    {
-        foreach (nint font in _fontCache.Values)
-        {
-            if (font != 0) Win32.DeleteObject(font);
-        }
-        _fontCache.Clear();
-    }
-
-    private int MeasureTextWidth(nint dc, string text, int ptSize, int weight)
-    {
-        if (string.IsNullOrEmpty(text)) return 0;
-        nint font = GetOrCreateFont(ptSize, weight);
-        if (font == 0)
-            return (int)MathF.Ceiling(text.Length * S(ptSize) * 0.6f);
-
-        nint old = Win32.SelectObject(dc, font);
-        try
-        {
-            var rc = new Win32.RECT { Left = 0, Top = 0, Right = 1200, Bottom = S(32) };
-            Win32.DrawTextW(dc, text, -1, &rc, Win32.DT_CALCRECT | Win32.DT_SINGLELINE | Win32.DT_NOPREFIX);
-            return Math.Max(0, rc.Right - rc.Left);
-        }
-        finally
-        {
-            Win32.SelectObject(dc, old);
-        }
-    }
-
-    private void DrawWrappedText(nint dc, string text, int left, int top, int right, int bottom, int ptSize, int weight, uint rgb)
-    {
-        if (right <= left || bottom <= top || string.IsNullOrEmpty(text)) return;
-        nint font = GetOrCreateFont(ptSize, weight);
-        if (font == 0) return;
-
-        nint old = Win32.SelectObject(dc, font);
-        try
-        {
-            Win32.SetTextColor(dc, Theme.ToColorRef(rgb));
-            var rc = new Win32.RECT { Left = left, Top = top, Right = right, Bottom = bottom };
-            Win32.DrawTextW(dc, text, -1, &rc,
-                Win32.DT_LEFT | Win32.DT_WORDBREAK | Win32.DT_END_ELLIPSIS | Win32.DT_NOPREFIX);
-        }
-        finally
-        {
-            Win32.SelectObject(dc, old);
-        }
-    }
-
-    private void DrawText(nint dc, string text, int left, int top, int right, int bottom, int ptSize, int weight, uint rgb, bool centered = false)
-    {
-        if (right <= left || bottom <= top) return;
-        nint font = GetOrCreateFont(ptSize, weight);
-        if (font == 0) return;
-
-        nint old = Win32.SelectObject(dc, font);
-        try
-        {
-            Win32.SetTextColor(dc, Theme.ToColorRef(rgb));
-            var rc = new Win32.RECT { Left = left, Top = top, Right = right, Bottom = bottom };
-            uint fmt = (centered ? Win32.DT_CENTER : Win32.DT_LEFT)
-                       | Win32.DT_VCENTER | Win32.DT_SINGLELINE | Win32.DT_END_ELLIPSIS | Win32.DT_NOPREFIX;
-            Win32.DrawTextW(dc, text, -1, &rc, fmt);
-        }
-        finally
-        {
-            Win32.SelectObject(dc, old);
-        }
+        _d2d.DrawText(glyph, x, y, x + size, y + size, ptSize, Win32.FW_BOLD, Theme.Accent, _dpi, centered: true);
     }
 
     public void Dispose()
@@ -1801,11 +1837,11 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
 
         if (_hwnd != 0)
         {
+            StopUiAnimTimer();
             Win32.DestroyWindow(_hwnd);
             _hwnd = 0;
         }
-        ClearFontCache();
-        ReleaseBackBuffer();
+        _d2d.Dispose();
         if (ReferenceEquals(_instance, this))
             _instance = null;
     }

@@ -14,14 +14,14 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
 
     private static readonly uint[] AccentQuickSwatches =
     [
-        0x4F9CF9, 0x38BDF8, 0x10B981, 0xA78BFA,
-        0xF472B6, 0xF43F5E, 0xF59E0B, 0xEF4444
+        0x5B9CF6, 0xF28C52, 0xCBA6F7, 0xA7C080,
+        0x88C0D0, 0xEBBCBA, 0xE6B450, 0x7AA2F7
     ];
 
     private static readonly uint[] BgQuickSwatches =
     [
-        0x080A0F, 0x111318, 0x0B1420, 0x161311,
-        0x18131A, 0xF3F5F9
+        0x000000, 0x101217, 0x181825, 0x1D2021,
+        0x232A2E, 0xEFF1F5
     ];
 
     private static ThemeEditorWindow? _instance;

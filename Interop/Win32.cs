@@ -32,6 +32,7 @@ internal static unsafe partial class Win32
 
     public const uint WS_EX_APPWINDOW = 0x00040000;
     public const uint WS_EX_LAYERED = 0x00080000;
+    public const uint LWA_ALPHA = 0x00000002;
     public const uint WS_EX_TRANSPARENT = 0x00000020;
     public const uint WS_EX_TOPMOST = 0x00000008;
     public const uint WS_EX_TOOLWINDOW = 0x00000080;
@@ -723,6 +724,10 @@ internal static unsafe partial class Win32
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool ClientToScreen(nint hWnd, ref POINT lpPoint);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool SetLayeredWindowAttributes(nint hwnd, uint crKey, byte bAlpha, uint dwFlags);
 
     [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
     public static partial uint RegisterWindowMessageW(string lpString);

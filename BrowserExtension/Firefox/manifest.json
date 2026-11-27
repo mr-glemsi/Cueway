@@ -1,14 +1,14 @@
 {
   "manifest_version": 2,
   "name": "Cueway Companion",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "description": "Controls individual browser media tabs directly from Cueway without stealing focus.",
   "permissions": [
     "tabs",
     "alarms",
     "<all_urls>"
   ],
-  "content_security_policy": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:47621 ws://localhost:47621",
+  "content_security_policy": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:47621 ws://localhost:47621 http://127.0.0.1:47621 http://localhost:47621",
   "background": {
     "scripts": [
       "background.js"

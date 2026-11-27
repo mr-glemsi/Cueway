@@ -8,8 +8,8 @@ Bu klasör **Mozilla Add-ons (Firefox / Zen Browser)** ve **Microsoft Edge Add-o
 
 | Dosya | Kullanım Yeri |
 | :--- | :--- |
-| `StoreSubmission\Cueway-Companion-Firefox-AMO-v1.2.5.zip` | Mozilla AMO yükleme paketi (Firefox & Zen) |
-| `StoreSubmission\Cueway-Companion-Edge-Chrome-v1.2.5.zip` | Microsoft Edge Add-ons / Chrome Web Store yükleme paketi |
+| `StoreSubmission\Cueway-Companion-Firefox-AMO-v1.2.6.zip` | Mozilla AMO yükleme paketi (Firefox & Zen) |
+| `StoreSubmission\Cueway-Companion-Edge-Chrome-v1.2.6.zip` | Microsoft Edge Add-ons / Chrome Web Store yükleme paketi |
 | `StoreSubmission\Assets\edge-store-logo-300x300.png` | Edge Partner Center mağaza logosu (`300x300`) |
 | `StoreSubmission\Assets\store-promo-440x280.png` | Mağaza tanıtım görseli (`440x280`) |
 | `StoreSubmission\Assets\store-screenshot-1280x800.png` | Mağaza ekran görüntüsü (`1280x800`) |
@@ -23,7 +23,7 @@ Giriş: `https://addons.mozilla.org/developers/addon/submit/distribution`
 
 ### Hangi Seçeneği Seçmelisin?
 * **"On your own" (Önerilen Hızlı Yol — Liste Dışı İmzalı `.xpi`):**
-  1. `"On your own"` seç → `Cueway-Companion-Firefox-AMO-v1.2.5.zip` yükle.
+  1. `"On your own"` seç → `Cueway-Companion-Firefox-AMO-v1.2.6.zip` yükle.
   2. Kaynak kod isterse hayır de (kod küçültülmemiş/minify edilmemiş, açık).
   3. Genellikle birkaç dakika içinde imzalı **`.xpi`** dosyası çıkar.
   4. İndirdiğin dosyanın adını `cueway-companion.xpi` yapıp şu klasöre koy:
@@ -57,6 +57,7 @@ Users stream audio/video across arbitrary websites (YouTube, YouTube Music, X, T
 Data handling & privacy:
 - No personal data is collected, logged, or sent to any remote server (data_collection_permissions.required = ["none"]).
 - Query parameters and URL fragments are stripped (origin + pathname only) before forwarding active media tab state strictly to localhost ws://127.0.0.1:47621.
+- Before opening ws://127.0.0.1:47621, the extension performs a lightweight localhost-only HTTP liveness check (http://127.0.0.1:47621/health) to avoid browser WebSocket reconnect backoff delays.
 - If the Cueway desktop app is not running, the extension simply stays idle in disconnected mode and can still list local media tabs in its toolbar popup.
 ```
 
@@ -67,7 +68,7 @@ Data handling & privacy:
 Giriş: `https://partner.microsoft.com/dashboard/microsoftedge`
 
 1. Microsoft hesabınla ücretsiz Edge Developer kaydı oluştur.
-2. **Create new extension** → Packages → **`Cueway-Companion-Edge-Chrome-v1.2.5.zip`** yükle.
+2. **Create new extension** → Packages → **`Cueway-Companion-Edge-Chrome-v1.2.6.zip`** yükle.
 3. **Store listing**:
    * Logo (`300x300`): `StoreSubmission\Assets\edge-store-logo-300x300.png`
    * Promotional tile (`440x280`): `StoreSubmission\Assets\store-promo-440x280.png`
@@ -108,7 +109,7 @@ media keys, media router, tab volume, youtube control, cueway
 
 **Notes for Certification:**
 ```
-This extension bridges Microsoft Edge to the companion Windows desktop app Cueway via loopback-only WebSocket (ws://127.0.0.1:47621). It collects zero personal data, performs zero external network requests, strips URL query parameters/fragments before local transfer, and executes no remote code. When the local desktop app is not running, opening the extension popup cleanly shows "Disconnected" while listing local media tabs in the browser.
+This extension bridges Microsoft Edge to the companion Windows desktop app Cueway via loopback-only WebSocket (ws://127.0.0.1:47621), preceded by a lightweight localhost-only HTTP liveness probe (http://127.0.0.1:47621/health) to avoid browser WebSocket reconnect backoff delays. It collects zero personal data, performs zero external network requests, strips URL query parameters/fragments before local transfer, and executes no remote code. When the local desktop app is not running, opening the extension popup cleanly shows "Disconnected" while listing local media tabs in the browser.
 ```
 
 ---

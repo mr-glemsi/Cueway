@@ -16,10 +16,12 @@ internal sealed class BrowserBridgeServer : IDisposable
     public const int DefaultPort = 47621;
     private const int MaxHandshakeBytes = 16 * 1024;
     private const int MaxPayloadBytes = 1 * 1024 * 1024;
-    private const int MaxConnections = 16;
+    private const int MaxConnections = 32;
     private const int MaxTabsPerConnection = 100;
+    private const int ClientReadIdleTimeoutMs = 35_000;
     private const string WebSocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     private static readonly byte[] PongPayload = "{\"type\":\"pong\"}"u8.ToArray();
+    private static readonly byte[] CloseGoingAwayFrame = [0x88, 0x02, 0x03, 0xE9];
 
     private sealed class BridgeClientConnection : IDisposable
     {
@@ -93,6 +95,12 @@ internal sealed class BrowserBridgeServer : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
+            try
+            {
+                Client.Client.SendTimeout = 50;
+                Client.Client.Send(CloseGoingAwayFrame, SocketFlags.None);
+            }
+            catch { }
             try { Client.Client.Shutdown(SocketShutdown.Both); } catch { }
             try { Stream.Dispose(); } catch { }
             try { Client.Dispose(); } catch { }
@@ -134,7 +142,7 @@ internal sealed class BrowserBridgeServer : IDisposable
 
     private async Task RunListenerLoopAsync(CancellationToken ct)
     {
-        int retryDelayMs = 400;
+        int retryDelayMs = 50;
         while (!ct.IsCancellationRequested && !_disposed)
         {
             TcpListener? listener = null;
@@ -155,7 +163,7 @@ internal sealed class BrowserBridgeServer : IDisposable
                 }
 
                 _isListening = true;
-                retryDelayMs = 400;
+                retryDelayMs = 50;
                 SessionsChanged?.Invoke();
 
                 await AcceptLoopAsync(listener, ct).ConfigureAwait(false);
@@ -193,7 +201,7 @@ internal sealed class BrowserBridgeServer : IDisposable
             {
                 break;
             }
-            retryDelayMs = Math.Min(1500, retryDelayMs * 2);
+            retryDelayMs = Math.Min(600, retryDelayMs * 2);
         }
     }
 
@@ -345,6 +353,7 @@ internal sealed class BrowserBridgeServer : IDisposable
             {
                 var client = await listener.AcceptTcpClientAsync(ct).ConfigureAwait(false);
                 client.NoDelay = true;
+                try { client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true); } catch { }
                 _ = Task.Run(() => HandleClientAsync(client, ct), ct);
             }
         }
@@ -369,6 +378,31 @@ internal sealed class BrowserBridgeServer : IDisposable
                 return;
 
             var headers = ParseHeaders(headerText, out string requestLine);
+            if (IsHealthProbeRequest(requestLine))
+            {
+                if (headers.TryGetValue("Origin", out string? probeOrigin) &&
+                    !string.IsNullOrWhiteSpace(probeOrigin) &&
+                    !IsAllowedExtensionOrigin(probeOrigin))
+                {
+                    await WriteHttpErrorAsync(stream, "403 Forbidden").ConfigureAwait(false);
+                    return;
+                }
+
+                string allowOrigin = !string.IsNullOrWhiteSpace(probeOrigin) ? probeOrigin.Trim() : "*";
+                bool isGet = requestLine.StartsWith("GET ", StringComparison.OrdinalIgnoreCase);
+                bool isOptions = requestLine.StartsWith("OPTIONS ", StringComparison.OrdinalIgnoreCase);
+                string extraHeaders = isOptions
+                    ? "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n"
+                    : string.Empty;
+                string healthResp = isGet
+                    ? $"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: {allowOrigin}\r\nConnection: close\r\n\r\nok"
+                    : $"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: {allowOrigin}\r\n{extraHeaders}Connection: close\r\n\r\n";
+
+                await stream.WriteAsync(Encoding.ASCII.GetBytes(healthResp), handshakeCts.Token).ConfigureAwait(false);
+                await stream.FlushAsync(handshakeCts.Token).ConfigureAwait(false);
+                return;
+            }
+
             if (!requestLine.StartsWith("GET ", StringComparison.OrdinalIgnoreCase))
             {
                 await WriteHttpErrorAsync(stream, "400 Bad Request").ConfigureAwait(false);
@@ -462,7 +496,9 @@ internal sealed class BrowserBridgeServer : IDisposable
 
         while (!ct.IsCancellationRequested)
         {
-            if (!await ReadExactAsync(conn.Stream, headerBuf, 2, ct).ConfigureAwait(false))
+            using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            idleCts.CancelAfter(ClientReadIdleTimeoutMs);
+            if (!await ReadExactAsync(conn.Stream, headerBuf, 2, idleCts.Token).ConfigureAwait(false))
                 break;
 
             bool fin = (headerBuf[0] & 0x80) != 0;
@@ -600,6 +636,7 @@ internal sealed class BrowserBridgeServer : IDisposable
                         conn.ProtocolVersion = msg.Version;
                 }
                 SessionsChanged?.Invoke();
+                await conn.SendFrameAsync(0x1, PongPayload).ConfigureAwait(false);
                 break;
 
             case "ping":
@@ -633,6 +670,23 @@ internal sealed class BrowserBridgeServer : IDisposable
                 SessionsChanged?.Invoke();
                 break;
         }
+    }
+
+    private static bool IsHealthProbeRequest(string requestLine)
+    {
+        return StartsWithHealthPath(requestLine, "GET /health") ||
+               StartsWithHealthPath(requestLine, "HEAD /health") ||
+               StartsWithHealthPath(requestLine, "OPTIONS /health");
+    }
+
+    private static bool StartsWithHealthPath(string requestLine, string prefix)
+    {
+        if (!requestLine.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (requestLine.Length <= prefix.Length)
+            return false;
+        char next = requestLine[prefix.Length];
+        return next == ' ' || next == '?';
     }
 
     private static bool IsAllowedExtensionOrigin(string origin)
@@ -726,15 +780,18 @@ internal sealed class BrowserBridgeServer : IDisposable
             _listener = null;
         }
 
+        List<BridgeClientConnection> snapshot;
+        lock (_connLock)
+        {
+            snapshot = [.. _connections.Values];
+            _connections.Clear();
+        }
+
+        foreach (var c in snapshot)
+            c.Dispose();
+
         try { cts?.Cancel(); } catch { }
         try { listener?.Stop(); } catch { }
         try { cts?.Dispose(); } catch { }
-
-        lock (_connLock)
-        {
-            foreach (var c in _connections.Values)
-                c.Dispose();
-            _connections.Clear();
-        }
     }
 }

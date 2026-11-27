@@ -34,8 +34,10 @@ internal sealed unsafe class TrayController : IDisposable
     private bool _disposed;
     private string? _lastAppKey;
     private string? _lastExePath;
+    private string? _lastDisplayName;
     private bool _lastIsPlaying;
     private bool _lastIsMuted;
+    private bool _lastIsLocked;
     private int _lastSleepMins;
     private string? _lastTip;
     private string? _lastThemeId;
@@ -85,8 +87,10 @@ internal sealed unsafe class TrayController : IDisposable
         var target = snapshot.ActiveTarget;
         string? appKey = target?.AppKey;
         string? exePath = target?.ExePath;
-        bool isPlaying = target?.IsPlaying ?? false;
+        string? displayName = target?.DisplayName;
+        bool isPlaying = target?.IsEffectivelyPlaying ?? false;
         bool isMuted = target?.IsMuted ?? false;
+        bool isLocked = snapshot.IsManualLock;
         var sleepRem = _getSleepRemaining?.Invoke();
         int sleepMins = sleepRem.HasValue ? Math.Max(1, (int)Math.Ceiling(sleepRem.Value.TotalMinutes)) : 0;
         string themeId = Theme.CurrentId;
@@ -104,9 +108,11 @@ internal sealed unsafe class TrayController : IDisposable
             _currentTrayIcon != 0 &&
             _lastIsPlaying == isPlaying &&
             _lastIsMuted == isMuted &&
+            _lastIsLocked == isLocked &&
             _lastSleepMins == sleepMins &&
             string.Equals(_lastAppKey, appKey, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(_lastExePath, exePath, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(_lastDisplayName, displayName, StringComparison.Ordinal) &&
             string.Equals(_lastTip, tip, StringComparison.Ordinal) &&
             string.Equals(_lastThemeId, themeId, StringComparison.OrdinalIgnoreCase))
         {
@@ -116,8 +122,10 @@ internal sealed unsafe class TrayController : IDisposable
         nint newIcon = _iconRenderer.CreateCompositeIcon(
             appKey,
             exePath,
+            displayName,
             isPlaying,
             isMuted,
+            isLocked,
             size: 32);
 
         bool ownsIcon = newIcon != 0;
@@ -162,8 +170,10 @@ internal sealed unsafe class TrayController : IDisposable
         _ownsTrayIcon = ownsIcon;
         _lastAppKey = appKey;
         _lastExePath = exePath;
+        _lastDisplayName = displayName;
         _lastIsPlaying = isPlaying;
         _lastIsMuted = isMuted;
+        _lastIsLocked = isLocked;
         _lastSleepMins = sleepMins;
         _lastTip = tip;
         _lastThemeId = themeId;

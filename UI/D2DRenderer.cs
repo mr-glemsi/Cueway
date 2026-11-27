@@ -888,6 +888,30 @@ internal sealed unsafe class D2DRenderer : IDisposable
         DrawLine(cx - hw + ah, cy + ry + ah, cx - hw, cy + ry, rgb, sw);
     }
 
+    public void DrawClockGlyph(float x, float y, float sz, uint rgb, uint dpi)
+    {
+        float sw = MathF.Max(1.2f, Theme.ScaleF(1.25f, dpi));
+        StrokeCircle(x, y, sz, rgb, sw);
+        float cx = x + sz * 0.5f;
+        float cy = y + sz * 0.5f;
+        DrawLine(cx, cy, cx, y + sz * 0.24f, rgb, sw);
+        DrawLine(cx, cy, x + sz * 0.74f, cy, rgb, sw);
+    }
+
+    public void DrawLockGlyph(float cx, float cy, float sz, uint rgb, uint dpi)
+    {
+        float sw = MathF.Max(1.3f, Theme.ScaleF(1.35f, dpi));
+        float bw = sz * 0.44f;
+        float bh = sz * 0.34f;
+        float bodyY = cy - bh * 0.10f;
+        float shackleR = sz * 0.165f;
+        float shackleCy = bodyY - sz * 0.04f;
+        DrawArc(cx, shackleCy, shackleR, 180f, 360f, rgb, sw);
+        DrawLine(cx - shackleR, shackleCy, cx - shackleR, bodyY + 0.5f, rgb, sw);
+        DrawLine(cx + shackleR, shackleCy, cx + shackleR, bodyY + 0.5f, rgb, sw);
+        FillRoundedRect(cx - bw * 0.5f, bodyY, bw, bh, MathF.Max(1.6f, Theme.ScaleF(2f, dpi)), rgb);
+    }
+
     public void DrawEqBars(float x, float y, float h, uint rgb, long nowTick, bool animate, uint dpi)
     {
         float barW = MathF.Max(2f, Theme.ScaleF(2.5f, dpi));

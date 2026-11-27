@@ -1,5 +1,6 @@
 const api = globalThis.browser ?? globalThis.chrome;
 const WS_URL = "ws://127.0.0.1:47621";
+const HEALTH_URL = "http://127.0.0.1:47621/health";
 const BRIDGE_PROTOCOL_VERSION = 4;
 const BUILTIN_ICON_HOSTS = /(^|\.)(youtube\.com|youtu\.be|x\.com|twitter\.com|twitch\.tv|kick\.com|spotify\.com|soundcloud\.com|netflix\.com|instagram\.com|tiktok\.com|reddit\.com|facebook\.com)$/i;
 
@@ -11,12 +12,15 @@ const hostIconPending = new Set();
 const hostIconAttempts = new Map();
 let ws = null;
 let connected = false;
-let reconnectDelayMs = 500;
+let reconnectDelayMs = 350;
 let lastPongAt = 0;
 let reconnectTimer = null;
 let connectTimeout = null;
 let heartbeatTimer = null;
 let flushTimer = null;
+let probeEpoch = 0;
+let connectInFlight = false;
+let connectWaiters = [];
 
 function ensureConnected() {
   if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
@@ -70,16 +74,20 @@ function sendWs(payload) {
   return false;
 }
 
+function sendTabsNow() {
+  return sendWs({
+    type: "tabs",
+    browser: BROWSER_KEY,
+    version: BRIDGE_PROTOCOL_VERSION,
+    tabs: Array.from(tabStates.values(), serializeTabState)
+  });
+}
+
 function scheduleFlush() {
   if (flushTimer) clearTimeout(flushTimer);
   flushTimer = setTimeout(() => {
     flushTimer = null;
-    sendWs({
-      type: "tabs",
-      browser: BROWSER_KEY,
-      version: BRIDGE_PROTOCOL_VERSION,
-      tabs: Array.from(tabStates.values(), serializeTabState)
-    });
+    sendTabsNow();
   }, 60);
 }
 
@@ -136,8 +144,11 @@ async function scanAndInjectTabs(forceInject = false) {
     return;
   }
 
-  for (const tab of tabs) {
-    if (!tab.id) continue;
+  const candidateTabs = tabs
+    .filter((t) => Boolean(t?.id) && t.discarded !== true)
+    .sort((a, b) => (b.audible ? 1 : 0) - (a.audible ? 1 : 0));
+
+  await Promise.allSettled(candidateTabs.map(async (tab) => {
     const meta = getEffectiveMeta(tab.id, tab);
     if (tab.audible === true) {
       meta.audible = true;
@@ -167,7 +178,7 @@ async function scanAndInjectTabs(forceInject = false) {
         }
       }
     }
-  }
+  }));
 }
 
 async function focusTab(tabId) {
@@ -258,6 +269,43 @@ function stopHeartbeat() {
   }
 }
 
+function resolveConnectWaiters(isConnected) {
+  if (connectWaiters.length === 0) return;
+  const waiters = connectWaiters;
+  connectWaiters = [];
+  for (const resolve of waiters) {
+    try { resolve(Boolean(isConnected)); } catch {}
+  }
+}
+
+function waitForConnect(timeoutMs = 1500) {
+  if (connected) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(Boolean(ok));
+    };
+    const timer = setTimeout(() => finish(connected), timeoutMs);
+    connectWaiters.push(finish);
+  });
+}
+
+async function probeBridgeReady(timeoutMs = 900) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    await fetch(HEALTH_URL, { method: "GET", cache: "no-store", signal: ctrl.signal });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function teardownSocket(socket) {
   if (ws === socket) {
     ws = null;
@@ -270,16 +318,10 @@ function teardownSocket(socket) {
   } catch {}
 }
 
-function connect() {
+function openWebSocket() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
   }
-
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  clearConnectTimeout();
 
   let socket;
   try {
@@ -287,6 +329,7 @@ function connect() {
     ws = socket;
   } catch {
     ws = null;
+    resolveConnectWaiters(false);
     scheduleReconnect();
     return;
   }
@@ -295,29 +338,35 @@ function connect() {
     connectTimeout = null;
     if (ws === socket && socket.readyState === WebSocket.CONNECTING) {
       teardownSocket(socket);
+      resolveConnectWaiters(false);
       scheduleReconnect();
     }
-  }, 2500);
+  }, 5000);
 
   socket.onopen = () => {
     if (ws !== socket) return;
     clearConnectTimeout();
     connected = true;
-    reconnectDelayMs = 500;
+    reconnectDelayMs = 350;
     lastPongAt = Date.now();
     sendWs({ type: "hello", browser: BROWSER_KEY, version: BRIDGE_PROTOCOL_VERSION });
-    scheduleFlush();
+    if (tabStates.size > 0) {
+      sendTabsNow();
+    } else {
+      scheduleFlush();
+    }
+    resolveConnectWaiters(true);
     scanAndInjectTabs();
 
     stopHeartbeat();
     heartbeatTimer = setInterval(() => {
-      if (ws !== socket || socket.readyState !== WebSocket.OPEN || Date.now() - lastPongAt > 12000) {
+      if (ws !== socket || socket.readyState !== WebSocket.OPEN || Date.now() - lastPongAt > 7500) {
         teardownSocket(socket);
         scheduleReconnect();
         return;
       }
       sendWs({ type: "ping", browser: BROWSER_KEY, version: BRIDGE_PROTOCOL_VERSION });
-    }, 5000);
+    }, 3000);
   };
 
   socket.onmessage = (event) => {
@@ -341,20 +390,56 @@ function connect() {
   socket.onclose = () => {
     if (ws !== socket) return;
     teardownSocket(socket);
+    resolveConnectWaiters(false);
     scheduleReconnect();
   };
 
   socket.onerror = () => {
     if (ws !== socket) return;
     teardownSocket(socket);
+    resolveConnectWaiters(false);
     scheduleReconnect();
   };
+}
+
+async function connect(forceImmediate = false) {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  if (connectInFlight && !forceImmediate) {
+    return;
+  }
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  clearConnectTimeout();
+
+  const epoch = ++probeEpoch;
+  connectInFlight = true;
+  const ready = await probeBridgeReady(forceImmediate ? 1200 : 900);
+  if (epoch !== probeEpoch) {
+    return;
+  }
+  connectInFlight = false;
+
+  if (!ready) {
+    resolveConnectWaiters(false);
+    scheduleReconnect();
+    return;
+  }
+
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  openWebSocket();
 }
 
 function scheduleReconnect() {
   if (reconnectTimer) return;
   const delay = reconnectDelayMs;
-  reconnectDelayMs = Math.min(2000, Math.round(reconnectDelayMs * 1.5));
+  reconnectDelayMs = Math.min(1000, Math.round(reconnectDelayMs * 1.4));
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
@@ -669,27 +754,46 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "popup_reconnect") {
-    clearConnectTimeout();
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
-    const prev = ws;
-    ws = null;
-    try {
-      prev?.close();
-    } catch {}
-    connected = false;
-    reconnectDelayMs = 500;
-    connect();
+    if (ws) {
+      teardownSocket(ws);
+    } else {
+      clearConnectTimeout();
+      stopHeartbeat();
+      connected = false;
+    }
+    reconnectDelayMs = 350;
+    connect(true);
     scanAndInjectTabs();
-    sendResponse({ ok: true });
+    waitForConnect(1500)
+      .then(() => {
+        try {
+          sendResponse({
+            ok: true,
+            connected,
+            browser: BROWSER_KEY,
+            tabs: Array.from(tabStates.values(), serializeTabState)
+          });
+        } catch {}
+      })
+      .catch(() => {
+        try { sendResponse({ ok: false, connected, browser: BROWSER_KEY, tabs: [] }); } catch {}
+      });
     return true;
   }
 });
 
 api.tabs.onActivated?.addListener(() => {
   ensureConnected();
+});
+
+api.windows?.onFocusChanged?.addListener((winId) => {
+  if (winId !== -1) {
+    ensureConnected();
+  }
 });
 
 api.tabs.onRemoved.addListener((tabId) => {
@@ -780,7 +884,7 @@ if (api.alarms) {
       if (!ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)) {
         connect();
       } else if (ws.readyState === WebSocket.OPEN) {
-        if (Date.now() - lastPongAt > 15000) {
+        if (Date.now() - lastPongAt > 8500) {
           teardownSocket(ws);
           connect();
         } else {

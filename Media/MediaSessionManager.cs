@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Windows.Media;
 using Windows.Media.Control;
 using Cueway.Audio;
@@ -454,6 +455,19 @@ internal sealed class MediaSessionManager : IDisposable
                                 if (IsSmtcCoveredByBridge(bSessions, siteKey, title, artist, isPlaying, bridgeConnectedForBrowser))
                                 {
                                     continue;
+                                }
+                            }
+
+                            // Guard against zombie Windows SMTC browser sessions stuck at Playing after a tab closes
+                            if (bridgeConnectedForBrowser && isPlaying)
+                            {
+                                bool anyBridgePlaying = bridgeByBrowser.TryGetValue(resolved.AppKey, out var liveBridgeTabs) &&
+                                                        liveBridgeTabs.Any(b => b.IsPlaying);
+                                if (!anyBridgePlaying)
+                                {
+                                    var (bHasAudio, bHasActive, _, _, bMaxPeak) = AggregateAudioState(resolved.ProcessIds, audioByPid);
+                                    if (!bHasAudio || !bHasActive || bMaxPeak <= 0.0008f)
+                                        continue;
                                 }
                             }
                         }
@@ -1633,7 +1647,62 @@ internal sealed class MediaSessionManager : IDisposable
                 return Win32.TryFocusWindow(tabHwnd);
         }
 
-        return Win32.TryFocusProcessWindow(info.ProcessIds, info.Title);
+        if (Win32.TryFocusProcessWindow(info.ProcessIds, info.Title))
+            return true;
+
+        // Daemon-backed desktop apps (e.g. kopuzd.exe -> kopuz.exe) and tray-minimized apps with 0 visible windows
+        if (!info.IsBrowser)
+        {
+            string? companionExe = ProcessResolver.TryResolveCompanionGuiExePath(info.ExePath);
+            if (!string.IsNullOrEmpty(companionExe))
+            {
+                string procName = Path.GetFileNameWithoutExtension(companionExe);
+                var companionPids = new List<int>();
+                Process[]? procs = null;
+                try
+                {
+                    procs = Process.GetProcessesByName(procName);
+                    foreach (var p in procs)
+                        companionPids.Add(p.Id);
+                }
+                catch
+                {
+                    // Ignore process enumeration errors
+                }
+                finally
+                {
+                    if (procs != null)
+                    {
+                        foreach (var p in procs)
+                            p.Dispose();
+                    }
+                }
+
+                if (companionPids.Count > 0 && Win32.TryFocusProcessWindow(companionPids, info.Title))
+                    return true;
+            }
+
+            string? activateExe = companionExe ??
+                (!string.IsNullOrWhiteSpace(info.ExePath) &&
+                 File.Exists(info.ExePath) &&
+                 !ProcessResolver.IsLikelyDaemonExeName(info.ExePath)
+                    ? info.ExePath
+                    : null);
+            if (!string.IsNullOrEmpty(activateExe))
+            {
+                try
+                {
+                    using var _ = Process.Start(new ProcessStartInfo(activateExe) { UseShellExecute = true });
+                    return true;
+                }
+                catch
+                {
+                    // Ignore activation launch failure
+                }
+            }
+        }
+
+        return false;
     }
 
     private void TouchAudioPeak(string appKey, bool isPlaying)

@@ -10,18 +10,11 @@ const NAMES = {
   firefox: "Firefox / Zen"
 };
 
-async function refreshPopup() {
+function renderStatus(status) {
   const pill = document.getElementById("connPill");
   const connText = document.getElementById("connText");
   const browserMeta = document.getElementById("browserMeta");
   const tabList = document.getElementById("tabList");
-
-  let status;
-  try {
-    status = await api.runtime.sendMessage({ type: "popup_get_status" });
-  } catch {
-    status = { connected: false, browser: "-", tabs: [] };
-  }
 
   if (status?.connected) {
     pill.classList.add("ok");
@@ -75,11 +68,40 @@ async function refreshPopup() {
   }
 }
 
-document.getElementById("btnReconnect").addEventListener("click", async () => {
+async function refreshPopup() {
+  let status;
   try {
-    await api.runtime.sendMessage({ type: "popup_reconnect" });
-  } catch {}
-  setTimeout(refreshPopup, 250);
+    status = await api.runtime.sendMessage({ type: "popup_get_status" });
+  } catch {
+    status = { connected: false, browser: "-", tabs: [] };
+  }
+  renderStatus(status);
+}
+
+const btnReconnect = document.getElementById("btnReconnect");
+btnReconnect.addEventListener("click", async () => {
+  const pill = document.getElementById("connPill");
+  const connText = document.getElementById("connText");
+  btnReconnect.disabled = true;
+  pill.classList.remove("ok");
+  connText.textContent = "Reconnecting...";
+
+  try {
+    const res = await api.runtime.sendMessage({ type: "popup_reconnect" });
+    if (res && typeof res.connected === "boolean") {
+      renderStatus(res);
+    } else {
+      await refreshPopup();
+    }
+  } catch {
+    await refreshPopup();
+  } finally {
+    btnReconnect.disabled = false;
+  }
+
+  setTimeout(refreshPopup, 300);
+  setTimeout(refreshPopup, 900);
 });
 
 refreshPopup();
+setInterval(refreshPopup, 1000);

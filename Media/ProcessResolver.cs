@@ -795,6 +795,98 @@ internal static unsafe class ProcessResolver
         return string.Empty;
     }
 
+    public static bool IsLikelyDaemonExeName(string? exePath)
+    {
+        if (string.IsNullOrWhiteSpace(exePath))
+            return false;
+
+        try
+        {
+            string? dir = Path.GetDirectoryName(exePath);
+            string stem = Path.GetFileNameWithoutExtension(exePath);
+            if (string.IsNullOrEmpty(stem))
+                return false;
+
+            ReadOnlySpan<string> suffixes = ["daemon", "service", "svc", "helper", "agent"];
+            for (int i = 0; i < suffixes.Length; i++)
+            {
+                if (stem.Length > suffixes[i].Length &&
+                    stem.EndsWith(suffixes[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            if (stem.Length > 2 &&
+                stem.EndsWith("d", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrEmpty(dir) &&
+                File.Exists(Path.Combine(dir, stem[..^1] + ".exe")))
+            {
+                return true;
+            }
+        }
+        catch
+        {
+            // Ignore malformed paths
+        }
+        return false;
+    }
+
+    public static string? TryResolveCompanionGuiExePath(string? exePath)
+    {
+        if (string.IsNullOrWhiteSpace(exePath))
+            return null;
+
+        try
+        {
+            string? dir = Path.GetDirectoryName(exePath);
+            string stem = Path.GetFileNameWithoutExtension(exePath);
+            if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(stem))
+                return null;
+
+            string? CheckCandidate(string cand)
+                => !string.IsNullOrEmpty(cand) &&
+                   !string.Equals(cand, exePath, StringComparison.OrdinalIgnoreCase) &&
+                   File.Exists(cand)
+                    ? cand
+                    : null;
+
+            if (stem.Length > 2 && stem.EndsWith("d", StringComparison.OrdinalIgnoreCase))
+            {
+                if (CheckCandidate(Path.Combine(dir, stem[..^1] + ".exe")) is { } hit)
+                    return hit;
+            }
+
+            ReadOnlySpan<string> suffixes = ["daemon", "service", "svc", "helper", "agent"];
+            for (int i = 0; i < suffixes.Length; i++)
+            {
+                string sfx = suffixes[i];
+                if (stem.Length > sfx.Length && stem.EndsWith(sfx, StringComparison.OrdinalIgnoreCase))
+                {
+                    string stripped = stem[..^sfx.Length].TrimEnd('-', '_');
+                    if (stripped.Length > 0 &&
+                        CheckCandidate(Path.Combine(dir, stripped + ".exe")) is { } hit)
+                    {
+                        return hit;
+                    }
+                    break;
+                }
+            }
+
+            string? parentDirName = Path.GetFileName(dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (!string.IsNullOrWhiteSpace(parentDirName) &&
+                CheckCandidate(Path.Combine(dir, parentDirName + ".exe")) is { } dirHit)
+            {
+                return dirHit;
+            }
+        }
+        catch
+        {
+            // Ignore filesystem/path edge cases
+        }
+        return null;
+    }
+
     private static int[] ExtractPids(List<RunningProcessInfo> procs)
     {
         var pids = new int[procs.Count];

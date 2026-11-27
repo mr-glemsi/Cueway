@@ -46,11 +46,12 @@ internal static unsafe class Program
 
         try
         {
+            using var bridgeServer = new BrowserBridgeServer();
+            bridgeServer.Start();
             using var stateStore = new StateStore();
             var startupService = new StartupService();
             using var updateService = new AppUpdateService();
             using var audioService = new CoreAudioService();
-            using var bridgeServer = new BrowserBridgeServer();
             using var sessionManager = new MediaSessionManager(stateStore, audioService, bridgeServer);
             using var engine = new MediaRouterEngine(stateStore, audioService, sessionManager);
             using var iconRenderer = new DynamicIconRenderer();
@@ -86,6 +87,7 @@ internal static unsafe class Program
             {
                 Win32.KillTimer(mainWindow.Handle, TIMER_REFRESH_POLL);
                 Win32.KillTimer(mainWindow.Handle, TIMER_SLEEP_TICK);
+                bridgeServer.Dispose();
                 Win32.PostQuitMessage(0);
             }
 
@@ -210,8 +212,7 @@ internal static unsafe class Program
                     osd.ShowMessage(new OsdMessage(Strings.OsdUpdateTitle, Strings.OsdUpdateBody(ver), null));
             });
 
-            // Start services
-            bridgeServer.Start();
+            // Start remaining services
             audioService.StartEndpointNotifications();
             tray.AddOrRestore(engine.GetSnapshot());
             keyboardHook.Start();

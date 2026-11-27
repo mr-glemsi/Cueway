@@ -315,22 +315,29 @@ internal static class Strings
         return themeId.ToLowerInvariant() switch
         {
             "light" => T("Açık", "Light", "浅色", "Claro", "Светлая", "Hell", "Clair", "ライト", "라이트", "Claro", "Chiaro", "Jasny", "Vaalea"),
+            "midnight" => "AMOLED Black",
+            "gruvbox_material" => "Gruvbox Material",
+            "gruvbox_soft" => "Gruvbox Dark Soft",
+            "dracula" => "Dracula",
             "nord" => "Nord",
-            "emerald" => T("Zümrüt", "Emerald", "翡翠绿", "Esmeralda", "Изумруд", "Smaragd", "Émeraude", "エメラルド", "에메랄드", "Esmeralda", "Smeraldo", "Szmaragd", "Smaragdi"),
-            "amethyst" => T("Ametist", "Amethyst", "紫水晶", "Amatista", "Аметист", "Amethyst", "Améthyste", "アメジスト", "자수정", "Ametista", "Ametista", "Ametyst", "Ametisti"),
-            "amber" => T("Kehribar", "Amber", "琥珀金", "Ámbar", "Янтарь", "Bernstein", "Ambre", "アンバー", "앰버", "Âmbar", "Ambra", "Bursztyn", "Meripihka"),
-            "crimson" => T("Kızıl", "Crimson", "绯红", "Carmesí", "Рубин", "Karmesin", "Carmin", "クリムゾン", "크림슨", "Carmesim", "Cremisi", "Karmazyn", "Karmiini"),
-            "sand" => T("Kum Açık", "Warm Sand", "暖沙浅", "Arena", "Песок", "Sand Hell", "Sable", "サンド", "샌드", "Areia", "Sabbia", "Piasek", "Hiekka"),
-            "midnight" => T("Gece Yarısı", "Midnight", "午夜黑", "Medianoche", "Полночь", "Mitternacht", "Minuit", "ミッドナイト", "미드나잇", "Meia-noite", "Mezzanotte", "Północ", "Keskiyö"),
-            "ocean" => T("Okyanus", "Deep Ocean", "深海蓝", "Océano", "Океан", "Ozean", "Océan", "オーシャン", "오션", "Oceano", "Oceano", "Ocean", "Valtameri"),
-            "sakura" => T("Sakura", "Sakura", "樱花粉", "Sakura", "Сакура", "Sakura", "Sakura", "さくら", "사쿠라", "Sakura", "Sakura", "Sakura", "Sakura"),
-            "slate" => T("Buz Grisi", "Frost Slate", "冰霜灰", "Pizarra", "Сланец", "Schiefer Hell", "Ardoise", "スレート", "슬레이트", "Ardósia", "Ardesia", "Łupek", "Liuske"),
+            "catppuccin_mocha" => "Catppuccin Mocha",
+            "tokyo_night" => "Tokyo Night",
+            "ayu_dark" => "Ayu Dark",
+            "ayu_mirage" => "Ayu Mirage",
+            "one_dark" => "One Dark Pro",
+            "kanagawa" => "Kanagawa Dragon",
+            "everforest" => "Everforest",
+            "rose_pine" => "Rosé Pine",
+            "catppuccin_latte" => "Catppuccin Latte",
+            "rose_pine_dawn" => "Rosé Pine Dawn",
+            "everforest_light" => "Everforest Light",
+            "ayu_light" => "Ayu Light",
+            "gruvbox_light" => "Gruvbox Light Soft",
             _ => T("Koyu", "Dark", "深色", "Oscuro", "Тёмная", "Dunkel", "Sombre", "ダーク", "다크", "Escuro", "Scuro", "Ciemny", "Tumma")
         };
     }
 
     public static string BtnCustomTheme => T("+ Özel", "+ Custom", "+ 自定义", "+ Propio", "+ Своя", "+ Eigene", "+ Perso", "+ カスタム", "+ 사용자", "+ Novo", "+ Nuovo", "+ Własny", "+ Oma");
-    public static string MenuCreateCustomTheme => T("+ Özel Tema Oluştur", "+ Create Custom Theme", "+ 创建自定义主题", "+ Crear tema", "+ Создать тему", "+ Eigenes Design", "+ Créer un thème", "+ カスタム作成", "+ 새 테마 만들기", "+ Criar Tema", "+ Crea tema", "+ Utwórz motyw", "+ Luo oma teema");
     public static string ThemeStudioTitle => T("Özel Tema Stüdyosu", "Custom Theme Studio", "自定义主题工坊", "Estudio de Temas", "Студия тем", "Theme-Studio", "Studio de Thèmes", "テーマスタジオ", "테마 스튜디오", "Estúdio de Temas", "Studio Temi", "Studio motywów", "Teemastudio");
     public static string ThemeStudioSub => T("Renklerini seç, canlı önizle ve kaydet", "Pick your colors, preview live, and save", "挑选色彩、实时预览并保存", "Elige colores, previsualiza y guarda", "Выберите цвета, оцените и сохраните", "Farben wählen, live testen und speichern", "Choisissez vos couleurs et enregistrez", "色を選んでライブプレビュー＆保存", "색상을 고르고 실시간 미리보기 후 저장", "Escolha suas cores, visualize ao vivo e salve", "Scegli i colori, guarda l'anteprima e salva", "Wybierz kolory, zobacz podgląd na żywo i zapisz", "Valitse värit, esikatsele reaaliajassa ja tallenna");
     public static string ThemeFieldName => T("Tema Adı", "Theme Name", "主题名称", "Nombre", "Название", "Name", "Nom du thème", "テーマ名", "테마 이름", "Nome do Tema", "Nome tema", "Nazwa motywu", "Teeman nimi");
