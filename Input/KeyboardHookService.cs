@@ -19,6 +19,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
         HotkeyBinding VolumeUp,
         HotkeyBinding VolumeDown,
         HotkeyBinding VolumeMute,
+        HotkeyBinding CycleAudioDevice,
         AppHotkeyEntry[] AppHotkeys);
 
     private const nuint TIMER_WATCHDOG = 9001;
@@ -64,7 +65,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
     private volatile int _longPressThresholdMs = 400;
     private volatile int _volumeStepPercent = 5;
     private long _lastVolHotkeyTick;
-    private volatile HotkeySnapshot _hotkeys = new(default, default, default, default, default, default, default, default, []);
+    private volatile HotkeySnapshot _hotkeys = new(default, default, default, default, default, default, default, default, default, []);
 
     public event Action? ToggleWindowRequested;
     public bool IsCapturingHotkey => _onCaptureResult != null;
@@ -97,6 +98,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
         HotkeyHelper.TryParse(s.HotkeyVolumeUp, out var volUp);
         HotkeyHelper.TryParse(s.HotkeyVolumeDown, out var volDown);
         HotkeyHelper.TryParse(s.HotkeyVolumeMute, out var volMute);
+        HotkeyHelper.TryParse(s.HotkeyCycleAudioDevice, out var cycleAudioDevice);
 
         var appEntries = new List<AppHotkeyEntry>();
         foreach (var app in apps)
@@ -105,7 +107,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                 appEntries.Add(new AppHotkeyEntry(appBinding, app.AppKey));
         }
 
-        _hotkeys = new HotkeySnapshot(toggleWin, manualLock, soloMode, playPause, promotePlaying, volUp, volDown, volMute, [.. appEntries]);
+        _hotkeys = new HotkeySnapshot(toggleWin, manualLock, soloMode, playPause, promotePlaying, volUp, volDown, volMute, cycleAudioDevice, [.. appEntries]);
     }
 
     public void BeginHotkeyCapture(
@@ -380,6 +382,13 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                     {
                         if (_heldCustomVks.Add(vkCode))
                             _ = Task.Run(() => _engine.ToggleActiveTargetMute());
+                        return true;
+                    }
+
+                    if (!snap.CycleAudioDevice.IsEmpty && snap.CycleAudioDevice.VkCode == vkCode && snap.CycleAudioDevice.Modifiers == mods)
+                    {
+                        if (_heldCustomVks.Add(vkCode))
+                            _ = Task.Run(() => _engine.CycleOutputDevice());
                         return true;
                     }
 

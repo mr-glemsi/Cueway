@@ -13,7 +13,8 @@ internal enum GlobalHotkeySlot
     PromotePlaying = 4,
     VolumeUp = 5,
     VolumeDown = 6,
-    VolumeMute = 7
+    VolumeMute = 7,
+    CycleAudioDevice = 8
 }
 
 internal sealed class StateStore
@@ -25,6 +26,7 @@ internal sealed class StateStore
     private volatile Dictionary<string, int> _priorityIndexCache = new(StringComparer.OrdinalIgnoreCase);
     private volatile Dictionary<string, (string DisplayName, string ExePath, long LastSeenTick)> _discoveredFastCache = new(StringComparer.OrdinalIgnoreCase);
     private volatile HashSet<string> _ignoredAppKeysCache = new(StringComparer.OrdinalIgnoreCase);
+    private volatile Dictionary<string, int> _savedSiteVolumesCache = new(StringComparer.OrdinalIgnoreCase);
 
     public event Action? StateChanged;
 
@@ -82,6 +84,7 @@ internal sealed class StateStore
                         loaded.PriorityApps ??= [];
                         loaded.Settings.GameBlacklistExes ??= [];
                         loaded.Settings.IgnoredApps ??= [];
+                        loaded.Settings.SavedSiteVolumes ??= [];
                         loaded.Settings.CustomThemes ??= [];
                         NormalizeSettings(loaded.Settings);
                         foreach (var app in loaded.PriorityApps)
@@ -137,8 +140,11 @@ internal sealed class StateStore
         s.HotkeyVolumeUp = HotkeyHelper.Normalize(s.HotkeyVolumeUp);
         s.HotkeyVolumeDown = HotkeyHelper.Normalize(s.HotkeyVolumeDown);
         s.HotkeyVolumeMute = HotkeyHelper.Normalize(s.HotkeyVolumeMute);
+        s.HotkeyCycleAudioDevice = HotkeyHelper.Normalize(s.HotkeyCycleAudioDevice);
         s.IgnoredApps ??= [];
         SanitizeIgnoredApps(s.IgnoredApps);
+        s.SavedSiteVolumes ??= [];
+        SanitizeSavedSiteVolumes(s.SavedSiteVolumes);
         if (string.IsNullOrWhiteSpace(s.MpvPipeName))
             s.MpvPipeName = "mpvsocket";
     }
@@ -176,7 +182,9 @@ internal sealed class StateStore
             OsdEnabled = s.OsdEnabled,
             AutoPauseEnabled = s.AutoPauseEnabled,
             AutoDuckingEnabled = s.AutoDuckingEnabled,
+            MicDuckingEnabled = s.MicDuckingEnabled,
             DuckVolumePercent = s.DuckVolumePercent,
+            RememberSiteVolumeEnabled = s.RememberSiteVolumeEnabled,
             HeadphoneGuardEnabled = s.HeadphoneGuardEnabled,
             SoloModeEnabled = s.SoloModeEnabled,
             GameFullscreenGuardEnabled = s.GameFullscreenGuardEnabled,
@@ -191,11 +199,21 @@ internal sealed class StateStore
             HotkeyVolumeUp = s.HotkeyVolumeUp,
             HotkeyVolumeDown = s.HotkeyVolumeDown,
             HotkeyVolumeMute = s.HotkeyVolumeMute,
+            HotkeyCycleAudioDevice = s.HotkeyCycleAudioDevice,
             MpvPipeName = s.MpvPipeName,
             GameBlacklistExes = [.. s.GameBlacklistExes],
             IgnoredApps = [.. s.IgnoredApps.Select(CloneIgnoredApp)],
+            SavedSiteVolumes = [.. s.SavedSiteVolumes.Select(CloneSavedSiteVolume)],
             CustomThemes = [.. s.CustomThemes.Select(CloneCustomTheme)]
         };
+
+        var savedVolMap = new Dictionary<string, int>(s.SavedSiteVolumes.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in s.SavedSiteVolumes)
+        {
+            if (!string.IsNullOrWhiteSpace(entry.AppKey))
+                savedVolMap[entry.AppKey] = Math.Clamp(entry.VolumePercent, 1, 100);
+        }
+        _savedSiteVolumesCache = savedVolMap;
 
         var ignoredSet = new HashSet<string>(s.IgnoredApps.Count, StringComparer.OrdinalIgnoreCase);
         foreach (var entry in s.IgnoredApps)
@@ -264,12 +282,14 @@ internal sealed class StateStore
             string currentTheme = _state.Settings.Theme;
             var customThemes = _state.Settings.CustomThemes.Select(CloneCustomTheme).ToList();
             var ignoredApps = _state.Settings.IgnoredApps.Select(CloneIgnoredApp).ToList();
+            var savedVols = _state.Settings.SavedSiteVolumes.Select(CloneSavedSiteVolume).ToList();
             _state.Settings = new AppSettings
             {
                 Language = Strings.NormalizeCode(currentLang),
                 LastSeenVersion = _state.Settings.LastSeenVersion,
                 CustomThemes = customThemes,
                 IgnoredApps = ignoredApps,
+                SavedSiteVolumes = savedVols,
                 Theme = currentTheme
             };
             NormalizeSettings(_state.Settings);
@@ -428,6 +448,9 @@ internal sealed class StateStore
                 case GlobalHotkeySlot.VolumeMute:
                     _state.Settings.HotkeyVolumeMute = normalized;
                     break;
+                case GlobalHotkeySlot.CycleAudioDevice:
+                    _state.Settings.HotkeyCycleAudioDevice = normalized;
+                    break;
             }
             RebuildCachesLocked();
             SaveInternal(_state);
@@ -510,6 +533,10 @@ internal sealed class StateStore
         if (exceptGlobalSlot != GlobalHotkeySlot.VolumeMute &&
             string.Equals(_state.Settings.HotkeyVolumeMute, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
             _state.Settings.HotkeyVolumeMute = string.Empty;
+
+        if (exceptGlobalSlot != GlobalHotkeySlot.CycleAudioDevice &&
+            string.Equals(_state.Settings.HotkeyCycleAudioDevice, normalizedHotkey, StringComparison.OrdinalIgnoreCase))
+            _state.Settings.HotkeyCycleAudioDevice = string.Empty;
 
         foreach (var other in _state.PriorityApps)
         {
@@ -719,6 +746,103 @@ internal sealed class StateStore
         DisplayName = src.DisplayName,
         ExePath = src.ExePath
     };
+
+    public bool TryGetSavedSiteVolume(string? appKey, out int volumePercent)
+    {
+        if (string.IsNullOrWhiteSpace(appKey))
+        {
+            volumePercent = 100;
+            return false;
+        }
+        return _savedSiteVolumesCache.TryGetValue(appKey.Trim(), out volumePercent);
+    }
+
+    public void SaveSiteVolume(string appKey, string displayName, int volumePercent)
+    {
+        if (string.IsNullOrWhiteSpace(appKey))
+            return;
+
+        string cleanKey = appKey.Trim();
+        int clamped = Math.Clamp(volumePercent, 1, 100);
+        if (_savedSiteVolumesCache.TryGetValue(cleanKey, out int cachedVol) && cachedVol == clamped)
+            return;
+
+        lock (_lock)
+        {
+            _state.Settings.SavedSiteVolumes ??= [];
+            var existing = _state.Settings.SavedSiteVolumes.Find(e =>
+                string.Equals(e.AppKey, cleanKey, StringComparison.OrdinalIgnoreCase));
+            if (existing != null)
+            {
+                if (existing.VolumePercent == clamped)
+                    return;
+                existing.VolumePercent = clamped;
+                if (!string.IsNullOrWhiteSpace(displayName))
+                    existing.DisplayName = displayName.Trim();
+            }
+            else
+            {
+                if (_state.Settings.SavedSiteVolumes.Count >= 100)
+                    _state.Settings.SavedSiteVolumes.RemoveAt(0);
+                _state.Settings.SavedSiteVolumes.Add(new SavedSiteVolumeEntry
+                {
+                    AppKey = cleanKey,
+                    DisplayName = string.IsNullOrWhiteSpace(displayName) ? cleanKey : displayName.Trim(),
+                    VolumePercent = clamped
+                });
+            }
+            RebuildCachesLocked();
+            SaveInternal(_state);
+        }
+        StateChanged?.Invoke();
+    }
+
+    public void ClearSavedSiteVolumes()
+    {
+        bool hadAny;
+        lock (_lock)
+        {
+            _state.Settings.SavedSiteVolumes ??= [];
+            hadAny = _state.Settings.SavedSiteVolumes.Count > 0;
+            if (!hadAny)
+                return;
+            _state.Settings.SavedSiteVolumes.Clear();
+            RebuildCachesLocked();
+            SaveInternal(_state);
+        }
+        StateChanged?.Invoke();
+    }
+
+    private static SavedSiteVolumeEntry CloneSavedSiteVolume(SavedSiteVolumeEntry src) => new()
+    {
+        AppKey = src.AppKey,
+        DisplayName = src.DisplayName,
+        VolumePercent = src.VolumePercent
+    };
+
+    private static void SanitizeSavedSiteVolumes(List<SavedSiteVolumeEntry> list)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = list.Count - 1; i >= 0; i--)
+        {
+            var item = list[i];
+            if (item == null || string.IsNullOrWhiteSpace(item.AppKey))
+            {
+                list.RemoveAt(i);
+                continue;
+            }
+            item.AppKey = item.AppKey.Trim();
+            if (!seen.Add(item.AppKey))
+            {
+                list.RemoveAt(i);
+                continue;
+            }
+            item.DisplayName = string.IsNullOrWhiteSpace(item.DisplayName) ? item.AppKey : item.DisplayName.Trim();
+            item.VolumePercent = Math.Clamp(item.VolumePercent, 1, 100);
+        }
+        if (list.Count > 100)
+            list.RemoveRange(0, list.Count - 100);
+    }
 
     private static void SanitizeIgnoredApps(List<IgnoredAppEntry> list)
     {

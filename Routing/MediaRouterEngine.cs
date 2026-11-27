@@ -55,6 +55,19 @@ internal sealed class MediaRouterEngine : IDisposable
     private readonly HashSet<string> _suppressNextTransition = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DuckedEntry> _autoDucked = new(StringComparer.Ordinal);
 
+    // Per-site volume memory, voice call mic auto-ducking & sleep timer state
+    private readonly HashSet<string> _volumeMemoryAppliedSessions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (float OriginalVolume, SessionSource Source)> _micDucked = new(StringComparer.Ordinal);
+    private long _micStoppedSinceTick;
+    private long _sleepTimerEndTick;
+    private bool _sleepFadeActive;
+    private readonly Dictionary<string, (float OriginalVolume, SessionSource Source)> _sleepFadedSessions = new(StringComparer.Ordinal);
+
+    public bool IsSleepTimerActive { get { lock (_lock) return _sleepTimerEndTick > 0; } }
+    public bool IsMicDuckingActive { get { lock (_lock) return _micDucked.Count > 0; } }
+
+    public event Action? SleepTimerChanged;
+
     private RouterStateSnapshot _snapshot = new()
     {
         ActiveTarget = null,
@@ -102,12 +115,14 @@ internal sealed class MediaRouterEngine : IDisposable
         var sessions = _sessionManager.GetSessionsSnapshot();
         var settings = _stateStore.GetSettingsSnapshot();
         bool gameActive = settings.GameFullscreenGuardEnabled && FullscreenGameDetector.IsFullscreenGameActive(settings);
+        bool micActive = settings.MicDuckingEnabled && _audioService.IsAnyMicrophoneSessionActive();
 
         List<string> toAutoPause = [];
         List<string> toAutoResume = [];
         string? autoPauseTriggerId = null;
         List<(string SessionId, float TargetVol, SessionSource Source)> toDuck = [];
         List<(string SessionId, float RestoreVol, SessionSource Source)> toUnduck = [];
+        List<(string SessionId, float TargetVol)> toApplySavedVol = [];
 
         RouterStateSnapshot prevSnapshot;
         RouterStateSnapshot nextSnapshot;
@@ -240,6 +255,39 @@ internal sealed class MediaRouterEngine : IDisposable
                 _autoDucked.Clear();
             }
 
+            // Per-site volume memory (applied once when a new tab SessionId appears)
+            if (!settings.RememberSiteVolumeEnabled)
+            {
+                _volumeMemoryAppliedSessions.Clear();
+            }
+            else
+            {
+                var liveIdSet = new HashSet<string>(sessions.Count, StringComparer.Ordinal);
+                foreach (var s in sessions)
+                    liveIdSet.Add(s.SessionId);
+                _volumeMemoryAppliedSessions.RemoveWhere(id => !liveIdSet.Contains(id));
+
+                foreach (var s in sessions)
+                {
+                    if (_volumeMemoryAppliedSessions.Add(s.SessionId) &&
+                        s.Source == SessionSource.BrowserBridge &&
+                        !s.IsMuted &&
+                        !_autoDucked.ContainsKey(s.SessionId) &&
+                        !_micDucked.ContainsKey(s.SessionId) &&
+                        _stateStore.TryGetSavedSiteVolume(s.AppKey, out int savedPct))
+                    {
+                        float savedVol = savedPct / 100f;
+                        if (MathF.Abs(s.Volume - savedVol) > 0.025f)
+                        {
+                            toApplySavedVol.Add((s.SessionId, savedVol));
+                        }
+                    }
+                }
+            }
+
+            // Voice call / microphone auto-ducking
+            EvaluateMicDuckingLocked(sessions, toAutoPause, settings.MicDuckingEnabled, micActive, settings.DuckVolumePercent / 100f, toApplySavedVol, toDuck, toUnduck);
+
             UpdatePrevPlayingLocked(sessions);
 
             prevSnapshot = _snapshot;
@@ -271,6 +319,16 @@ internal sealed class MediaRouterEngine : IDisposable
         if (toDuck.Count > 0 || toUnduck.Count > 0)
         {
             _ = ExecuteAutoDuckingAsync(toDuck, toUnduck);
+        }
+
+        // Apply saved per-site volumes for newly seen tabs asynchronously
+        if (toApplySavedVol.Count > 0)
+        {
+            _ = Task.Run(async () =>
+            {
+                foreach (var (id, targetVol) in toApplySavedVol)
+                    await _sessionManager.SetSessionVolumeAsync(id, targetVol).ConfigureAwait(false);
+            });
         }
 
         if (forceNotify || !SnapshotsEquivalent(prevSnapshot, nextSnapshot))
@@ -669,7 +727,7 @@ internal sealed class MediaRouterEngine : IDisposable
                         continue;
                     if (_autoPausedBy.ContainsKey(other.SessionId))
                         continue;
-                    if (_autoDucked.ContainsKey(other.SessionId))
+                    if (_autoDucked.ContainsKey(other.SessionId) || _micDucked.ContainsKey(other.SessionId))
                         continue;
                     if (other.Volume > duckTarget + 0.02f)
                     {
@@ -740,6 +798,92 @@ internal sealed class MediaRouterEngine : IDisposable
             await _sessionManager.SetSessionVolumeAsync(sessionId, v).ConfigureAwait(false);
             if (i < Steps)
                 await Task.Delay(45).ConfigureAwait(false);
+        }
+    }
+
+    private void EvaluateMicDuckingLocked(
+        List<MediaSessionInfo> sessions,
+        List<string> toAutoPause,
+        bool enabled,
+        bool micActive,
+        float duckTarget,
+        List<(string SessionId, float TargetVol)> toApplySavedVol,
+        List<(string SessionId, float TargetVol, SessionSource Source)> toDuck,
+        List<(string SessionId, float RestoreVol, SessionSource Source)> toUnduck)
+    {
+        var sessionMap = new Dictionary<string, MediaSessionInfo>(sessions.Count, StringComparer.Ordinal);
+        foreach (var s in sessions)
+            sessionMap[s.SessionId] = s;
+
+        if (_micDucked.Count > 0)
+        {
+            var stale = _micDucked.Keys.Where(k => !sessionMap.ContainsKey(k)).ToList();
+            foreach (string k in stale)
+                _micDucked.Remove(k);
+        }
+
+        if (!enabled)
+        {
+            foreach (var kv in _micDucked)
+            {
+                if (sessionMap.ContainsKey(kv.Key))
+                    toUnduck.Add((kv.Key, kv.Value.OriginalVolume, kv.Value.Source));
+            }
+            _micDucked.Clear();
+            _micStoppedSinceTick = 0;
+            return;
+        }
+
+        if (micActive)
+        {
+            _micStoppedSinceTick = 0;
+            HashSet<string>? pendingPauseSet = toAutoPause.Count > 0
+                ? new HashSet<string>(toAutoPause, StringComparer.Ordinal)
+                : null;
+
+            foreach (var s in sessions)
+            {
+                if (s.IsPassiveTab || !s.IsEffectivelyPlaying)
+                    continue;
+                if (s.Source == SessionSource.AudioSession && !ProcessResolver.IsKnownMediaAudioProcess(s.AppKey))
+                    continue;
+                if (pendingPauseSet != null && pendingPauseSet.Contains(s.SessionId))
+                    continue;
+                if (_autoPausedBy.ContainsKey(s.SessionId) || _autoDucked.ContainsKey(s.SessionId) || _micDucked.ContainsKey(s.SessionId))
+                    continue;
+
+                float effectiveOrigVol = s.Volume;
+                int savedIdx = toApplySavedVol.FindIndex(x => string.Equals(x.SessionId, s.SessionId, StringComparison.Ordinal));
+                if (savedIdx >= 0)
+                {
+                    effectiveOrigVol = toApplySavedVol[savedIdx].TargetVol;
+                }
+
+                if (effectiveOrigVol > duckTarget + 0.02f)
+                {
+                    if (savedIdx >= 0)
+                        toApplySavedVol.RemoveAt(savedIdx);
+                    _micDucked[s.SessionId] = (effectiveOrigVol, s.Source);
+                    toDuck.Add((s.SessionId, duckTarget, s.Source));
+                }
+            }
+        }
+        else if (_micDucked.Count > 0)
+        {
+            long now = Environment.TickCount64;
+            if (_micStoppedSinceTick == 0)
+                _micStoppedSinceTick = now;
+
+            if (now - _micStoppedSinceTick >= 1500)
+            {
+                foreach (var kv in _micDucked)
+                {
+                    if (sessionMap.ContainsKey(kv.Key))
+                        toUnduck.Add((kv.Key, kv.Value.OriginalVolume, kv.Value.Source));
+                }
+                _micDucked.Clear();
+                _micStoppedSinceTick = 0;
+            }
         }
     }
 
@@ -1095,7 +1239,10 @@ internal sealed class MediaRouterEngine : IDisposable
             return;
 
         lock (_lock)
+        {
             _autoDucked.Remove(target.SessionId);
+            _micDucked.Remove(target.SessionId);
+        }
 
         _ = AdjustTargetVolumeInternalAsync(target, delta);
     }
@@ -1114,15 +1261,206 @@ internal sealed class MediaRouterEngine : IDisposable
         int? pct = await _sessionManager.AdjustSessionVolumeAsync(target.SessionId, delta).ConfigureAwait(false);
         if (pct.HasValue)
         {
+            if (pct.Value >= 1 &&
+                target.Source == SessionSource.BrowserBridge &&
+                _stateStore.GetSettingsSnapshot().RememberSiteVolumeEnabled)
+            {
+                _stateStore.SaveSiteVolume(target.AppKey, target.DisplayName, pct.Value);
+            }
             NotifyOsd(target.DisplayName, Strings.OsdAppVolume(pct.Value), target.ExePath, appKey: target.AppKey);
         }
     }
 
-    public Task<int?> SetSessionVolumeAsync(string sessionId, float level)
+    public async Task<int?> SetSessionVolumeAsync(string sessionId, float level, bool commitMemory = true)
     {
         lock (_lock)
+        {
             _autoDucked.Remove(sessionId);
-        return _sessionManager.SetSessionVolumeAsync(sessionId, level);
+            _micDucked.Remove(sessionId);
+        }
+        int? pct = await _sessionManager.SetSessionVolumeAsync(sessionId, level).ConfigureAwait(false);
+        if (commitMemory && pct.HasValue && pct.Value >= 1 &&
+            _stateStore.GetSettingsSnapshot().RememberSiteVolumeEnabled)
+        {
+            var session = GetSnapshot().Sessions.Find(s => string.Equals(s.SessionId, sessionId, StringComparison.Ordinal));
+            if (session != null && session.Source == SessionSource.BrowserBridge)
+            {
+                _stateStore.SaveSiteVolume(session.AppKey, session.DisplayName, pct.Value);
+            }
+        }
+        return pct;
+    }
+
+    public List<AudioOutputDevice> GetOutputDevices() => _audioService.GetOutputDevices();
+
+    public bool SelectOutputDevice(string deviceId, string? displayName = null)
+    {
+        bool ok = _audioService.SetDefaultOutputDevice(deviceId);
+        if (ok && !string.IsNullOrWhiteSpace(displayName))
+        {
+            NotifyOsd(Strings.OsdAudioDeviceTitle, displayName, null);
+        }
+        return ok;
+    }
+
+    public void CycleOutputDevice()
+    {
+        var next = _audioService.CycleDefaultOutputDevice();
+        if (next.HasValue)
+        {
+            NotifyOsd(Strings.OsdAudioDeviceTitle, next.Value.Name, null);
+        }
+    }
+
+    public void StartSleepTimer(int minutes)
+    {
+        if (minutes <= 0)
+        {
+            CancelSleepTimer();
+            return;
+        }
+
+        List<(string SessionId, float OriginalVolume)> toRestore;
+        lock (_lock)
+        {
+            _sleepTimerEndTick = Environment.TickCount64 + minutes * 60_000L;
+            _sleepFadeActive = false;
+            toRestore = new List<(string, float)>(_sleepFadedSessions.Count);
+            foreach (var kv in _sleepFadedSessions)
+                toRestore.Add((kv.Key, kv.Value.OriginalVolume));
+            _sleepFadedSessions.Clear();
+        }
+
+        if (toRestore.Count > 0)
+        {
+            _ = Task.Run(async () =>
+            {
+                foreach (var (id, origVol) in toRestore)
+                    await _sessionManager.SetSessionVolumeAsync(id, origVol).ConfigureAwait(false);
+            });
+        }
+
+        SleepTimerChanged?.Invoke();
+        NotifyOsd(Strings.OsdSleepTimerTitle, Strings.OsdSleepTimerSet(minutes), null);
+    }
+
+    public void CancelSleepTimer()
+    {
+        List<(string SessionId, float OriginalVolume)> toRestore;
+        bool wasActive;
+        lock (_lock)
+        {
+            wasActive = _sleepTimerEndTick > 0;
+            _sleepTimerEndTick = 0;
+            _sleepFadeActive = false;
+            toRestore = new List<(string, float)>(_sleepFadedSessions.Count);
+            foreach (var kv in _sleepFadedSessions)
+                toRestore.Add((kv.Key, kv.Value.OriginalVolume));
+            _sleepFadedSessions.Clear();
+        }
+
+        if (toRestore.Count > 0)
+        {
+            _ = Task.Run(async () =>
+            {
+                foreach (var (id, origVol) in toRestore)
+                    await _sessionManager.SetSessionVolumeAsync(id, origVol).ConfigureAwait(false);
+            });
+        }
+
+        if (wasActive)
+        {
+            SleepTimerChanged?.Invoke();
+            NotifyOsd(Strings.OsdSleepTimerTitle, Strings.OsdSleepTimerCancelled, null);
+        }
+    }
+
+    public TimeSpan? GetSleepTimerRemaining()
+    {
+        lock (_lock)
+        {
+            if (_sleepTimerEndTick <= 0)
+                return null;
+            long remMs = Math.Max(0, _sleepTimerEndTick - Environment.TickCount64);
+            return TimeSpan.FromMilliseconds(remMs);
+        }
+    }
+
+    public void TickSleepTimer()
+    {
+        long remainingMs;
+        List<(string SessionId, float TargetVol)> toFade = [];
+        List<string> toPause = [];
+        List<(string SessionId, float OriginalVolume)> toRestore = [];
+        bool finished = false;
+
+        lock (_lock)
+        {
+            if (_sleepTimerEndTick <= 0)
+                return;
+
+            remainingMs = _sleepTimerEndTick - Environment.TickCount64;
+            if (remainingMs <= 0)
+            {
+                finished = true;
+                _sleepTimerEndTick = 0;
+                _sleepFadeActive = false;
+                foreach (var kv in _sleepFadedSessions)
+                    toRestore.Add((kv.Key, kv.Value.OriginalVolume));
+                _sleepFadedSessions.Clear();
+
+                foreach (var s in _snapshot.Sessions)
+                {
+                    if (s.IsPlaying || s.IsEffectivelyPlaying)
+                        toPause.Add(s.SessionId);
+                }
+            }
+            else if (remainingMs <= 10_000)
+            {
+                if (!_sleepFadeActive)
+                {
+                    _sleepFadeActive = true;
+                    _sleepFadedSessions.Clear();
+                    foreach (var s in _snapshot.Sessions)
+                    {
+                        if (!s.IsPassiveTab && (s.IsPlaying || s.IsEffectivelyPlaying) && s.Volume > 0.01f)
+                            _sleepFadedSessions[s.SessionId] = (s.Volume, s.Source);
+                    }
+                }
+
+                float factor = Math.Clamp((float)remainingMs / 10_000f, 0.05f, 1f);
+                foreach (var kv in _sleepFadedSessions)
+                    toFade.Add((kv.Key, kv.Value.OriginalVolume * factor));
+            }
+        }
+
+        SleepTimerChanged?.Invoke();
+
+        if (finished)
+        {
+            _ = Task.Run(async () =>
+            {
+                foreach (string id in toPause)
+                    await _sessionManager.PauseAsync(id).ConfigureAwait(false);
+                if (toRestore.Count > 0)
+                {
+                    await Task.Delay(250).ConfigureAwait(false);
+                    foreach (var (id, origVol) in toRestore)
+                        await _sessionManager.SetSessionVolumeAsync(id, origVol).ConfigureAwait(false);
+                }
+                NotifyOsd(Strings.OsdSleepTimerTitle, Strings.OsdSleepTimerDone, null);
+            });
+            return;
+        }
+
+        if (toFade.Count > 0)
+        {
+            _ = Task.Run(async () =>
+            {
+                foreach (var (id, vol) in toFade)
+                    await _sessionManager.SetSessionVolumeAsync(id, vol).ConfigureAwait(false);
+            });
+        }
     }
 
     public async Task<bool?> ToggleSessionMuteAsync(string sessionId)
@@ -1156,10 +1494,18 @@ internal sealed class MediaRouterEngine : IDisposable
         List<(string SessionId, float OriginalVolume)> toRestore;
         lock (_lock)
         {
-            toRestore = new List<(string, float)>(_autoDucked.Count);
+            _sleepTimerEndTick = 0;
+            _sleepFadeActive = false;
+            toRestore = new List<(string, float)>(_autoDucked.Count + _micDucked.Count + _sleepFadedSessions.Count);
             foreach (var kv in _autoDucked)
                 toRestore.Add((kv.Key, kv.Value.OriginalVolume));
+            foreach (var kv in _micDucked)
+                toRestore.Add((kv.Key, kv.Value.OriginalVolume));
+            foreach (var kv in _sleepFadedSessions)
+                toRestore.Add((kv.Key, kv.Value.OriginalVolume));
             _autoDucked.Clear();
+            _micDucked.Clear();
+            _sleepFadedSessions.Clear();
         }
 
         foreach (var (id, origVol) in toRestore)

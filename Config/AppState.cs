@@ -15,7 +15,9 @@ public sealed class AppSettings
     public bool OsdEnabled { get; set; } = false;
     public bool AutoPauseEnabled { get; set; } = false;
     public bool AutoDuckingEnabled { get; set; } = false;
+    public bool MicDuckingEnabled { get; set; } = false;
     public int DuckVolumePercent { get; set; } = 25;
+    public bool RememberSiteVolumeEnabled { get; set; } = true;
     public bool HeadphoneGuardEnabled { get; set; } = false;
     public bool SoloModeEnabled { get; set; } = false;
     public bool GameFullscreenGuardEnabled { get; set; } = false;
@@ -30,10 +32,19 @@ public sealed class AppSettings
     public string HotkeyVolumeUp { get; set; } = string.Empty;
     public string HotkeyVolumeDown { get; set; } = string.Empty;
     public string HotkeyVolumeMute { get; set; } = string.Empty;
+    public string HotkeyCycleAudioDevice { get; set; } = string.Empty;
     public string MpvPipeName { get; set; } = "mpvsocket";
     public List<string> GameBlacklistExes { get; set; } = [];
     public List<IgnoredAppEntry> IgnoredApps { get; set; } = [];
+    public List<SavedSiteVolumeEntry> SavedSiteVolumes { get; set; } = [];
     public List<CustomThemePreset> CustomThemes { get; set; } = [];
+}
+
+public sealed class SavedSiteVolumeEntry
+{
+    public string AppKey { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public int VolumePercent { get; set; } = 100;
 }
 
 public sealed class IgnoredAppEntry

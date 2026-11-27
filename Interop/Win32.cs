@@ -249,6 +249,8 @@ internal static unsafe partial class Win32
 
     // Menu
     public const uint MF_STRING = 0x00000000;
+    public const uint MF_POPUP = 0x00000010;
+    public const uint MF_GRAYED = 0x00000001;
     public const uint MF_SEPARATOR = 0x00000800;
     public const uint MF_CHECKED = 0x00000008;
     public const uint MF_UNCHECKED = 0x00000000;
@@ -844,6 +846,9 @@ internal static unsafe partial class Win32
 
     [LibraryImport("ole32.dll")]
     public static partial void CoTaskMemFree(nint pv);
+
+    [LibraryImport("ole32.dll")]
+    public static partial int PropVariantClear(void* pvar);
 
     // Advapi32 (Registry & Elevation)
     [LibraryImport("advapi32.dll", StringMarshalling = StringMarshalling.Utf16)]

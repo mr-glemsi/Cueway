@@ -1740,4 +1740,232 @@ internal static class Strings
     };
     public static string WhatsNewBtnGotIt => T("Anladım", "Got it", "知道了", "Entendido", "Понятно", "Verstanden", "Compris", "OK", "확인", "Entendi", "Ho capito", "Rozumiem", "Selvä");
     public static string BtnWhatsNew => T("Yenilikler", "What's New", "更新内容", "Novedades", "Что нового", "Neuerungen", "Nouveautés", "新機能", "새 기능", "Novidades", "Novità", "Co nowego", "Uutta");
+
+    // Per-Site Volume Memory, Voice Call Mic Ducking, Audio Device Switcher & Sleep Timer
+    public static string SetSiteVolMemTitle => T(
+        "Site Bazlı Ses Hafızası",
+        "Remember Volume per Website",
+        "记住网站独立音量",
+        "Recordar volumen por sitio web",
+        "Память громкости для сайтов",
+        "Lautstärke pro Website merken",
+        "Mémoriser le volume par site",
+        "サイトごとの音量を記憶",
+        "웹사이트별 음량 기억",
+        "Lembrar Volume por Site",
+        "Ricorda volume per sito web",
+        "Zapamiętuj głośność stron",
+        "Muista sivuston äänenvoimakkuus");
+    public static string SetSiteVolMemSub => T(
+        "Tarayıcı sekmelerinde ayarladığınız son ses seviyesini hatırla ve yeni sekmelerde otomatik uygula",
+        "Remember your adjusted volume per website and automatically apply it to newly opened tabs",
+        "记住每个网站的调整音量，并在新打开同类标签页时自动应用",
+        "Guarda el volumen ajustado de cada sitio web y aplícalo al instante en pestañas nuevas",
+        "Запоминает настроенную громкость для каждого сайта и применяет её к новым вкладкам",
+        "Merkt sich die eingestellte Lautstärke pro Website und wendet sie auf neue Tabs an",
+        "Mémorise le volume réglé par site et l'applique automatiquement aux nouveaux onglets",
+        "サイトごとに設定した音量を記憶し、新しいタブを開いた際に自動で適用します",
+        "웹사이트별로 조절한 음량을 기억해 새 탭을 열 때 자동으로 적용합니다",
+        "Salva o volume ajustado para cada site e aplica automaticamente ao abrir novas abas",
+        "Ricorda il volume impostato per ciascun sito e lo applica automaticamente alle nuove schede",
+        "Zapamiętuje ustawioną głośność dla każdej strony i stosuje ją w nowych kartach",
+        "Muistaa sivustolle asetetun äänenvoimakkuuden ja käyttää sitä uusissa välilehdissä");
+    public static string BtnClearSavedVols(int count) => Current switch
+    {
+        AppLanguage.En => $"Clear ({count})",
+        AppLanguage.Zh => $"清除 ({count})",
+        AppLanguage.Es => $"Borrar ({count})",
+        AppLanguage.Ru => $"Сброс ({count})",
+        AppLanguage.De => $"Löschen ({count})",
+        AppLanguage.Fr => $"Vider ({count})",
+        AppLanguage.Ja => $"消去 ({count})",
+        AppLanguage.Ko => $"초기화 ({count})",
+        AppLanguage.Pt => $"Limpar ({count})",
+        AppLanguage.It => $"Cancella ({count})",
+        AppLanguage.Pl => $"Wyczyść ({count})",
+        AppLanguage.Fi => $"Tyhjennä ({count})",
+        _ => $"Temizle ({count})"
+    };
+    public static string MsgSavedVolsCleared => T(
+        "Kayıtlı site ses seviyeleri temizlendi.",
+        "Saved per-site volume levels cleared.",
+        "已清除保存的网站音量记忆。",
+        "Se borraron los volúmenes guardados por sitio.",
+        "Сохранённые уровни громкости сайтов очищены.",
+        "Gespeicherte Website-Lautstärken gelöscht.",
+        "Volumes mémorisés par site effacés.",
+        "保存されたサイトごとの音量を消去しました。",
+        "저장된 사이트별 음량 설정이 초기화되었습니다.",
+        "Os volumes salvos por site foram limpos.",
+        "Volumi salvati per sito web cancellati.",
+        "Wyczyszczono zapisane głośności stron.",
+        "Tallennetut sivustokohtaiset äänenvoimakkuudet tyhjennetty.");
+
+    public static string SetMicDuckTitle => T(
+        "Sesli Görüşmede Otomatik Kısma",
+        "Voice Call Auto-Ducking",
+        "语音通话自动降音",
+        "Atenuar música en llamadas de voz",
+        "Автоприглушение при звонке",
+        "Bei Sprachanruf automatisch leiser",
+        "Atténuation pendant les appels",
+        "通話中の自動音量低下",
+        "음성 통화 시 자동 덕킹",
+        "Redução Automática em Chamadas",
+        "Attenuazione automatica in chiamata",
+        "Automatyczne ściszanie podczas rozmów",
+        "Vaimennus äänipuhelun aikana");
+    public static string SetMicDuckSub => T(
+        "Mikrofon veya sesli görüşme (Discord, Meet, oyun içi) aktifken medyayı yumuşakça kıs",
+        "Smoothly duck background media while your microphone is active in Discord, Meet, or games",
+        "当 Discord、会议或游戏内麦克风处于活动状态时平滑降低背景媒体音量",
+        "Baja suavemente el volumen multimedia mientras el micrófono esté activo en llamadas o juegos",
+        "Плавно приглушает медиа, пока микрофон активен в Discord, Meet или играх",
+        "Senkt laufende Medien sanft ab, sobald das Mikrofon in Discord, Meet oder Spielen aktiv ist",
+        "Baisse doucement les médias lorsque votre micro est actif dans Discord, Meet ou en jeu",
+        "Discord や通話、ゲームでマイク使用中に再生中のメディア音量を滑らかに下げます",
+        "Discord, 회의 또는 게임 등에서 마이크가 활성화되면 미디어 소리를 부드럽게 낮춥니다",
+        "Reduz suavemente a mídia em segundo plano enquanto o microfone estiver ativo em chamadas",
+        "Abbassa dolcemente i media quando il microfono è attivo su Discord, Meet o nei giochi",
+        "Płynnie ścisza multimedia w tle, gdy mikrofon jest aktywny w Discordzie, Meet lub grach",
+        "Vaimentaa taustamedian pehmeästi, kun mikrofoni on aktiivisena puhelussa tai pelissä");
+
+    public static string SetHkCycleAudioTitle => T(
+        "Ses Çıkış Cihazını Değiştir",
+        "Switch Audio Output Device",
+        "切换音频输出设备",
+        "Cambiar dispositivo de salida de audio",
+        "Переключить аудиовыход",
+        "Audio-Ausgabegerät wechseln",
+        "Changer de sortie audio",
+        "オーディオ出力デバイスを切替",
+        "오디오 출력 장치 전환",
+        "Alternar Dispositivo de Saída",
+        "Cambia dispositivo audio",
+        "Przełącz urządzenie wyjściowe audio",
+        "Vaihda äänilähtölaite");
+    public static string SetHkCycleAudioSub => T(
+        "Varsayılan ses çıkışını (kulaklık ↔ hoparlör) tek kısayolla sıradaki cihaza geçir",
+        "Cycle default Windows audio output (headphones ↔ speakers) with a single shortcut",
+        "使用单个快捷键在默认音频输出设备之间切换（如耳机 ↔ 扬声器）",
+        "Alterna la salida de audio predeterminada (auriculares ↔ altavoces) con un atajo",
+        "Переключает устройство вывода звука (наушники ↔ колонки) одним сочетанием",
+        "Wechselt per Tastenkürzel direkt zwischen Standard-Audiogeräten (Kopfhörer ↔ Lautsprecher)",
+        "Bascule la sortie audio Windows par défaut (casque ↔ haut-parleurs) d'un raccourci",
+        "ヘッドホンやスピーカーなど Windows の既定オーディオ出力をワンキーで切り替えます",
+        "헤드폰 ↔ 스피커 등 기본 오디오 출력 장치를 단축키 하나로 전환합니다",
+        "Alterna rapidamente o dispositivo de saída padrão (fone ↔ caixas) com um atalho",
+        "Passa da un dispositivo audio predefinito all'altro (cuffie ↔ altoparlanti) con un tasto",
+        "Przełącza domyślne wyjście audio (słuchawki ↔ głośniki) jednym skrótem",
+        "Vaihtaa Windowsin oletusäänilähdön (kuulokkeet ↔ kaiuttimet) pikanäppäimellä");
+
+    public static string FlyoutAudioDeviceFallback => T(
+        "Ses Çıkışı", "Output Device", "输出设备", "Salida de audio", "Аудиовыход",
+        "Ausgabegerät", "Sortie audio", "出力デバイス", "출력 장치",
+        "Dispositivo de Saída", "Dispositivo audio", "Wyjście audio", "Äänilähtö");
+    public static string FlyoutNoAudioDevices => T(
+        "Aktif ses çıkış cihazı bulunamadı", "No active output devices", "未找到可用输出设备", "Sin dispositivos de salida",
+        "Активные устройства не найдены", "Keine aktiven Ausgabegeräte", "Aucun périphérique actif", "有効な出力デバイスがありません",
+        "활성 출력 장치가 없습니다", "Nenhum dispositivo de saída ativo", "Nessun dispositivo attivo",
+        "Brak aktywnych urządzeń", "Ei aktiivisia äänilähtölaitteita");
+    public static string FlyoutSleepLabel => T(
+        "Uyku", "Sleep", "定时", "Temporiz.", "Таймер",
+        "Sleep", "Minuteur", "スリープ", "취침",
+        "Sono", "Sleep", "Wyłącznik", "Ajastin");
+    public static string FlyoutSleepCancel => T(
+        "İptal Et", "Cancel", "取消", "Cancelar", "Отмена",
+        "Abbrechen", "Annuler", "解除", "취소",
+        "Cancelar", "Annulla", "Anuluj", "Peruuta");
+    public static string FlyoutSleepMinutes(int m) => Current switch
+    {
+        AppLanguage.En => $"{m}m",
+        AppLanguage.Zh => $"{m}分",
+        AppLanguage.Es => $"{m} min",
+        AppLanguage.Ru => $"{m}м",
+        AppLanguage.De => $"{m} Min.",
+        AppLanguage.Fr => $"{m} min",
+        AppLanguage.Ja => $"{m}分",
+        AppLanguage.Ko => $"{m}분",
+        AppLanguage.Pt => $"{m} min",
+        AppLanguage.It => $"{m}m",
+        AppLanguage.Pl => $"{m} min",
+        AppLanguage.Fi => $"{m} min",
+        _ => $"{m} dk"
+    };
+
+    public static string TrayMenuSleepTimer => T(
+        "Uyku Zamanlayıcısı", "Sleep Timer", "睡眠定时器", "Temporizador", "Таймер сна",
+        "Sleep-Timer", "Minuterie de veille", "スリープタイマー", "취침 예약",
+        "Temporizador", "Timer spegnimento", "Wyłącznik czasowy", "Uniajastin");
+    public static string TrayMenuSleepMinutes(int m) => Current switch
+    {
+        AppLanguage.En => $"{m} minutes",
+        AppLanguage.Zh => $"{m} 分钟",
+        AppLanguage.Es => $"{m} minutos",
+        AppLanguage.Ru => $"{m} минут",
+        AppLanguage.De => $"{m} Minuten",
+        AppLanguage.Fr => $"{m} minutes",
+        AppLanguage.Ja => $"{m} 分",
+        AppLanguage.Ko => $"{m}분",
+        AppLanguage.Pt => $"{m} minutos",
+        AppLanguage.It => $"{m} minuti",
+        AppLanguage.Pl => $"{m} minut",
+        AppLanguage.Fi => $"{m} minuuttia",
+        _ => $"{m} dakika"
+    };
+    public static string TrayMenuSleepRemaining(string mmss) => Current switch
+    {
+        AppLanguage.En => $"Active: {mmss} remaining",
+        AppLanguage.Zh => $"进行中：剩余 {mmss}",
+        AppLanguage.Es => $"Activo: queda {mmss}",
+        AppLanguage.Ru => $"Активен: осталось {mmss}",
+        AppLanguage.De => $"Aktiv: noch {mmss}",
+        AppLanguage.Fr => $"Actif : {mmss} restant",
+        AppLanguage.Ja => $"動作中: 残り {mmss}",
+        AppLanguage.Ko => $"실행 중: {mmss} 남음",
+        AppLanguage.Pt => $"Ativo: faltam {mmss}",
+        AppLanguage.It => $"Attivo: {mmss} rimanenti",
+        AppLanguage.Pl => $"Aktywny: pozostało {mmss}",
+        AppLanguage.Fi => $"Käynnissä: {mmss} jäljellä",
+        _ => $"Aktif: {mmss} kaldı"
+    };
+    public static string TrayMenuSleepCancel => T(
+        "Zamanlayıcıyı İptal Et", "Cancel Sleep Timer", "取消定时器", "Cancelar temporizador", "Отменить таймер",
+        "Timer abbrechen", "Annuler le minuteur", "タイマーを解除", "취침 예약 취소",
+        "Cancelar Temporizador", "Annulla timer", "Anuluj wyłącznik", "Peruuta ajastin");
+
+    public static string OsdAudioDeviceTitle => T(
+        "Ses Çıkışı", "Audio Output", "音频输出", "Salida de audio", "Аудиовыход",
+        "Audioausgabe", "Sortie audio", "オーディオ出力", "오디오 출력",
+        "Saída de Áudio", "Uscita audio", "Wyjście audio", "Äänilähtö");
+    public static string OsdSleepTimerTitle => T(
+        "Uyku Zamanlayıcısı", "Sleep Timer", "睡眠定时器", "Temporizador", "Таймер сна",
+        "Sleep-Timer", "Minuterie de veille", "スリープタイマー", "취침 예약",
+        "Temporizador", "Timer", "Wyłącznik", "Uniajastin");
+    public static string OsdSleepTimerSet(int m) => Current switch
+    {
+        AppLanguage.En => $"Media will fade and pause in {m} min",
+        AppLanguage.Zh => $"将在 {m} 分钟后渐弱并暂停播放",
+        AppLanguage.Es => $"La reproducción se pausará suavemente en {m} min",
+        AppLanguage.Ru => $"Медиа затихнет и встанет на паузу через {m} мин",
+        AppLanguage.De => $"Medien werden in {m} Min. ausgeblendet & pausiert",
+        AppLanguage.Fr => $"Fondu et pause des médias dans {m} min",
+        AppLanguage.Ja => $"{m} 分後にフェードアウトして一時停止します",
+        AppLanguage.Ko => $"{m}분 후 서서히 소리를 줄이고 일시정지합니다",
+        AppLanguage.Pt => $"A mídia será suavizada e pausada em {m} min",
+        AppLanguage.It => $"Dissolvenza e pausa tra {m} min",
+        AppLanguage.Pl => $"Multimedia wyciszą się i zatrzymają za {m} min",
+        AppLanguage.Fi => $"Toisto vaimenee ja pysähtyy {m} min kuluttua",
+        _ => $"{m} dk sonra medya yumuşakça kısılıp durdurulacak"
+    };
+    public static string OsdSleepTimerCancelled => T(
+        "Uyku zamanlayıcısı iptal edildi", "Sleep timer cancelled", "睡眠定时器已取消", "Temporizador cancelado",
+        "Таймер сна отменён", "Sleep-Timer abgebrochen", "Minuteur annulé", "タイマーを解除しました",
+        "취침 예약이 취소되었습니다", "Temporizador cancelado", "Timer annullato",
+        "Wyłącznik czasowy anulowany", "Uniajastin peruutettu");
+    public static string OsdSleepTimerDone => T(
+        "Süre doldu — medya duraklatıldı", "Time's up — playback paused", "时间到 — 已暂停播放", "Tiempo cumplido — reproducción pausada",
+        "Время вышло — воспроизведение приостановлено", "Zeit abgelaufen — Wiedergabe pausiert", "Temps écoulé — lecture en pause", "終了 — 再生を一時停止しました",
+        "시간 종료 — 재생이 일시정지되었습니다", "Tempo esgotado — reprodução pausada", "Tempo scaduto — riproduzione in pausa",
+        "Czas minął — odtwarzanie wstrzymane", "Aika täynnä — toisto pysäytetty");
 }

@@ -18,6 +18,7 @@ internal sealed unsafe class MainWindow : IDisposable
     private const nuint TIMER_UI_ANIM = 8050;
     private const uint UI_ANIM_INTERVAL_MS = 16;
     private const int UI_HIGHLIGHT_DURATION_MS = 900;
+    private const int UI_BRIDGE_PULSE_DURATION_MS = 1800;
     private const int UI_SLIDE_DURATION_MS = 180;
 
     private enum TabKind
@@ -83,6 +84,8 @@ internal sealed unsafe class MainWindow : IDisposable
     private int _scrollY;
     private int _contentTotalH;
     private int _bodyClipTop;
+    private bool _pendingScrollToBrowserBridge;
+    private int _settingsBridgeSectionOffset;
     private bool _trackingMouse;
     private string? _hoverId;
     private TabKind _activeTab = TabKind.Dashboard;
@@ -117,6 +120,7 @@ internal sealed unsafe class MainWindow : IDisposable
     private long _highlightPrioStartTick;
     private string? _highlightTargetSessionId;
     private long _highlightTargetStartTick;
+    private long _highlightBridgeStartTick;
     private bool _uiAnimTimerActive;
 
     private Func<nuint, bool>? _timerCallback;
@@ -376,6 +380,7 @@ internal sealed unsafe class MainWindow : IDisposable
         if (settingsTab)
         {
             _activeTab = TabKind.Settings;
+            _pendingScrollToBrowserBridge = false;
             _scrollY = 0;
         }
         if (_uiDataDirty)
@@ -430,6 +435,7 @@ internal sealed unsafe class MainWindow : IDisposable
         _highlightPrioStartTick = 0;
         _highlightTargetSessionId = null;
         _highlightTargetStartTick = 0;
+        _highlightBridgeStartTick = 0;
         _openDropdown = DropdownKind.None;
         _hoverId = null;
         Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
@@ -476,6 +482,18 @@ internal sealed unsafe class MainWindow : IDisposable
         return remain * remain;
     }
 
+    private static bool IsBridgePulseActive(long startTick, long now)
+        => startTick != 0 && (now - startTick) >= 0 && (now - startTick) < UI_BRIDGE_PULSE_DURATION_MS;
+
+    private static float GetBridgePulseIntensity(long startTick, long now)
+    {
+        if (!IsBridgePulseActive(startTick, now))
+            return 0f;
+        float phase = (float)(now - startTick) / UI_BRIDGE_PULSE_DURATION_MS * 3f;
+        float wave = MathF.Sin(MathF.PI * (phase % 1f));
+        return wave * wave;
+    }
+
     private int GetSlideOffsetPx(long startTick, int dir, long now)
     {
         if (startTick == 0 || dir == 0)
@@ -489,9 +507,10 @@ internal sealed unsafe class MainWindow : IDisposable
         return (int)MathF.Round(-dir * S(14) * ease);
     }
 
-    private static bool HasActiveUiAnimation(long startPrio, long startTarget, long now)
+    private static bool HasActiveUiAnimation(long startPrio, long startTarget, long startBridge, long now)
         => GetHighlightIntensity(startPrio, now) > 0.005f ||
-           GetHighlightIntensity(startTarget, now) > 0.005f;
+           GetHighlightIntensity(startTarget, now) > 0.005f ||
+           IsBridgePulseActive(startBridge, now);
 
     private void StartUiAnimTimer()
     {
@@ -521,6 +540,7 @@ internal sealed unsafe class MainWindow : IDisposable
             _highlightPrioStartTick = 0;
             _highlightTargetSessionId = null;
             _highlightTargetStartTick = 0;
+            _highlightBridgeStartTick = 0;
             StopUiAnimTimer();
             return;
         }
@@ -536,8 +556,12 @@ internal sealed unsafe class MainWindow : IDisposable
             _highlightTargetSessionId = null;
             _highlightTargetStartTick = 0;
         }
+        if (!IsBridgePulseActive(_highlightBridgeStartTick, now))
+        {
+            _highlightBridgeStartTick = 0;
+        }
 
-        if (!HasActiveUiAnimation(_highlightPrioStartTick, _highlightTargetStartTick, now))
+        if (!HasActiveUiAnimation(_highlightPrioStartTick, _highlightTargetStartTick, _highlightBridgeStartTick, now))
         {
             StopUiAnimTimer();
         }
@@ -907,7 +931,7 @@ internal sealed unsafe class MainWindow : IDisposable
             if (nowTick - _lastSliderDispatchTick >= 35)
             {
                 _lastSliderDispatchTick = nowTick;
-                _ = _engine.SetSessionVolumeAsync(_draggingSessionId, vol);
+                _ = _engine.SetSessionVolumeAsync(_draggingSessionId, vol, commitMemory: false);
             }
             RequestRepaint();
             return;
@@ -954,7 +978,7 @@ internal sealed unsafe class MainWindow : IDisposable
         _lastSliderDispatchTick = Environment.TickCount64;
 
         Win32.SetCapture(_hwnd);
-        _ = _engine.SetSessionVolumeAsync(slider.SessionId, vol);
+        _ = _engine.SetSessionVolumeAsync(slider.SessionId, vol, commitMemory: false);
         RequestRepaint();
         return true;
     }
@@ -971,7 +995,7 @@ internal sealed unsafe class MainWindow : IDisposable
             _draggingSliderId = null;
             _draggingSessionId = null;
             Win32.ReleaseCapture();
-            _ = _engine.SetSessionVolumeAsync(targetSession, finalVol);
+            _ = _engine.SetSessionVolumeAsync(targetSession, finalVol, commitMemory: true);
             RequestRepaint();
             return;
         }
@@ -1142,6 +1166,22 @@ internal sealed unsafe class MainWindow : IDisposable
                     int topChromeH = headerH + barH;
                     _bodyClipTop = topChromeH;
                     DrawScrollableBody(_backDc, gfx, w, h, topChromeH);
+                    if (_activeTab == TabKind.Settings && _pendingScrollToBrowserBridge)
+                    {
+                        _pendingScrollToBrowserBridge = false;
+                        int viewH = Math.Max(1, h - topChromeH);
+                        int maxScroll = Math.Max(0, _contentTotalH - viewH);
+                        int centeredScroll = _settingsBridgeSectionOffset + S(82) - viewH / 2;
+                        int clamped = Math.Clamp(centeredScroll, 0, maxScroll);
+                        if (_scrollY != clamped)
+                        {
+                            _scrollY = clamped;
+                            _hitRegions.Clear();
+                            _sliderRegions.Clear();
+                            GdiPlus.GdipGraphicsClear(gfx, GdiPlus.Argb(Theme.BgWindow));
+                            DrawScrollableBody(_backDc, gfx, w, h, topChromeH);
+                        }
+                    }
                     _bodyClipTop = 0;
                     DrawHeader(_backDc, gfx, w, headerH);
                     if (barH > 0)
@@ -1218,6 +1258,8 @@ internal sealed unsafe class MainWindow : IDisposable
                 CancelHotkeyCapture();
                 _openDropdown = DropdownKind.None;
                 _activeTab = TabKind.Dashboard;
+                _pendingScrollToBrowserBridge = false;
+                _highlightBridgeStartTick = 0;
                 _scrollY = 0;
             });
         DrawTabButton(dc, gfx, "tab_set", Strings.TabSettings, tabGroupX + S(3) + halfW, tabY + S(3), halfW, tabH - S(6),
@@ -1226,6 +1268,7 @@ internal sealed unsafe class MainWindow : IDisposable
                 CancelHotkeyCapture();
                 _openDropdown = DropdownKind.None;
                 _activeTab = TabKind.Settings;
+                _pendingScrollToBrowserBridge = false;
                 _scrollY = 0;
             });
 
@@ -1511,8 +1554,16 @@ internal sealed unsafe class MainWindow : IDisposable
                     "dash_bridge_status",
                     () =>
                     {
+                        CancelHotkeyCapture();
+                        _openDropdown = DropdownKind.None;
                         _activeTab = TabKind.Settings;
-                        _scrollY = 0;
+                        _pendingScrollToBrowserBridge = true;
+                        int viewH = Math.Max(1, _clientH - GetTopChromeHeight());
+                        _scrollY = _settingsBridgeSectionOffset > 0
+                            ? Math.Max(0, _settingsBridgeSectionOffset + S(82) - viewH / 2)
+                            : 0;
+                        _highlightBridgeStartTick = Environment.TickCount64;
+                        StartUiAnimTimer();
                     });
             }
         }
@@ -2465,6 +2516,7 @@ internal sealed unsafe class MainWindow : IDisposable
 
     private int DrawSettingsTab(nint dc, nint gfx, int x, int y, int w, int headerH)
     {
+        int initialY = y;
         y = DrawStatusBannerIfActive(dc, gfx, x, y, w);
 
         // 0. APPEARANCE & LANGUAGE
@@ -2540,6 +2592,7 @@ internal sealed unsafe class MainWindow : IDisposable
 
         // 1.5 COMPANION BROWSER EXTENSION BRIDGE
         y += S(22);
+        _settingsBridgeSectionOffset = Math.Max(0, y - initialY);
         DrawText(dc, Strings.SecBrowserBridge, x, y, x + w, y + S(20), 11, Win32.FW_BOLD, Theme.TextMuted);
         y += S(24);
 
@@ -2593,7 +2646,14 @@ internal sealed unsafe class MainWindow : IDisposable
             () => _stateStore.UpdateSettings(s => s.AutoDuckingEnabled = !s.AutoDuckingEnabled));
         y += S(8);
 
-        if (_settings.AutoDuckingEnabled)
+        y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_mic_duck",
+            Strings.SetMicDuckTitle,
+            Strings.SetMicDuckSub,
+            _settings.MicDuckingEnabled,
+            () => _stateStore.UpdateSettings(s => s.MicDuckingEnabled = !s.MicDuckingEnabled));
+        y += S(8);
+
+        if (_settings.AutoDuckingEnabled || _settings.MicDuckingEnabled)
         {
             y = DrawStepperSettingRow(dc, gfx, x, y, w, headerH, "set_duck_vol",
                 Strings.SetDuckVolTitle,
@@ -2603,6 +2663,9 @@ internal sealed unsafe class MainWindow : IDisposable
                 () => _stateStore.UpdateSettings(s => s.DuckVolumePercent = Math.Min(80, s.DuckVolumePercent + 5)));
             y += S(8);
         }
+
+        y = DrawSiteVolumeMemoryRow(dc, gfx, x, y, w, headerH);
+        y += S(8);
 
         y = DrawToggleSettingRow(dc, gfx, x, y, w, headerH, "set_headphone",
             Strings.SetHeadphoneTitle,
@@ -2712,6 +2775,13 @@ internal sealed unsafe class MainWindow : IDisposable
             Strings.SetHkVolMuteSub,
             _settings.HotkeyVolumeMute,
             hk => _stateStore.SetGlobalHotkey(GlobalHotkeySlot.VolumeMute, hk));
+        y += S(8);
+
+        y = DrawHotkeySettingRow(dc, gfx, x, y, w, headerH, "global:cycle_audio",
+            Strings.SetHkCycleAudioTitle,
+            Strings.SetHkCycleAudioSub,
+            _settings.HotkeyCycleAudioDevice,
+            hk => _stateStore.SetGlobalHotkey(GlobalHotkeySlot.CycleAudioDevice, hk));
         y += S(8);
 
         DrawText(dc, Strings.HotkeyHint, x + S(4), y, x + w - S(4), y + S(18), 10, Win32.FW_NORMAL, Theme.TextMuted);
@@ -3633,6 +3703,12 @@ internal sealed unsafe class MainWindow : IDisposable
         GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
             GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
 
+        float bridgeGlow = GetBridgePulseIntensity(_highlightBridgeStartTick, Environment.TickCount64);
+        if (bridgeGlow > 0.01f)
+        {
+            DrawCardGlow(gfx, x, y, w, rowH, SF(10), Theme.Accent, bridgeGlow * 1.25f);
+        }
+
         int pad = S(16);
         var (browsers, tabs) = _bridgeServer.GetStatusSnapshot();
         bool isConnected = browsers > 0;
@@ -3666,21 +3742,32 @@ internal sealed unsafe class MainWindow : IDisposable
 
         if (y + rowH > headerH)
         {
-            var primaryBrowser = ExtensionSetupService.GetPrimaryInstalledBrowserKind();
+            var connectedBrowsers = _bridgeServer.GetConnectedBrowsersSnapshot();
+            bool edgeConnected = connectedBrowsers.Contains("msedge") || connectedBrowsers.Contains("edge");
+            bool chromiumConnected = connectedBrowsers.Contains("chrome") ||
+                                     connectedBrowsers.Contains("brave") ||
+                                     connectedBrowsers.Contains("opera") ||
+                                     connectedBrowsers.Contains("vivaldi") ||
+                                     connectedBrowsers.Contains("chromium");
+            bool firefoxConnected = connectedBrowsers.Contains("firefox") ||
+                                    connectedBrowsers.Contains("zen") ||
+                                    connectedBrowsers.Contains("librewolf") ||
+                                    connectedBrowsers.Contains("waterfox") ||
+                                    connectedBrowsers.Contains("floorp");
 
-            void DrawBridgeBrowserButton(string id, string label, int bx, int bw, bool isPrimary, Action onClick)
+            void DrawBridgeBrowserButton(string id, string label, int bx, int bw, bool isConnectedBrowser, Action onClick)
             {
                 bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
                 DrawActionButton(dc, gfx, id, label, bx, btnY, bw, btnH,
-                    isPrimary ? Theme.AccentSoft : Theme.BgControl,
-                    isPrimary ? Theme.Accent : Theme.BgControlHover,
-                    isPrimary && hovered ? Theme.OnAccent : Theme.TextPrimary,
-                    isPrimary ? Theme.Accent : Theme.BorderStrong,
+                    isConnectedBrowser ? Theme.GreenSoft : Theme.BgControl,
+                    isConnectedBrowser ? Theme.Green : Theme.BgControlHover,
+                    isConnectedBrowser && hovered ? Theme.OnAccent : (isConnectedBrowser ? Theme.Green : Theme.TextPrimary),
+                    isConnectedBrowser ? Theme.Green : Theme.BorderStrong,
                     onClick);
             }
 
             DrawBridgeBrowserButton("btn_ext_edge", Strings.BtnInstallEdge, x + pad, mainBtnW,
-                primaryBrowser == DetectedBrowserKind.Edge,
+                edgeConnected,
                 () =>
                 {
                     var (ok, msg) = ExtensionSetupService.LaunchEdgeStoreInstall();
@@ -3688,7 +3775,7 @@ internal sealed unsafe class MainWindow : IDisposable
                 });
 
             DrawBridgeBrowserButton("btn_ext_chromium", Strings.BtnInstallChromium, x + pad + mainBtnW + gap, mainBtnW,
-                primaryBrowser == DetectedBrowserKind.Chromium,
+                chromiumConnected,
                 () =>
                 {
                     _guideWindow ??= new ExtensionGuideWindow(_hwnd, _bridgeServer);
@@ -3696,7 +3783,7 @@ internal sealed unsafe class MainWindow : IDisposable
                 });
 
             DrawBridgeBrowserButton("btn_ext_firefox", Strings.BtnInstallFirefox, x + pad + (mainBtnW + gap) * 2, mainBtnW,
-                primaryBrowser == DetectedBrowserKind.Firefox,
+                firefoxConnected,
                 () =>
                 {
                     _guideWindow ??= new ExtensionGuideWindow(_hwnd, _bridgeServer);
@@ -3793,6 +3880,73 @@ internal sealed unsafe class MainWindow : IDisposable
                 new Win32.RECT { Left = x, Top = y, Right = x + w, Bottom = y + rowH },
                 id,
                 onToggle);
+        }
+
+        return y + rowH;
+    }
+
+    private int DrawSiteVolumeMemoryRow(nint dc, nint gfx, int x, int y, int w, int headerH)
+    {
+        int rowH = S(62);
+        const string rowId = "set_site_vol_mem";
+        bool hovered = string.Equals(_hoverId, rowId, StringComparison.Ordinal);
+        GdiPlus.FillAndStrokeRoundedRect(gfx, x, y, w, rowH, SF(10),
+            GdiPlus.Argb(hovered ? Theme.BgCardHover : Theme.BgCard),
+            GdiPlus.Argb(Theme.BorderSubtle));
+
+        int pad = S(16);
+        int swW = S(46);
+        int swH = S(24);
+        int swX = x + w - pad - swW;
+        int swY = y + (rowH - swH) / 2;
+
+        int savedCount = _settings.SavedSiteVolumes.Count;
+        int clearW = 0;
+        int clearX = swX;
+        if (savedCount > 0)
+        {
+            string clearLabel = Strings.BtnClearSavedVols(savedCount);
+            clearW = Math.Clamp(MeasureTextWidth(dc, clearLabel, 11, Win32.FW_SEMIBOLD) + S(20), S(78), S(136));
+            clearX = swX - S(10) - clearW;
+        }
+
+        int textRight = clearX - S(16);
+        DrawText(dc, Strings.SetSiteVolMemTitle, x + pad, y + S(10), textRight, y + S(31), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary);
+        DrawText(dc, Strings.SetSiteVolMemSub, x + pad, y + S(32), textRight, y + S(52), 11, Win32.FW_NORMAL, Theme.TextSecondary);
+
+        bool value = _settings.RememberSiteVolumeEnabled;
+        uint trackColor = value ? Theme.Accent : Theme.SwitchOffTrack;
+        GdiPlus.FillRoundedRect(gfx, swX, swY, swW, swH, swH / 2f, GdiPlus.Argb(trackColor));
+
+        int knobD = swH - S(6);
+        int knobX = value ? swX + swW - knobD - S(3) : swX + S(3);
+        int knobY = swY + S(3);
+        if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(Theme.SwitchKnob), out nint knobBrush) == 0 && knobBrush != 0)
+        {
+            try { GdiPlus.GdipFillEllipse(gfx, knobBrush, knobX, knobY, knobD, knobD); }
+            finally { GdiPlus.GdipDeleteBrush(knobBrush); }
+        }
+
+        if (y + rowH > headerH)
+        {
+            RegisterScrollableHit(
+                new Win32.RECT { Left = x, Top = y, Right = x + w, Bottom = y + rowH },
+                rowId,
+                () => _stateStore.UpdateSettings(s => s.RememberSiteVolumeEnabled = !s.RememberSiteVolumeEnabled));
+
+            if (savedCount > 0)
+            {
+                int clearH = S(28);
+                int clearY = y + (rowH - clearH) / 2;
+                DrawActionButton(dc, gfx, "set_site_vol_clear", Strings.BtnClearSavedVols(savedCount),
+                    clearX, clearY, clearW, clearH,
+                    Theme.BgControl, Theme.RedSoft, Theme.TextSecondary, Theme.BorderStrong,
+                    () =>
+                    {
+                        _stateStore.ClearSavedSiteVolumes();
+                        ShowStatusBanner(Strings.MsgSavedVolsCleared, isError: false);
+                    });
+            }
         }
 
         return y + rowH;

@@ -7,9 +7,13 @@ internal static unsafe partial class CoreAudio
 {
     public const uint CLSCTX_ALL = 23;
     public const int eRender = 0;
+    public const int eCapture = 1;
     public const int eConsole = 0;
     public const int eMultimedia = 1;
+    public const int eCommunications = 2;
     public const uint DEVICE_STATE_ACTIVE = 0x00000001;
+    public const uint STGM_READ = 0;
+    public const ushort VT_LPWSTR = 31;
 
     public const int AudioSessionStateInactive = 0;
     public const int AudioSessionStateActive = 1;
@@ -23,12 +27,32 @@ internal static unsafe partial class CoreAudio
     public static readonly Guid IID_IAudioMeterInformation = new("C02216F6-8C67-4B5B-9D00-D008E73E0064");
     public static readonly Guid IID_IMMNotificationClient = new("7991EEC9-7E89-4D85-8390-6C703CEC60C0");
     public static readonly Guid IID_IUnknown = new("00000000-0000-0000-C000-000000000046");
+    public static readonly Guid CLSID_PolicyConfigClient = new("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9");
+    public static readonly Guid IID_IPolicyConfig = new("F8679F50-850A-41CF-9C72-430F290290C8");
+    public static readonly Guid IID_IPolicyConfigVista = new("568B9108-44BF-40B4-9006-86AFE5B5A620");
+
+    public static readonly PROPERTYKEY PKEY_Device_FriendlyName = new()
+    {
+        fmtid = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"),
+        pid = 14
+    };
 
     [StructLayout(LayoutKind.Sequential)]
     public struct PROPERTYKEY
     {
         public Guid fmtid;
         public uint pid;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROPVARIANT
+    {
+        public ushort vt;
+        public ushort wReserved1;
+        public ushort wReserved2;
+        public ushort wReserved3;
+        public nint data1;
+        public nint data2;
     }
 
     public static uint AddRef(nint comPtr)
@@ -119,6 +143,81 @@ internal static unsafe partial class CoreAudio
         fixed (nint* p = &ppInterface)
         {
             return ((delegate* unmanaged[Stdcall]<nint, Guid*, uint, nint, nint*, int>)vtbl[3])(device, &g, clsCtx, 0, p);
+        }
+    }
+
+    public static int Device_OpenPropertyStore(nint device, uint stgmAccess, out nint ppProperties)
+    {
+        nint* vtbl = *(nint**)device;
+        fixed (nint* p = &ppProperties)
+        {
+            return ((delegate* unmanaged[Stdcall]<nint, uint, nint*, int>)vtbl[4])(device, stgmAccess, p);
+        }
+    }
+
+    public static int Device_GetId(nint device, out string id)
+    {
+        id = string.Empty;
+        nint* vtbl = *(nint**)device;
+        char* pId = null;
+        int hr = ((delegate* unmanaged[Stdcall]<nint, char**, int>)vtbl[5])(device, &pId);
+        if (pId != null)
+        {
+            try
+            {
+                if (hr == 0)
+                    id = Marshal.PtrToStringUni((nint)pId) ?? string.Empty;
+            }
+            finally
+            {
+                Win32.CoTaskMemFree((nint)pId);
+            }
+        }
+        return hr;
+    }
+
+    public static int PropertyStore_GetValue(nint store, in PROPERTYKEY key, out PROPVARIANT pv)
+    {
+        pv = default;
+        PROPERTYKEY k = key;
+        nint* vtbl = *(nint**)store;
+        fixed (PROPVARIANT* p = &pv)
+        {
+            return ((delegate* unmanaged[Stdcall]<nint, PROPERTYKEY*, PROPVARIANT*, int>)vtbl[5])(store, &k, p);
+        }
+    }
+
+    public static bool PolicyConfig_SetDefaultEndpoint(string deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId))
+            return false;
+
+        Guid clsid = CLSID_PolicyConfigClient;
+        Guid iid = IID_IPolicyConfig;
+        int hr = Win32.CoCreateInstance(&clsid, 0, CLSCTX_ALL, &iid, out nint policy);
+        if (hr != 0 || policy == 0)
+        {
+            iid = IID_IPolicyConfigVista;
+            hr = Win32.CoCreateInstance(&clsid, 0, CLSCTX_ALL, &iid, out policy);
+            if (hr != 0 || policy == 0)
+                return false;
+        }
+
+        try
+        {
+            nint* vtbl = *(nint**)policy;
+            var setDefault = (delegate* unmanaged[Stdcall]<nint, char*, int, int>)vtbl[13];
+            fixed (char* pId = deviceId)
+            {
+                int hrConsole = setDefault(policy, pId, eConsole);
+                int hrMultimedia = setDefault(policy, pId, eMultimedia);
+                setDefault(policy, pId, eCommunications);
+                return hrConsole == 0 || hrMultimedia == 0;
+            }
+        }
+        finally
+        {
+            Release(policy);
         }
     }
 
@@ -286,17 +385,24 @@ internal static unsafe partial class CoreAudio
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
         private static int OnDeviceStateChangedImpl(NativeObject* self, char* pwstrDeviceId, uint dwNewState)
         {
-            // Trigger when an output endpoint is unplugged or disabled (state != ACTIVE)
-            if (dwNewState != DEVICE_STATE_ACTIVE && self->ManagedHandle != 0)
+            if (self->ManagedHandle != 0)
             {
                 var target = GCHandle.FromIntPtr(self->ManagedHandle).Target as NotificationClientCcw;
-                target?.RaiseChange("DeviceStateChanged");
+                target?.RaiseChange(dwNewState != DEVICE_STATE_ACTIVE ? "DeviceStateChanged" : "DeviceEnabled");
             }
             return 0;
         }
 
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
-        private static int OnDeviceAddedImpl(NativeObject* self, char* pwstrDeviceId) => 0;
+        private static int OnDeviceAddedImpl(NativeObject* self, char* pwstrDeviceId)
+        {
+            if (self->ManagedHandle != 0)
+            {
+                var target = GCHandle.FromIntPtr(self->ManagedHandle).Target as NotificationClientCcw;
+                target?.RaiseChange("DeviceAdded");
+            }
+            return 0;
+        }
 
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
         private static int OnDeviceRemovedImpl(NativeObject* self, char* pwstrDeviceId)

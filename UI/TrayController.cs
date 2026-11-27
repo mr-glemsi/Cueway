@@ -18,11 +18,17 @@ internal sealed unsafe class TrayController : IDisposable
     private const uint MENU_SETTINGS = 4;
     private const uint MENU_EXIT = 5;
     private const uint MENU_UPDATE = 6;
+    private const uint MENU_SLEEP_15 = 10;
+    private const uint MENU_SLEEP_30 = 11;
+    private const uint MENU_SLEEP_45 = 12;
+    private const uint MENU_SLEEP_60 = 13;
+    private const uint MENU_SLEEP_CANCEL = 14;
 
     private readonly nint _hwndHost;
     private readonly DynamicIconRenderer _iconRenderer;
     private readonly StateStore _stateStore;
     private readonly AppUpdateService _updateService;
+    private readonly Func<TimeSpan?>? _getSleepRemaining;
     private nint _currentTrayIcon;
     private bool _ownsTrayIcon;
     private bool _added;
@@ -32,6 +38,7 @@ internal sealed unsafe class TrayController : IDisposable
     private bool _lastIsPlaying;
     private bool _lastIsMuted;
     private bool _lastSoloMode;
+    private int _lastSleepMins;
     private string? _lastTip;
     private string? _lastThemeId;
 
@@ -41,14 +48,22 @@ internal sealed unsafe class TrayController : IDisposable
     public event Action? OpenUpdateRequested;
     public event Action? ToggleManualLockRequested;
     public event Action? ToggleSoloModeRequested;
+    public event Action<int>? SleepTimerSelected;
+    public event Action? SleepTimerCancelRequested;
     public event Action? ExitRequested;
 
-    public TrayController(nint hwndHost, DynamicIconRenderer iconRenderer, StateStore stateStore, AppUpdateService updateService)
+    public TrayController(
+        nint hwndHost,
+        DynamicIconRenderer iconRenderer,
+        StateStore stateStore,
+        AppUpdateService updateService,
+        Func<TimeSpan?>? getSleepRemaining = null)
     {
         _hwndHost = hwndHost;
         _iconRenderer = iconRenderer;
         _stateStore = stateStore;
         _updateService = updateService;
+        _getSleepRemaining = getSleepRemaining;
     }
 
     public void AddOrRestore(RouterStateSnapshot snapshot)
@@ -76,6 +91,8 @@ internal sealed unsafe class TrayController : IDisposable
         bool isPlaying = target?.IsPlaying ?? false;
         bool isMuted = target?.IsMuted ?? false;
         bool soloMode = snapshot.SoloModeEnabled;
+        var sleepRem = _getSleepRemaining?.Invoke();
+        int sleepMins = sleepRem.HasValue ? Math.Max(1, (int)Math.Ceiling(sleepRem.Value.TotalMinutes)) : 0;
         string themeId = Theme.CurrentId;
 
         string tip = target == null
@@ -83,6 +100,8 @@ internal sealed unsafe class TrayController : IDisposable
             : $"Cueway — {target.DisplayName} ({(target.IsEffectivelyPlaying ? Strings.StatusPlaying : target.IsMuted ? Strings.StatusMuted : Strings.StatusPaused)})";
         if (soloMode)
             tip += " [Solo]";
+        if (sleepMins > 0)
+            tip += $" [{Strings.FlyoutSleepMinutes(sleepMins)}]";
 
         if (tip.Length > 127)
             tip = tip[..127];
@@ -92,6 +111,7 @@ internal sealed unsafe class TrayController : IDisposable
             _lastIsPlaying == isPlaying &&
             _lastIsMuted == isMuted &&
             _lastSoloMode == soloMode &&
+            _lastSleepMins == sleepMins &&
             string.Equals(_lastAppKey, appKey, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(_lastExePath, exePath, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(_lastTip, tip, StringComparison.Ordinal) &&
@@ -153,6 +173,7 @@ internal sealed unsafe class TrayController : IDisposable
         _lastIsPlaying = isPlaying;
         _lastIsMuted = isMuted;
         _lastSoloMode = soloMode;
+        _lastSleepMins = sleepMins;
         _lastTip = tip;
         _lastThemeId = themeId;
 
@@ -204,6 +225,7 @@ internal sealed unsafe class TrayController : IDisposable
         nint hMenu = Win32.CreatePopupMenu();
         if (hMenu == 0) return;
 
+        nint hSleepMenu = 0;
         try
         {
             var settings = _stateStore.GetSettingsSnapshot();
@@ -231,6 +253,29 @@ internal sealed unsafe class TrayController : IDisposable
                 Win32.MF_STRING | (snapshot.SoloModeEnabled ? Win32.MF_CHECKED : Win32.MF_UNCHECKED),
                 MENU_TOGGLE_SOLO,
                 soloLabel);
+
+            hSleepMenu = Win32.CreatePopupMenu();
+            if (hSleepMenu != 0)
+            {
+                var rem = _getSleepRemaining?.Invoke();
+                if (rem.HasValue)
+                {
+                    string mmss = $"{(int)rem.Value.TotalMinutes:D2}:{rem.Value.Seconds:D2}";
+                    Win32.AppendMenuW(hSleepMenu, Win32.MF_STRING | Win32.MF_CHECKED | Win32.MF_GRAYED, 0, Strings.TrayMenuSleepRemaining(mmss));
+                    Win32.AppendMenuW(hSleepMenu, Win32.MF_SEPARATOR, 0, null);
+                }
+                Win32.AppendMenuW(hSleepMenu, Win32.MF_STRING, MENU_SLEEP_15, Strings.TrayMenuSleepMinutes(15));
+                Win32.AppendMenuW(hSleepMenu, Win32.MF_STRING, MENU_SLEEP_30, Strings.TrayMenuSleepMinutes(30));
+                Win32.AppendMenuW(hSleepMenu, Win32.MF_STRING, MENU_SLEEP_45, Strings.TrayMenuSleepMinutes(45));
+                Win32.AppendMenuW(hSleepMenu, Win32.MF_STRING, MENU_SLEEP_60, Strings.TrayMenuSleepMinutes(60));
+                if (rem.HasValue)
+                {
+                    Win32.AppendMenuW(hSleepMenu, Win32.MF_SEPARATOR, 0, null);
+                    Win32.AppendMenuW(hSleepMenu, Win32.MF_STRING, MENU_SLEEP_CANCEL, Strings.TrayMenuSleepCancel);
+                }
+                Win32.AppendMenuW(hMenu, Win32.MF_POPUP, (nuint)hSleepMenu, Strings.TrayMenuSleepTimer);
+            }
+
             Win32.AppendMenuW(hMenu, Win32.MF_STRING, MENU_SETTINGS, Strings.TrayMenuSettings);
             Win32.AppendMenuW(hMenu, Win32.MF_SEPARATOR, 0, null);
             Win32.AppendMenuW(hMenu, Win32.MF_STRING, MENU_EXIT, Strings.TrayMenuExit);
@@ -260,6 +305,21 @@ internal sealed unsafe class TrayController : IDisposable
                 case MENU_TOGGLE_SOLO:
                     ToggleSoloModeRequested?.Invoke();
                     break;
+                case MENU_SLEEP_15:
+                    SleepTimerSelected?.Invoke(15);
+                    break;
+                case MENU_SLEEP_30:
+                    SleepTimerSelected?.Invoke(30);
+                    break;
+                case MENU_SLEEP_45:
+                    SleepTimerSelected?.Invoke(45);
+                    break;
+                case MENU_SLEEP_60:
+                    SleepTimerSelected?.Invoke(60);
+                    break;
+                case MENU_SLEEP_CANCEL:
+                    SleepTimerCancelRequested?.Invoke();
+                    break;
                 case MENU_SETTINGS:
                     OpenSettingsRequested?.Invoke();
                     break;
@@ -270,6 +330,7 @@ internal sealed unsafe class TrayController : IDisposable
         }
         finally
         {
+            if (hSleepMenu != 0) Win32.DestroyMenu(hSleepMenu);
             Win32.DestroyMenu(hMenu);
         }
     }

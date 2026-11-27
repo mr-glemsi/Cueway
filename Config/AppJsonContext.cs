@@ -13,6 +13,8 @@ namespace Cueway.Config;
 [JsonSerializable(typeof(List<DiscoveredApp>))]
 [JsonSerializable(typeof(IgnoredAppEntry))]
 [JsonSerializable(typeof(List<IgnoredAppEntry>))]
+[JsonSerializable(typeof(SavedSiteVolumeEntry))]
+[JsonSerializable(typeof(List<SavedSiteVolumeEntry>))]
 [JsonSerializable(typeof(List<string>))]
 [JsonSerializable(typeof(BridgeIncomingMessage))]
 [JsonSerializable(typeof(BridgeTabDto))]

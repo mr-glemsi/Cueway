@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Cueway.Audio;
 using Cueway.Config;
 using Cueway.Interop;
 using Cueway.Localization;
@@ -17,9 +18,17 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     private const uint WM_APP_FLYOUT_REFRESH = Win32.WM_APP + 216;
     private const int FlyoutWidthPx = 372;
     private const int HeaderHeightPx = 46;
+    private const int FooterHeightPx = 42;
     private const int CardHeightPx = 88;
     private const int CardGapPx = 8;
     private const int MaxVisibleCards = 4;
+
+    private enum FlyoutDrawer
+    {
+        None = 0,
+        AudioDevices = 1,
+        SleepTimer = 2
+    }
 
     private sealed record HitRegion(Win32.RECT Bounds, string Id, Action OnClick, bool IsButton = true);
 
@@ -66,6 +75,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     private RouterStateSnapshot _snapshot;
     private uint _lastDwmBorder = uint.MaxValue;
     private bool _lastDwmIsLight;
+    private FlyoutDrawer _openDrawer = FlyoutDrawer.None;
+    private List<AudioOutputDevice> _outputDevices = [];
     private bool _disposed;
 
     public event Action? OpenDashboardRequested;
@@ -86,6 +97,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
 
         CreateFlyoutWindow();
         _engine.StateChanged += OnStateChanged;
+        _engine.SleepTimerChanged += OnSleepTimerChanged;
         _stateStore.StateChanged += OnStoreChanged;
     }
 
@@ -167,6 +179,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     {
         if (_disposed || _hwnd == 0) return;
         _snapshot = _engine.GetSnapshot();
+        _openDrawer = FlyoutDrawer.None;
+        _outputDevices = _engine.GetOutputDevices();
         _scrollY = 0;
         _hoverId = null;
 
@@ -189,6 +203,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             Win32.ReleaseCapture();
         }
 
+        _openDrawer = FlyoutDrawer.None;
         _hoverId = null;
         Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
         ReleaseBackBuffer();
@@ -202,6 +217,20 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         if (!_disposed && _hwnd != 0 && Win32.IsWindowVisible(_hwnd))
             Win32.PostMessageW(_hwnd, WM_APP_FLYOUT_REFRESH, 0, 0);
     }
+
+    public void RefreshAudioDevices()
+    {
+        if (_disposed || _hwnd == 0) return;
+        _outputDevices = _engine.GetOutputDevices();
+        if (Win32.IsWindowVisible(_hwnd))
+        {
+            if (_openDrawer == FlyoutDrawer.AudioDevices)
+                PositionAndResize();
+            Win32.InvalidateRect(_hwnd, null, false);
+        }
+    }
+
+    private void OnSleepTimerChanged() => RefreshVisuals();
 
     private void OnStateChanged(RouterStateSnapshot snap)
     {
@@ -234,15 +263,23 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         Win32.InvalidateRect(_hwnd, null, false);
     }
 
+    private int ComputeDrawerHeightPx() => _openDrawer switch
+    {
+        FlyoutDrawer.AudioDevices => Math.Max(1, Math.Min(_outputDevices.Count, 5)) * 32 + 12,
+        FlyoutDrawer.SleepTimer => 46,
+        _ => 0
+    };
+
     private int ComputeDesiredHeightPx()
     {
+        int extra = FooterHeightPx + ComputeDrawerHeightPx();
         int count = _snapshot.Sessions.Count;
         int padV = 12;
         if (count == 0)
-            return HeaderHeightPx + padV * 2 + 86;
+            return HeaderHeightPx + padV * 2 + 86 + extra;
 
         int visible = Math.Min(count, MaxVisibleCards);
-        return HeaderHeightPx + padV * 2 + visible * CardHeightPx + Math.Max(0, visible - 1) * CardGapPx;
+        return HeaderHeightPx + padV * 2 + visible * CardHeightPx + Math.Max(0, visible - 1) * CardGapPx + extra;
     }
 
     private void PositionAndResize()
@@ -464,7 +501,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             if (nowTick - _lastSliderDispatchTick >= 35)
             {
                 _lastSliderDispatchTick = nowTick;
-                _ = _engine.SetSessionVolumeAsync(_draggingSessionId, vol);
+                _ = _engine.SetSessionVolumeAsync(_draggingSessionId, vol, commitMemory: false);
             }
             RequestRepaint();
             return;
@@ -510,7 +547,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         _lastSliderDispatchTick = Environment.TickCount64;
 
         Win32.SetCapture(_hwnd);
-        _ = _engine.SetSessionVolumeAsync(slider.SessionId, vol);
+        _ = _engine.SetSessionVolumeAsync(slider.SessionId, vol, commitMemory: false);
         RequestRepaint();
         return true;
     }
@@ -527,7 +564,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             _draggingSliderId = null;
             _draggingSessionId = null;
             Win32.ReleaseCapture();
-            _ = _engine.SetSessionVolumeAsync(targetSession, finalVol);
+            _ = _engine.SetSessionVolumeAsync(targetSession, finalVol, commitMemory: true);
             RequestRepaint();
             return;
         }
@@ -551,7 +588,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     private void ClampScroll()
     {
         int headerH = S(HeaderHeightPx);
-        int viewH = Math.Max(1, _clientH - headerH);
+        int bottomH = S(FooterHeightPx + ComputeDrawerHeightPx());
+        int viewH = Math.Max(1, _clientH - headerH - bottomH);
         int maxScroll = Math.Max(0, _contentTotalH - viewH);
         _scrollY = Math.Clamp(_scrollY, 0, maxScroll);
     }
@@ -659,8 +697,14 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                     GdiPlus.GdipGraphicsClear(gfx, GdiPlus.Argb(Theme.BgWindow));
 
                     int headerH = S(HeaderHeightPx);
-                    DrawBody(_backDc, gfx, w, h, headerH);
+                    int footerH = S(FooterHeightPx);
+                    int drawerH = S(ComputeDrawerHeightPx());
+                    int bodyBottom = Math.Max(headerH + 1, h - footerH - drawerH);
+                    DrawBody(_backDc, gfx, w, bodyBottom, headerH);
                     DrawHeader(_backDc, gfx, w, headerH);
+                    if (drawerH > 0)
+                        DrawDrawer(_backDc, gfx, w, bodyBottom, drawerH);
+                    DrawFooter(_backDc, gfx, w, h - footerH, footerH);
 
                     // Crisp outer border matching the window edge
                     GdiPlus.DrawRoundedRect(gfx, 0.5f, 0.5f, w - 1f, h - 1f, SF(8),
@@ -743,7 +787,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         _hitRegions.Add(new HitRegion(new Win32.RECT { Left = x, Top = y, Right = x + w, Bottom = y + h }, id, onClick));
     }
 
-    private void DrawBody(nint dc, nint gfx, int w, int h, int headerH)
+    private void DrawBody(nint dc, nint gfx, int w, int bodyBottom, int headerH)
     {
         int padX = S(12);
         int padV = S(12);
@@ -769,7 +813,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         int gap = S(CardGapPx);
         for (int i = 0; i < sessions.Count; i++)
         {
-            y = DrawSessionCard(dc, gfx, padX, y, contentW, cardH, sessions[i], headerH);
+            y = DrawSessionCard(dc, gfx, padX, y, contentW, cardH, sessions[i], headerH, bodyBottom);
             if (i < sessions.Count - 1)
                 y += gap;
         }
@@ -777,7 +821,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         _contentTotalH = (y - startY) + padV * 2;
         ClampScroll();
 
-        int viewH = h - headerH;
+        int viewH = bodyBottom - headerH;
         if (_contentTotalH > viewH && viewH > 20)
         {
             float ratio = (float)viewH / _contentTotalH;
@@ -789,7 +833,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     }
 
     private int DrawSessionCard(
-        nint dc, nint gfx, int x, int y, int w, int cardH, MediaSessionInfo s, int headerH)
+        nint dc, nint gfx, int x, int y, int w, int cardH, MediaSessionInfo s, int headerH, int bodyBottom)
     {
         bool isTarget = _snapshot.ActiveTarget != null &&
                         string.Equals(_snapshot.ActiveTarget.SessionId, s.SessionId, StringComparison.Ordinal);
@@ -843,7 +887,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         GdiPlus.FillRoundedRect(gfx, x + pad, y + S(50), w - pad * 2, Math.Max(1, S(1)), 0f,
             GdiPlus.Argb(Theme.BorderSubtle, 140));
 
-        if (y + cardH > headerH)
+        if (y + cardH > headerH && y < bodyBottom)
         {
             var captured = s;
             RegisterScrollableHit(
@@ -854,25 +898,26 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                     _ = _engine.FocusSessionAsync(captured.SessionId);
                     Hide();
                 },
-                headerH);
+                headerH,
+                bodyBottom);
 
-            DrawTransportBtn(gfx, $"fly_prev_{s.SessionId}", 0, prevX, btnY, btnSz, false, headerH,
+            DrawTransportBtn(gfx, $"fly_prev_{s.SessionId}", 0, prevX, btnY, btnSz, false, headerH, bodyBottom,
                 () => _ = _engine.DispatchMediaActionToSessionAsync(captured.SessionId, MediaActionKind.Previous));
-            DrawTransportBtn(gfx, $"fly_play_{s.SessionId}", captured.IsPlaying ? 2 : 1, playX, btnY, btnSz, true, headerH,
+            DrawTransportBtn(gfx, $"fly_play_{s.SessionId}", captured.IsPlaying ? 2 : 1, playX, btnY, btnSz, true, headerH, bodyBottom,
                 () => _ = _engine.DispatchMediaActionToSessionAsync(captured.SessionId, MediaActionKind.PlayPause));
-            DrawTransportBtn(gfx, $"fly_next_{s.SessionId}", 3, nextX, btnY, btnSz, false, headerH,
+            DrawTransportBtn(gfx, $"fly_next_{s.SessionId}", 3, nextX, btnY, btnSz, false, headerH, bodyBottom,
                 () => _ = _engine.DispatchMediaActionToSessionAsync(captured.SessionId, MediaActionKind.Next));
-            DrawLockBtn(gfx, $"fly_lock_{s.SessionId}", lockX, btnY, btnSz, isLocked, headerH,
+            DrawLockBtn(gfx, $"fly_lock_{s.SessionId}", lockX, btnY, btnSz, isLocked, headerH, bodyBottom,
                 () => _engine.ToggleManualLockOnActiveOrSelected(captured.SessionId));
 
             DrawVolumeRow(dc, gfx, $"fly_vol_{s.SessionId}", captured.SessionId, captured.Volume, captured.IsMuted,
-                x + pad, y + S(55), w - pad * 2, S(26), headerH);
+                x + pad, y + S(55), w - pad * 2, S(26), headerH, bodyBottom);
         }
 
         return y + cardH;
     }
 
-    private void DrawTransportBtn(nint gfx, string id, int kind, int x, int y, int sz, bool accent, int headerH, Action onClick)
+    private void DrawTransportBtn(nint gfx, string id, int kind, int x, int y, int sz, bool accent, int headerH, int bodyBottom, Action onClick)
     {
         bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
         uint bg = accent
@@ -918,10 +963,10 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             }
         }
 
-        RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + sz, Bottom = y + sz }, id, onClick, headerH);
+        RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + sz, Bottom = y + sz }, id, onClick, headerH, bodyBottom);
     }
 
-    private void DrawLockBtn(nint gfx, string id, int x, int y, int sz, bool isLocked, int headerH, Action onClick)
+    private void DrawLockBtn(nint gfx, string id, int x, int y, int sz, bool isLocked, int headerH, int bodyBottom, Action onClick)
     {
         bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
         uint bg = isLocked ? Theme.AmberSoft : (hovered ? Theme.BgControlHover : Theme.BgControl);
@@ -954,12 +999,12 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         }
 
         GdiPlus.FillRoundedRect(gfx, bx, by, bw, bh, SF(2f), GdiPlus.Argb(fg));
-        RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + sz, Bottom = y + sz }, id, onClick, headerH);
+        RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + sz, Bottom = y + sz }, id, onClick, headerH, bodyBottom);
     }
 
     private void DrawVolumeRow(
         nint dc, nint gfx, string idPrefix, string sessionId,
-        float volume, bool isMuted, int x, int y, int w, int h, int headerH)
+        float volume, bool isMuted, int x, int y, int w, int h, int headerH, int bodyBottom)
     {
         int muteSz = S(22);
         int muteX = x;
@@ -978,7 +1023,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             new Win32.RECT { Left = muteX, Top = muteY, Right = muteX + muteSz, Bottom = muteY + muteSz },
             muteId,
             () => _ = _engine.ToggleSessionMuteAsync(sessionId),
-            headerH);
+            headerH,
+            bodyBottom);
 
         int pctW = S(36);
         int pctX = x + w - pctW;
@@ -1020,10 +1066,11 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         }
 
         int hitTop = Math.Max(headerH, y);
-        if (y + h > hitTop)
+        int hitBottom = Math.Min(bodyBottom, y + h);
+        if (hitBottom > hitTop)
         {
             _sliderRegions.Add(new SliderRegion(
-                new Win32.RECT { Left = trackX - S(4), Top = hitTop, Right = trackX + trackW + S(4), Bottom = y + h },
+                new Win32.RECT { Left = trackX - S(4), Top = hitTop, Right = trackX + trackW + S(4), Bottom = hitBottom },
                 sliderId,
                 sessionId,
                 trackX,
@@ -1035,12 +1082,269 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             isMuted && !isDraggingThis ? Theme.Red : Theme.TextSecondary, centered: true);
     }
 
-    private void RegisterScrollableHit(Win32.RECT bounds, string id, Action onClick, int headerH)
+    private void RegisterScrollableHit(Win32.RECT bounds, string id, Action onClick, int headerH, int bodyBottom = int.MaxValue)
     {
         if (bounds.Top < headerH)
             bounds.Top = headerH;
+        if (bounds.Bottom > bodyBottom)
+            bounds.Bottom = bodyBottom;
         if (bounds.Bottom > bounds.Top && bounds.Right > bounds.Left)
             _hitRegions.Add(new HitRegion(bounds, id, onClick));
+    }
+
+    private void DrawDrawer(nint dc, nint gfx, int w, int drawerY, int drawerH)
+    {
+        GdiPlus.FillRoundedRect(gfx, 0, drawerY, w, drawerH, 0, GdiPlus.Argb(Theme.BgWindow));
+        GdiPlus.FillRoundedRect(gfx, 0, drawerY, w, 1, 0, GdiPlus.Argb(Theme.BorderSubtle));
+
+        int padX = S(10);
+        if (_openDrawer == FlyoutDrawer.AudioDevices)
+        {
+            if (_outputDevices.Count == 0)
+            {
+                DrawText(dc, Strings.FlyoutNoAudioDevices, padX, drawerY, w - padX, drawerY + drawerH,
+                    11, Win32.FW_NORMAL, Theme.TextSecondary, centered: true);
+                return;
+            }
+
+            int rowH = S(28);
+            int rowGap = S(4);
+            int maxShow = Math.Min(_outputDevices.Count, 5);
+            int ry = drawerY + S(6);
+            for (int i = 0; i < maxShow; i++)
+            {
+                var dev = _outputDevices[i];
+                string id = $"fly_dev_{i}";
+                bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+                uint bg = dev.IsDefault
+                    ? Theme.AccentSoft
+                    : (hovered ? Theme.BgControlHover : Theme.BgCard);
+                uint border = dev.IsDefault ? Theme.Accent : Theme.BorderSubtle;
+
+                GdiPlus.FillAndStrokeRoundedRect(gfx, padX, ry, w - padX * 2, rowH, SF(6),
+                    GdiPlus.Argb(bg), GdiPlus.Argb(border));
+
+                int dotSz = S(7);
+                int dotX = padX + S(10);
+                int dotY = ry + (rowH - dotSz) / 2;
+                if (dev.IsDefault)
+                {
+                    if (GdiPlus.GdipCreateSolidFill(GdiPlus.Argb(Theme.Accent), out nint dBr) == 0 && dBr != 0)
+                    {
+                        try { GdiPlus.GdipFillEllipse(gfx, dBr, dotX, dotY, dotSz, dotSz); }
+                        finally { GdiPlus.GdipDeleteBrush(dBr); }
+                    }
+                }
+                else
+                {
+                    if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(Theme.TextMuted), MathF.Max(1.1f, SF(1.1f)), GdiPlus.UnitPixel, out nint dPen) == 0 && dPen != 0)
+                    {
+                        try { GdiPlus.GdipDrawEllipse(gfx, dPen, dotX, dotY, dotSz, dotSz); }
+                        finally { GdiPlus.GdipDeletePen(dPen); }
+                    }
+                }
+
+                DrawText(dc, dev.Name, dotX + dotSz + S(8), ry, w - padX - S(10), ry + rowH,
+                    11, dev.IsDefault ? Win32.FW_SEMIBOLD : Win32.FW_NORMAL,
+                    dev.IsDefault ? Theme.Accent : Theme.TextPrimary);
+
+                var capturedDev = dev;
+                _hitRegions.Add(new HitRegion(
+                    new Win32.RECT { Left = padX, Top = ry, Right = w - padX, Bottom = ry + rowH },
+                    id,
+                    () =>
+                    {
+                        _engine.SelectOutputDevice(capturedDev.Id, capturedDev.Name);
+                        _openDrawer = FlyoutDrawer.None;
+                        _outputDevices = _engine.GetOutputDevices();
+                        PositionAndResize();
+                    }));
+
+                ry += rowH + rowGap;
+            }
+        }
+        else if (_openDrawer == FlyoutDrawer.SleepTimer)
+        {
+            int[] presets = [15, 30, 45, 60];
+            bool hasActive = _engine.GetSleepTimerRemaining().HasValue;
+            int count = presets.Length + (hasActive ? 1 : 0);
+            int gap = S(6);
+            int availW = w - padX * 2;
+            int pillW = (availW - gap * (count - 1)) / count;
+            int pillH = S(28);
+            int pillY = drawerY + (drawerH - pillH) / 2;
+            int px = padX;
+
+            foreach (int mins in presets)
+            {
+                string id = $"fly_sleep_set_{mins}";
+                bool hovered = string.Equals(_hoverId, id, StringComparison.Ordinal);
+                GdiPlus.FillAndStrokeRoundedRect(gfx, px, pillY, pillW, pillH, SF(6),
+                    GdiPlus.Argb(hovered ? Theme.BgControlHover : Theme.BgCard),
+                    GdiPlus.Argb(hovered ? Theme.Accent : Theme.BorderStrong));
+                DrawText(dc, Strings.FlyoutSleepMinutes(mins), px + S(2), pillY, px + pillW - S(2), pillY + pillH,
+                    10, Win32.FW_SEMIBOLD, hovered ? Theme.Accent : Theme.TextPrimary, centered: true);
+
+                int capturedMins = mins;
+                _hitRegions.Add(new HitRegion(
+                    new Win32.RECT { Left = px, Top = pillY, Right = px + pillW, Bottom = pillY + pillH },
+                    id,
+                    () =>
+                    {
+                        _engine.StartSleepTimer(capturedMins);
+                        _openDrawer = FlyoutDrawer.None;
+                        PositionAndResize();
+                    }));
+                px += pillW + gap;
+            }
+
+            if (hasActive)
+            {
+                const string cancelId = "fly_sleep_cancel";
+                bool hovered = string.Equals(_hoverId, cancelId, StringComparison.Ordinal);
+                GdiPlus.FillAndStrokeRoundedRect(gfx, px, pillY, pillW, pillH, SF(6),
+                    GdiPlus.Argb(hovered ? Theme.RedSoft : Theme.BgCard),
+                    GdiPlus.Argb(Theme.Red));
+                DrawText(dc, Strings.FlyoutSleepCancel, px + S(2), pillY, px + pillW - S(2), pillY + pillH,
+                    10, Win32.FW_SEMIBOLD, Theme.Red, centered: true);
+                _hitRegions.Add(new HitRegion(
+                    new Win32.RECT { Left = px, Top = pillY, Right = px + pillW, Bottom = pillY + pillH },
+                    cancelId,
+                    () =>
+                    {
+                        _engine.CancelSleepTimer();
+                        _openDrawer = FlyoutDrawer.None;
+                        PositionAndResize();
+                    }));
+            }
+        }
+    }
+
+    private void DrawFooter(nint dc, nint gfx, int w, int footerY, int footerH)
+    {
+        GdiPlus.FillRoundedRect(gfx, 0, footerY, w, footerH, 0, GdiPlus.Argb(Theme.BgHeader));
+        GdiPlus.FillRoundedRect(gfx, 0, footerY, w, 1, 0, GdiPlus.Argb(Theme.BorderSubtle));
+
+        int padX = S(10);
+        int btnH = S(28);
+        int btnY = footerY + (footerH - btnH) / 2;
+
+        var sleepRem = _engine.GetSleepTimerRemaining();
+        string sleepLabel = sleepRem.HasValue
+            ? $"{(int)sleepRem.Value.TotalMinutes:D2}:{sleepRem.Value.Seconds:D2}"
+            : Strings.FlyoutSleepLabel;
+
+        int sleepW = Math.Clamp(MeasureTextWidth(dc, sleepLabel, 10, Win32.FW_SEMIBOLD) + S(32), S(78), S(112));
+        int sleepX = w - padX - sleepW;
+        int devX = padX;
+        int devW = Math.Max(S(100), sleepX - S(6) - devX);
+
+        // Output device switcher button
+        string activeDevName = Strings.FlyoutAudioDeviceFallback;
+        foreach (var dev in _outputDevices)
+        {
+            if (dev.IsDefault)
+            {
+                activeDevName = dev.Name;
+                break;
+            }
+        }
+
+        const string devBtnId = "fly_footer_audio";
+        bool devOpen = _openDrawer == FlyoutDrawer.AudioDevices;
+        bool devHover = string.Equals(_hoverId, devBtnId, StringComparison.Ordinal);
+        uint devBg = devOpen ? Theme.AccentSoft : (devHover ? Theme.BgControlHover : Theme.BgControl);
+        uint devBorder = devOpen ? Theme.Accent : Theme.BorderSubtle;
+        uint devFg = devOpen ? Theme.Accent : Theme.TextPrimary;
+
+        GdiPlus.FillAndStrokeRoundedRect(gfx, devX, btnY, devW, btnH, SF(7), GdiPlus.Argb(devBg), GdiPlus.Argb(devBorder));
+        DrawSpeakerGlyph(gfx, devX + S(6), btnY + (btnH - S(16)) / 2, S(16), isMuted: false, devFg);
+        DrawText(dc, activeDevName, devX + S(25), btnY, devX + devW - S(20), btnY + btnH,
+            10, Win32.FW_SEMIBOLD, devFg);
+        DrawSmallChevron(gfx, devX + devW - S(12), btnY + btnH / 2, pointingDown: devOpen, devOpen ? Theme.Accent : Theme.TextSecondary);
+
+        _hitRegions.Add(new HitRegion(
+            new Win32.RECT { Left = devX, Top = btnY, Right = devX + devW, Bottom = btnY + btnH },
+            devBtnId,
+            () =>
+            {
+                _openDrawer = _openDrawer == FlyoutDrawer.AudioDevices ? FlyoutDrawer.None : FlyoutDrawer.AudioDevices;
+                if (_openDrawer == FlyoutDrawer.AudioDevices)
+                    _outputDevices = _engine.GetOutputDevices();
+                PositionAndResize();
+            }));
+
+        // Sleep timer button
+        const string sleepBtnId = "fly_footer_sleep";
+        bool sleepOpen = _openDrawer == FlyoutDrawer.SleepTimer;
+        bool sleepActive = sleepRem.HasValue;
+        bool sleepHover = string.Equals(_hoverId, sleepBtnId, StringComparison.Ordinal);
+        uint sleepBg = sleepActive
+            ? Theme.AmberSoft
+            : (sleepOpen ? Theme.AccentSoft : (sleepHover ? Theme.BgControlHover : Theme.BgControl));
+        uint sleepBorder = sleepActive ? Theme.Amber : (sleepOpen ? Theme.Accent : Theme.BorderSubtle);
+        uint sleepFg = sleepActive ? Theme.Amber : (sleepOpen ? Theme.Accent : Theme.TextSecondary);
+
+        GdiPlus.FillAndStrokeRoundedRect(gfx, sleepX, btnY, sleepW, btnH, SF(7), GdiPlus.Argb(sleepBg), GdiPlus.Argb(sleepBorder));
+        DrawClockGlyph(gfx, sleepX + S(8), btnY + (btnH - S(12)) / 2, S(12), sleepFg);
+        DrawText(dc, sleepLabel, sleepX + S(22), btnY, sleepX + sleepW - S(6), btnY + btnH,
+            10, Win32.FW_SEMIBOLD, sleepFg, centered: true);
+
+        _hitRegions.Add(new HitRegion(
+            new Win32.RECT { Left = sleepX, Top = btnY, Right = sleepX + sleepW, Bottom = btnY + btnH },
+            sleepBtnId,
+            () =>
+            {
+                _openDrawer = _openDrawer == FlyoutDrawer.SleepTimer ? FlyoutDrawer.None : FlyoutDrawer.SleepTimer;
+                PositionAndResize();
+            }));
+    }
+
+    private void DrawSmallChevron(nint gfx, int cx, int cy, bool pointingDown, uint colorRgb)
+    {
+        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.3f, SF(1.4f)), GdiPlus.UnitPixel, out nint pen) != 0 || pen == 0)
+            return;
+        try
+        {
+            GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
+            GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
+            float dx = S(3);
+            float dy = S(2);
+            if (pointingDown)
+            {
+                GdiPlus.GdipDrawLine(gfx, pen, cx - dx, cy - dy, cx, cy + dy);
+                GdiPlus.GdipDrawLine(gfx, pen, cx, cy + dy, cx + dx, cy - dy);
+            }
+            else
+            {
+                GdiPlus.GdipDrawLine(gfx, pen, cx - dx, cy + dy, cx, cy - dy);
+                GdiPlus.GdipDrawLine(gfx, pen, cx, cy - dy, cx + dx, cy + dy);
+            }
+        }
+        finally
+        {
+            GdiPlus.GdipDeletePen(pen);
+        }
+    }
+
+    private void DrawClockGlyph(nint gfx, int x, int y, int sz, uint colorRgb)
+    {
+        if (GdiPlus.GdipCreatePen1(GdiPlus.Argb(colorRgb), MathF.Max(1.1f, SF(1.15f)), GdiPlus.UnitPixel, out nint pen) != 0 || pen == 0)
+            return;
+        try
+        {
+            GdiPlus.GdipSetPenStartCap(pen, GdiPlus.LineCapRound);
+            GdiPlus.GdipSetPenEndCap(pen, GdiPlus.LineCapRound);
+            GdiPlus.GdipDrawEllipse(gfx, pen, x, y, sz, sz);
+            float cx = x + sz / 2f;
+            float cy = y + sz / 2f;
+            GdiPlus.GdipDrawLine(gfx, pen, cx, cy, cx, y + sz * 0.24f);
+            GdiPlus.GdipDrawLine(gfx, pen, cx, cy, x + sz * 0.74f, cy);
+        }
+        finally
+        {
+            GdiPlus.GdipDeletePen(pen);
+        }
     }
 
     private void DrawAppIconOrMonogram(
@@ -1252,6 +1556,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         if (_disposed) return;
         _disposed = true;
         _engine.StateChanged -= OnStateChanged;
+        _engine.SleepTimerChanged -= OnSleepTimerChanged;
         _stateStore.StateChanged -= OnStoreChanged;
 
         if (_hwnd != 0)

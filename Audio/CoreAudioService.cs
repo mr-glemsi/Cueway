@@ -10,6 +10,11 @@ internal readonly record struct AudioProcessState(
     float Volume,
     float Peak);
 
+internal readonly record struct AudioOutputDevice(
+    string Id,
+    string Name,
+    bool IsDefault);
+
 internal sealed class CoreAudioService : IDisposable
 {
     private readonly object _lock = new();
@@ -17,9 +22,11 @@ internal sealed class CoreAudioService : IDisposable
     private CoreAudio.NotificationClientCcw? _ccw;
     private nint _notificationEnumerator;
     private long _lastDeviceEventTick;
+    private long _suppressDeviceGuardUntilTick;
     private bool _disposed;
 
     public event Action<string>? DefaultOutputDeviceChanged;
+    public event Action? OutputDevicesChanged;
 
     public void StartEndpointNotifications()
     {
@@ -62,7 +69,226 @@ internal sealed class CoreAudioService : IDisposable
             return;
 
         Interlocked.Exchange(ref _lastDeviceEventTick, now);
+        OutputDevicesChanged?.Invoke();
+
+        if (reason is "DeviceAdded" or "DeviceEnabled")
+            return;
+        if (reason == "DefaultOutputChanged" && now <= Interlocked.Read(ref _suppressDeviceGuardUntilTick))
+            return;
+
         DefaultOutputDeviceChanged?.Invoke(reason);
+    }
+
+    public unsafe List<AudioOutputDevice> GetOutputDevices()
+    {
+        var devices = new List<AudioOutputDevice>();
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        bool mustUninit = coHr == 0 || coHr == 1;
+
+        nint enumerator = 0;
+        nint collection = 0;
+        nint defaultDevice = 0;
+
+        try
+        {
+            if (CoreAudio.CreateDeviceEnumerator(out enumerator) != 0 || enumerator == 0)
+                return devices;
+
+            string defaultId = string.Empty;
+            if (CoreAudio.Enumerator_GetDefaultAudioEndpoint(enumerator, CoreAudio.eRender, CoreAudio.eMultimedia, out defaultDevice) == 0 &&
+                defaultDevice != 0)
+            {
+                CoreAudio.Device_GetId(defaultDevice, out defaultId);
+            }
+
+            if (CoreAudio.Enumerator_EnumAudioEndpoints(enumerator, CoreAudio.eRender, CoreAudio.DEVICE_STATE_ACTIVE, out collection) == 0 &&
+                collection != 0 &&
+                CoreAudio.DeviceCollection_GetCount(collection, out uint devCount) == 0 &&
+                devCount > 0)
+            {
+                uint cap = Math.Min(devCount, 32);
+                for (uint d = 0; d < cap; d++)
+                {
+                    nint dev = 0;
+                    nint store = 0;
+                    CoreAudio.PROPVARIANT pv = default;
+                    bool pvValid = false;
+                    try
+                    {
+                        if (CoreAudio.DeviceCollection_Item(collection, d, out dev) != 0 || dev == 0)
+                            continue;
+                        if (CoreAudio.Device_GetId(dev, out string devId) != 0 || string.IsNullOrWhiteSpace(devId))
+                            continue;
+
+                        string name = devId;
+                        if (CoreAudio.Device_OpenPropertyStore(dev, CoreAudio.STGM_READ, out store) == 0 && store != 0)
+                        {
+                            if (CoreAudio.PropertyStore_GetValue(store, in CoreAudio.PKEY_Device_FriendlyName, out pv) == 0)
+                            {
+                                pvValid = true;
+                                if (pv.vt == CoreAudio.VT_LPWSTR && pv.data1 != 0)
+                                {
+                                    string? friendly = Marshal.PtrToStringUni(pv.data1);
+                                    if (!string.IsNullOrWhiteSpace(friendly))
+                                        name = friendly.Trim();
+                                }
+                            }
+                        }
+
+                        bool isDef = !string.IsNullOrEmpty(defaultId) &&
+                                     string.Equals(devId, defaultId, StringComparison.OrdinalIgnoreCase);
+                        devices.Add(new AudioOutputDevice(devId, name, isDef));
+                    }
+                    finally
+                    {
+                        if (pvValid) Win32.PropVariantClear(&pv);
+                        if (store != 0) CoreAudio.Release(store);
+                        if (dev != 0) CoreAudio.Release(dev);
+                    }
+                }
+            }
+
+            devices.Sort((a, b) =>
+            {
+                int defCmp = b.IsDefault.CompareTo(a.IsDefault);
+                return defCmp != 0 ? defCmp : string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            });
+        }
+        catch
+        {
+            // Ignore transient audio service errors during hardware switch
+        }
+        finally
+        {
+            if (defaultDevice != 0) CoreAudio.Release(defaultDevice);
+            if (collection != 0) CoreAudio.Release(collection);
+            if (enumerator != 0) CoreAudio.Release(enumerator);
+            if (mustUninit) Win32.CoUninitialize();
+        }
+
+        return devices;
+    }
+
+    public bool SetDefaultOutputDevice(string deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId))
+            return false;
+
+        Interlocked.Exchange(ref _suppressDeviceGuardUntilTick, Environment.TickCount64 + 1500);
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        bool mustUninit = coHr == 0 || coHr == 1;
+        try
+        {
+            bool ok = CoreAudio.PolicyConfig_SetDefaultEndpoint(deviceId);
+            if (ok)
+                OutputDevicesChanged?.Invoke();
+            return ok;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (mustUninit) Win32.CoUninitialize();
+        }
+    }
+
+    public AudioOutputDevice? CycleDefaultOutputDevice()
+    {
+        var devices = GetOutputDevices();
+        if (devices.Count < 2)
+            return null;
+
+        int defIdx = devices.FindIndex(d => d.IsDefault);
+        int nextIdx = defIdx >= 0 ? (defIdx + 1) % devices.Count : 0;
+        var next = devices[nextIdx];
+        return SetDefaultOutputDevice(next.Id) ? next with { IsDefault = true } : null;
+    }
+
+    public bool IsAnyMicrophoneSessionActive()
+    {
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        bool mustUninit = coHr == 0 || coHr == 1;
+        uint selfPid = (uint)Environment.ProcessId;
+
+        nint enumerator = 0;
+        nint collection = 0;
+        try
+        {
+            if (CoreAudio.CreateDeviceEnumerator(out enumerator) != 0 || enumerator == 0)
+                return false;
+
+            if (CoreAudio.Enumerator_EnumAudioEndpoints(enumerator, CoreAudio.eCapture, CoreAudio.DEVICE_STATE_ACTIVE, out collection) != 0 ||
+                collection == 0 ||
+                CoreAudio.DeviceCollection_GetCount(collection, out uint devCount) != 0 ||
+                devCount == 0)
+            {
+                return false;
+            }
+
+            uint cap = Math.Min(devCount, 16);
+            for (uint d = 0; d < cap; d++)
+            {
+                nint device = 0;
+                nint mgr = 0;
+                nint sessionEnum = 0;
+                try
+                {
+                    if (CoreAudio.DeviceCollection_Item(collection, d, out device) != 0 || device == 0)
+                        continue;
+                    if (CoreAudio.Device_Activate(device, in CoreAudio.IID_IAudioSessionManager2, CoreAudio.CLSCTX_ALL, out mgr) != 0 || mgr == 0)
+                        continue;
+                    if (CoreAudio.SessionManager2_GetSessionEnumerator(mgr, out sessionEnum) != 0 || sessionEnum == 0)
+                        continue;
+                    if (CoreAudio.SessionEnumerator_GetCount(sessionEnum, out int count) != 0 || count <= 0)
+                        continue;
+
+                    for (int i = 0; i < count; i++)
+                    {
+                        nint ctrl = 0;
+                        nint ctrl2 = 0;
+                        try
+                        {
+                            if (CoreAudio.SessionEnumerator_GetSession(sessionEnum, i, out ctrl) != 0 || ctrl == 0)
+                                continue;
+                            if (CoreAudio.SessionControl_GetState(ctrl, out int state) != 0 || state != CoreAudio.AudioSessionStateActive)
+                                continue;
+                            if (CoreAudio.QueryInterface(ctrl, in CoreAudio.IID_IAudioSessionControl2, out ctrl2) != 0 || ctrl2 == 0)
+                                continue;
+                            if (CoreAudio.SessionControl2_IsSystemSoundsSession(ctrl2) == 0)
+                                continue;
+                            if (CoreAudio.SessionControl2_GetProcessId(ctrl2, out uint pid) != 0 || pid == 0 || pid == selfPid)
+                                continue;
+                            return true;
+                        }
+                        finally
+                        {
+                            if (ctrl2 != 0) CoreAudio.Release(ctrl2);
+                            if (ctrl != 0) CoreAudio.Release(ctrl);
+                        }
+                    }
+                }
+                finally
+                {
+                    if (sessionEnum != 0) CoreAudio.Release(sessionEnum);
+                    if (mgr != 0) CoreAudio.Release(mgr);
+                    if (device != 0) CoreAudio.Release(device);
+                }
+            }
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (collection != 0) CoreAudio.Release(collection);
+            if (enumerator != 0) CoreAudio.Release(enumerator);
+            if (mustUninit) Win32.CoUninitialize();
+        }
+
+        return false;
     }
 
     public Dictionary<uint, AudioProcessState> GetAudioStatesByPid()

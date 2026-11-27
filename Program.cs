@@ -16,6 +16,7 @@ namespace Cueway;
 internal static unsafe class Program
 {
     private const nuint TIMER_REFRESH_POLL = 8001;
+    private const nuint TIMER_SLEEP_TICK = 8002;
     private const uint POLL_INTERVAL_VISIBLE_MS = 2000;
     private const uint POLL_INTERVAL_HIDDEN_ACTIVE_MS = 3500;
     private const uint POLL_INTERVAL_HIDDEN_IDLE_MS = 6000;
@@ -55,7 +56,7 @@ internal static unsafe class Program
             using var iconRenderer = new DynamicIconRenderer();
 
             using var mainWindow = new MainWindow(stateStore, sessionManager, engine, iconRenderer, startupService, bridgeServer, updateService);
-            using var tray = new TrayController(mainWindow.Handle, iconRenderer, stateStore, updateService);
+            using var tray = new TrayController(mainWindow.Handle, iconRenderer, stateStore, updateService, () => engine.GetSleepTimerRemaining());
             using var flyout = new TrayFlyoutWindow(stateStore, engine, iconRenderer, () => tray.TryGetIconRect());
             using var osd = new OsdOverlayWindow(iconRenderer);
             using var keyboardHook = new KeyboardHookService(mainWindow.Handle, stateStore, engine);
@@ -66,12 +67,14 @@ internal static unsafe class Program
             bool isWindowVisible = false;
             bool hasLiveSessions = false;
             uint currentPollMs = 0;
+            bool sleepTimerActive = false;
 
             void UpdatePollTimer()
             {
+                bool micWatch = stateStore.GetSettingsSnapshot().MicDuckingEnabled;
                 uint desired = isWindowVisible
                     ? POLL_INTERVAL_VISIBLE_MS
-                    : (hasLiveSessions ? POLL_INTERVAL_HIDDEN_ACTIVE_MS : POLL_INTERVAL_HIDDEN_IDLE_MS);
+                    : (hasLiveSessions ? (micWatch ? POLL_INTERVAL_VISIBLE_MS : POLL_INTERVAL_HIDDEN_ACTIVE_MS) : POLL_INTERVAL_HIDDEN_IDLE_MS);
                 if (desired != currentPollMs && mainWindow.Handle != 0)
                 {
                     currentPollMs = desired;
@@ -82,6 +85,7 @@ internal static unsafe class Program
             void ShutdownApp()
             {
                 Win32.KillTimer(mainWindow.Handle, TIMER_REFRESH_POLL);
+                Win32.KillTimer(mainWindow.Handle, TIMER_SLEEP_TICK);
                 Win32.PostQuitMessage(0);
             }
 
@@ -100,6 +104,11 @@ internal static unsafe class Program
                     if (timerId == TIMER_REFRESH_POLL)
                     {
                         _ = sessionManager.RefreshAsync();
+                        return true;
+                    }
+                    if (timerId == TIMER_SLEEP_TICK)
+                    {
+                        engine.TickSleepTimer();
                         return true;
                     }
                     keyboardHook.HandleTimer(timerId);
@@ -147,7 +156,25 @@ internal static unsafe class Program
             flyout.OpenSettingsRequested += () => mainWindow.ShowAndFocus(settingsTab: true);
             tray.ToggleManualLockRequested += () => engine.ToggleManualLockOnActiveOrSelected();
             tray.ToggleSoloModeRequested += () => engine.ToggleSoloMode();
+            tray.SleepTimerSelected += mins => engine.StartSleepTimer(mins);
+            tray.SleepTimerCancelRequested += () => engine.CancelSleepTimer();
             tray.ExitRequested += ShutdownApp;
+
+            stateStore.StateChanged += () => mainWindow.BeginInvoke(() => UpdatePollTimer());
+            audioService.OutputDevicesChanged += () => mainWindow.BeginInvoke(() => flyout.RefreshAudioDevices());
+            engine.SleepTimerChanged += () => mainWindow.BeginInvoke(() =>
+            {
+                bool active = engine.IsSleepTimerActive;
+                if (active != sleepTimerActive && mainWindow.Handle != 0)
+                {
+                    sleepTimerActive = active;
+                    if (active)
+                        Win32.SetTimer(mainWindow.Handle, TIMER_SLEEP_TICK, 1000, 0);
+                    else
+                        Win32.KillTimer(mainWindow.Handle, TIMER_SLEEP_TICK);
+                }
+                tray.Update(engine.GetSnapshot());
+            });
 
             engine.StateChanged += snap => mainWindow.BeginInvoke(() =>
             {
