@@ -92,7 +92,7 @@ Key Features:
 • Instant Tab Focus: Click any media session inside Cueway to bring that exact browser window and tab straight to the foreground.
 • Privacy First: Connects strictly over localhost (ws://127.0.0.1:47621) to your local Cueway app. Query strings/tokens are stripped, and zero data is ever transmitted to external servers.
 
-Requires the Cueway Windows desktop application on Windows 10/11.
+Requires the Cueway Windows desktop application.
 ```
 
 **Search Terms (Keywords):**

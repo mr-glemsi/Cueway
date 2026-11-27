@@ -4,7 +4,7 @@
 
 # Cueway
 
-Lightweight media key router and per-tab media controller for Windows 10 and 11.
+Lightweight native media & audio controller for Windows — priority media key routing, per-tab volume control, and instant tray controls.
 
 <p>
   <a href="https://github.com/mr-glemsi/Cueway/releases/latest">
@@ -13,7 +13,7 @@ Lightweight media key router and per-tab media controller for Windows 10 and 11.
   <a href="https://microsoftedge.microsoft.com/addons/detail/cueway-companion/cebckhofejojabmcfeinkdclglibafmk">
     <img src="https://img.shields.io/badge/Edge%20Add--ons-Available-0078D7?style=flat-square" alt="Edge Add-ons" />
   </a>
-  <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-111827?style=flat-square" alt="Windows 10/11" />
+  <img src="https://img.shields.io/badge/Platform-Windows-111827?style=flat-square" alt="Windows" />
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-MIT-374151?style=flat-square" alt="MIT License" />
   </a>
@@ -33,17 +33,20 @@ Download the latest Windows installer (`Cueway-Setup-x64.exe`) from the [Release
 
 ## Features
 
-- Priority-based routing for hardware media keys and playback controls
-- Per-tab playback, volume, mute, and focus control through the companion browser extension
-- EarTrumpet-style tray quick control flyout on left-click with a built-in audio output switcher (headphones ↔ speakers) and optional cycle shortcut
-- Per-site volume memory for browser tabs (enabled by default, with one-click clear)
-- Automatic detection of active desktop audio sources, with or without Windows SMTC support
-- Smart audio ducking for new media and voice call / microphone activity
-- 10-second fade-out sleep timer from the tray flyout and context menu
-- Optional global target volume hotkeys (`Volume Up`, `Volume Down`, `Mute`) for the active player or tab
-- Manual target lock (`Alt+M`), solo mode (`Alt+S`), and one-click ignore list for unwanted apps or sites
-- Fullscreen game detection and automatic pause/resume for lower-priority players
-- Lightweight native Windows build with 13 interface languages, custom themes, and a system tray interface
+**Media Routing & Browser Control**
+- Priority-based routing for hardware media keys across desktop apps and individual browser tabs (Chrome, Edge, Brave, Opera, Firefox, Zen)
+- Automatic detection of desktop audio sources (with or without Windows SMTC) and embedded iframe web players
+- Manual target lock, solo mode, and fullscreen game guard
+
+**Tray & Smart Audio**
+- Compact tray quick-control flyout with per-session playback controls, volume sliders, and an instant audio output switcher (headphones ↔ speakers)
+- Per-site volume memory for browser tabs so noisy websites stay at your preferred level
+- Smart audio ducking for new media and active voice calls / microphone sessions, plus a 10-second fade-out sleep timer
+
+**Native & Customizable**
+- Fast Native AOT Windows build with low idle footprint and an in-app auto-updater
+- Optional global hotkeys (playback, target volume, mute, output device cycle, per-app priority) and a one-click ignore list
+- Custom Theme Studio and 13 interface languages
 
 ## Settings & Customization
 
