@@ -69,12 +69,6 @@ dotnet publish Cueway.csproj -c Release -r win-x64
 & "C:\Program Files\Inno Setup 7\ISCC.exe" Cueway.iss
 ```
 
-## Code Signing Policy
-
-Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
-
-See [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md) for signing scope, build provenance, and maintainer roles.
-
 ## Privacy
 
 Cueway runs entirely locally and does not collect or send user data. See [PRIVACY.md](PRIVACY.md) for details.
