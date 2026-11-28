@@ -48,10 +48,24 @@ Download the latest Windows installer (`Cueway-Setup-x64.exe`) from the [Release
 - Optional global hotkeys (playback, target volume, mute, output device cycle, per-app priority) and a one-click ignore list
 - Custom Theme Studio and 13 interface languages
 
-## Settings & Customization
+## Interface & Customization
+
+### Application Priority & Ignore List
 
 <div align="center">
-  <img src="Assets/preview-settings.png" alt="Cueway Settings and Themes" width="820" />
+  <img src="Assets/preview-apps.png" alt="Cueway Application Priority Order" width="820" />
+</div>
+
+### Themes & Appearance
+
+<div align="center">
+  <img src="Assets/preview-themes.png" alt="Cueway Color Themes" width="820" />
+</div>
+
+### System & Extension Settings
+
+<div align="center">
+  <img src="Assets/preview-settings.png" alt="Cueway System Settings" width="820" />
 </div>
 
 ## Browser Extensions
@@ -75,12 +89,3 @@ dotnet publish Cueway.csproj -c Release -r win-x64
 
 # Installer (optional)
 & "C:\Program Files\Inno Setup 7\ISCC.exe" Cueway.iss
-```
-
-## Privacy
-
-Cueway runs entirely locally and does not collect or send user data. See [PRIVACY.md](PRIVACY.md) for details.
-
-## License
-
-[MIT](LICENSE)
