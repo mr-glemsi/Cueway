@@ -34,7 +34,7 @@ Download the latest Windows installer (`Cueway-Setup-x64.exe`) from the [Release
 ## Features
 
 **Media Routing & Browser Control**
-- Priority-based routing for hardware media keys across desktop apps and individual browser tabs (Chrome, Edge, Brave, Opera, Firefox, Zen)
+- Priority-based routing for hardware media keys across desktop apps and individual browser tabs 
 - Automatic detection of desktop audio sources (with or without Windows SMTC) and embedded iframe web players
 - Manual target lock, solo mode, and fullscreen game guard
 
