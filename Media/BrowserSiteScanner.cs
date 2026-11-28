@@ -743,22 +743,29 @@ internal static unsafe partial class BrowserSiteScanner
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     private static int EnumBrowserWindowProc(nint hwnd, nint lParam)
     {
-        var pids = _enumTargetPids;
-        var list = _enumFoundWindows;
-        if (pids == null || list == null)
-            return 0;
-
-        if (!Win32.IsWindowVisible(hwnd))
-            return 1;
-
-        Win32.GetWindowThreadProcessId(hwnd, out uint pid);
-        if (pid != 0 && pids.Contains((int)pid))
+        try
         {
-            string title = Win32.GetWindowText(hwnd);
-            if (!string.IsNullOrWhiteSpace(title))
-                list.Add(new BrowserWindowInfo(hwnd, title));
+            var pids = _enumTargetPids;
+            var list = _enumFoundWindows;
+            if (pids == null || list == null)
+                return 0;
+
+            if (!Win32.IsWindowVisible(hwnd))
+                return 1;
+
+            Win32.GetWindowThreadProcessId(hwnd, out uint pid);
+            if (pid != 0 && pids.Contains((int)pid))
+            {
+                string title = Win32.GetWindowText(hwnd);
+                if (!string.IsNullOrWhiteSpace(title))
+                    list.Add(new BrowserWindowInfo(hwnd, title));
+            }
+            return 1;
         }
-        return 1;
+        catch
+        {
+            return 1;
+        }
     }
 
     private static List<OpenTabInfo> GetGeckoOpenTabs(string browserAppKey)
@@ -965,6 +972,7 @@ internal static unsafe partial class BrowserSiteScanner
         try
         {
             byte[] data;
+            int readTotal = 0;
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
                 long len = fs.Length;
@@ -972,14 +980,13 @@ internal static unsafe partial class BrowserSiteScanner
                     return;
 
                 data = new byte[(int)len];
-                int read = 0;
-                while (read < data.Length)
+                while (readTotal < data.Length)
                 {
-                    int n = fs.Read(data, read, data.Length - read);
+                    int n = fs.Read(data, readTotal, data.Length - readTotal);
                     if (n <= 0) break;
-                    read += n;
+                    readTotal += n;
                 }
-                if (read < 12)
+                if (readTotal < 12)
                     return;
             }
 
@@ -987,11 +994,11 @@ internal static unsafe partial class BrowserSiteScanner
                 return;
 
             int pos = 8;
-            while (pos + 2 <= data.Length)
+            while (pos + 2 <= readTotal)
             {
                 ushort size = (ushort)(data[pos] | (data[pos + 1] << 8));
                 pos += 2;
-                if (size == 0 || pos + size > data.Length)
+                if (size == 0 || pos + size > readTotal)
                     break;
 
                 byte cmdId = data[pos];

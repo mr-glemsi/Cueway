@@ -50,6 +50,13 @@ internal enum UpdatePhase
     Failed = 6
 }
 
+internal enum UpdateErrorKind
+{
+    None = 0,
+    CheckFailed = 1,
+    DownloadOrInstallFailed = 2
+}
+
 internal sealed record UpdateSnapshot(
     UpdatePhase Phase,
     string CurrentVersion,
@@ -58,7 +65,16 @@ internal sealed record UpdateSnapshot(
     long TotalBytes,
     string? DownloadedFilePath,
     string? ErrorMessage,
-    bool Dismissed);
+    bool Dismissed,
+    UpdateErrorKind ErrorKind = UpdateErrorKind.None)
+{
+    public string? ResolveErrorMessage() => ErrorKind switch
+    {
+        UpdateErrorKind.CheckFailed => Strings.SetUpdateSubFailed,
+        UpdateErrorKind.DownloadOrInstallFailed => Strings.UpdateFailedBanner,
+        _ => ErrorMessage
+    };
+}
 
 internal sealed class AppUpdateService : IDisposable
 {
@@ -220,7 +236,8 @@ internal sealed class AppUpdateService : IDisposable
                 _snapshot = _snapshot with
                 {
                     Phase = UpdatePhase.Checking,
-                    ErrorMessage = null
+                    ErrorMessage = null,
+                    ErrorKind = UpdateErrorKind.None
                 };
             }
         }
@@ -320,7 +337,8 @@ internal sealed class AppUpdateService : IDisposable
                     {
                         Phase = UpdatePhase.Failed,
                         ErrorMessage = Strings.SetUpdateSubFailed,
-                        Dismissed = false
+                        Dismissed = false,
+                        ErrorKind = UpdateErrorKind.CheckFailed
                     };
                 }
             }
@@ -377,8 +395,9 @@ internal sealed class AppUpdateService : IDisposable
         string url;
         string targetVer;
         long expectedSize;
-        CancellationTokenSource cts;
+        CancellationTokenSource? cts = null;
 
+        bool readyToInstallImmediate = false;
         lock (_syncLock)
         {
             if (_disposed || _snapshot.Phase == UpdatePhase.Downloading)
@@ -404,28 +423,35 @@ internal sealed class AppUpdateService : IDisposable
                     cached,
                     null,
                     false);
-                NotifyStateChanged();
-                return;
+                readyToInstallImmediate = true;
             }
+            else
+            {
+                _downloadCts?.Cancel();
+                _downloadCts?.Dispose();
+                cts = new CancellationTokenSource();
+                _downloadCts = cts;
 
-            _downloadCts?.Cancel();
-            _downloadCts?.Dispose();
-            cts = new CancellationTokenSource();
-            _downloadCts = cts;
+                _snapshot = new UpdateSnapshot(
+                    UpdatePhase.Downloading,
+                    _currentVersion,
+                    targetVer,
+                    0,
+                    expectedSize,
+                    null,
+                    null,
+                    false);
+            }
+        }
 
-            _snapshot = new UpdateSnapshot(
-                UpdatePhase.Downloading,
-                _currentVersion,
-                targetVer,
-                0,
-                expectedSize,
-                null,
-                null,
-                false);
+        if (readyToInstallImmediate)
+        {
+            NotifyStateChanged();
+            return;
         }
 
         NotifyStateChanged();
-        _ = Task.Run(() => DownloadWorkerAsync(url, targetVer, expectedSize, cts));
+        _ = Task.Run(() => DownloadWorkerAsync(url, targetVer, expectedSize, cts!));
     }
 
     public void CancelDownload()
@@ -441,28 +467,27 @@ internal sealed class AppUpdateService : IDisposable
                 {
                     Phase = UpdatePhase.Available,
                     BytesDownloaded = 0,
-                    ErrorMessage = null
+                    ErrorMessage = null,
+                    ErrorKind = UpdateErrorKind.None
                 };
             }
         }
 
         try { cts?.Cancel(); } catch { }
-        try { cts?.Dispose(); } catch { }
         NotifyStateChanged();
     }
 
     private async Task DownloadWorkerAsync(string url, string targetVer, long expectedAssetSize, CancellationTokenSource cts)
     {
-        Directory.CreateDirectory(_updatesDir);
         string safeVer = SanitizeFileToken(targetVer);
         string finalName = $"Cueway-Setup-x64-{safeVer}.exe";
         string finalPath = Path.Combine(_updatesDir, finalName);
         string partPath = finalPath + ".part";
 
-        CleanupUpdatesDirectory(keepFileName: finalName);
-
         try
         {
+            Directory.CreateDirectory(_updatesDir);
+            CleanupUpdatesDirectory(keepFileName: finalName);
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
             using var resp = await GetOrCreateHttpClient().SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
             resp.EnsureSuccessStatusCode();
@@ -512,7 +537,18 @@ internal sealed class AppUpdateService : IDisposable
             if (!IsValidPeExecutable(partPath, _minDownloadBytes, expectedExact))
                 throw new InvalidDataException("Downloaded update package failed integrity verification.");
 
-            File.Move(partPath, finalPath, overwrite: true);
+            for (int moveAttempt = 0; moveAttempt < 4; moveAttempt++)
+            {
+                try
+                {
+                    File.Move(partPath, finalPath, overwrite: true);
+                    break;
+                }
+                catch (IOException) when (moveAttempt < 3)
+                {
+                    await Task.Delay(120, cts.Token).ConfigureAwait(false);
+                }
+            }
 
             lock (_syncLock)
             {
@@ -550,7 +586,8 @@ internal sealed class AppUpdateService : IDisposable
                         Phase = UpdatePhase.Failed,
                         BytesDownloaded = 0,
                         ErrorMessage = Strings.UpdateFailedBanner,
-                        Dismissed = false
+                        Dismissed = false,
+                        ErrorKind = UpdateErrorKind.DownloadOrInstallFailed
                     };
                     notifyFail = true;
                 }
@@ -587,7 +624,8 @@ internal sealed class AppUpdateService : IDisposable
                     Phase = UpdatePhase.Failed,
                     DownloadedFilePath = null,
                     ErrorMessage = Strings.UpdateFailedBanner,
-                    Dismissed = false
+                    Dismissed = false,
+                    ErrorKind = UpdateErrorKind.DownloadOrInstallFailed
                 };
             }
             NotifyStateChanged();
@@ -602,7 +640,7 @@ internal sealed class AppUpdateService : IDisposable
                 Arguments = "/SP- /SILENT /SUPPRESSMSGBOXES /NORESTART",
                 UseShellExecute = true
             };
-            Process.Start(psi);
+            using var _ = Process.Start(psi);
             errorMessage = null;
             return true;
         }
@@ -801,7 +839,6 @@ internal sealed class AppUpdateService : IDisposable
             _http = null;
         }
         try { cts?.Cancel(); } catch { }
-        try { cts?.Dispose(); } catch { }
         try { http?.Dispose(); } catch { }
     }
 }

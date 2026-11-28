@@ -24,6 +24,14 @@ internal static unsafe class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            WriteCrashLog("UnhandledException", e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            WriteCrashLog("UnobservedTaskException", e.Exception);
+            e.SetObserved();
+        };
+
         bool startMinimized = args.Any(a =>
             a.Equals("--minimized", StringComparison.OrdinalIgnoreCase) ||
             a.Equals("-minimized", StringComparison.OrdinalIgnoreCase));
@@ -87,7 +95,6 @@ internal static unsafe class Program
             {
                 Win32.KillTimer(mainWindow.Handle, TIMER_REFRESH_POLL);
                 Win32.KillTimer(mainWindow.Handle, TIMER_SLEEP_TICK);
-                bridgeServer.Dispose();
                 Win32.PostQuitMessage(0);
             }
 
@@ -179,12 +186,14 @@ internal static unsafe class Program
                         Win32.KillTimer(mainWindow.Handle, TIMER_SLEEP_TICK);
                 }
                 tray.Update(engine.GetSnapshot());
-                mainWindow.RefreshVisuals();
+                mainWindow.RefreshVisuals(clearIcons: false);
             });
 
             engine.StateChanged += snap => mainWindow.BeginInvoke(() =>
             {
                 tray.Update(snap);
+                if (snap.Sessions.Count > 0)
+                    iconRenderer.WarmupIconsAsync(snap.Sessions.Select(s => ((string?)s.AppKey, (string?)s.ExePath)));
                 bool live = snap.Sessions.Count > 0;
                 if (live != hasLiveSessions)
                 {
@@ -201,7 +210,9 @@ internal static unsafe class Program
                     {
                         tray.ForceRefresh(engine.GetSnapshot());
                         mainWindow.InvalidateIconCache();
-                        mainWindow.RefreshVisuals();
+                        flyout.InvalidateIconCache();
+                        iconRenderer.FlushRetiredIcons();
+                        mainWindow.RefreshVisuals(clearIcons: false);
                         flyout.RefreshVisuals();
                     });
                 }
@@ -253,10 +264,22 @@ internal static unsafe class Program
 
             // Win32 STA message loop
             var msg = new Win32.MSG();
-            while (Win32.GetMessageW(&msg, 0, 0, 0) > 0)
+            int gm;
+            while ((gm = Win32.GetMessageW(&msg, 0, 0, 0)) > 0)
             {
-                Win32.TranslateMessage(&msg);
-                Win32.DispatchMessageW(&msg);
+                try
+                {
+                    Win32.TranslateMessage(&msg);
+                    Win32.DispatchMessageW(&msg);
+                }
+                catch (Exception ex)
+                {
+                    WriteCrashLog("MessageLoop", ex);
+                }
+            }
+            if (gm == -1)
+            {
+                WriteCrashLog("GetMessageW(-1)", null);
             }
         }
         finally
@@ -270,70 +293,131 @@ internal static unsafe class Program
         return 0;
     }
 
-    private static void EnsureSingleInstanceCleanly()
+    private static void WriteCrashLog(string source, Exception? ex)
     {
-        int currentPid = Environment.ProcessId;
-        string currentName;
-        using (var self = Process.GetCurrentProcess())
-            currentName = self.ProcessName;
-
-        Process[] existing;
         try
         {
-            existing = Process.GetProcessesByName(currentName);
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Cueway");
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, "crash.log");
+            string entry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{source}] {ex?.ToString() ?? "Unknown error"}{Environment.NewLine}{Environment.NewLine}";
+            if (File.Exists(path) && new FileInfo(path).Length > 512 * 1024)
+            {
+                File.WriteAllText(path, entry);
+            }
+            else
+            {
+                File.AppendAllText(path, entry);
+            }
         }
         catch
         {
-            return;
+            // Ignore logging errors during shutdown/crash
         }
+    }
 
-        var others = new List<Process>();
-        foreach (var p in existing)
+    private static void EnsureSingleInstanceCleanly()
+    {
+        Mutex? startupMutex = null;
+        bool mutexAcquired = false;
+        try
         {
-            if (p.Id != currentPid)
-                others.Add(p);
-            else
-                p.Dispose();
-        }
-
-        if (others.Count == 0)
-            return;
-
-        // Ask any previous Cueway (or legacy WinMediaRouter) window to exit gracefully (restores ducked audio & removes tray icon)
-        Win32.EnumWindows(&NotifyOldWindowProc, 0);
-
-        var deadline = Environment.TickCount64 + 1200;
-        foreach (var proc in others)
-        {
+            startupMutex = new Mutex(false, @"Local\Cueway_Startup_Mutex");
             try
             {
-                int waitMs = (int)Math.Max(50, deadline - Environment.TickCount64);
-                if (!proc.WaitForExit(waitMs))
+                mutexAcquired = startupMutex.WaitOne(3000);
+            }
+            catch (AbandonedMutexException)
+            {
+                mutexAcquired = true;
+            }
+        }
+        catch
+        {
+            startupMutex?.Dispose();
+            startupMutex = null;
+        }
+
+        try
+        {
+            int currentPid = Environment.ProcessId;
+            string currentName;
+            using (var self = Process.GetCurrentProcess())
+                currentName = self.ProcessName;
+
+            Process[] existing;
+            try
+            {
+                existing = Process.GetProcessesByName(currentName);
+            }
+            catch
+            {
+                return;
+            }
+
+            var others = new List<Process>();
+            foreach (var p in existing)
+            {
+                if (p.Id != currentPid)
+                    others.Add(p);
+                else
+                    p.Dispose();
+            }
+
+            if (others.Count == 0)
+                return;
+
+            // Ask any previous Cueway (or legacy WinMediaRouter) window to exit gracefully (restores ducked audio & removes tray icon)
+            Win32.EnumWindows(&NotifyOldWindowProc, 0);
+
+            var deadline = Environment.TickCount64 + 1200;
+            foreach (var proc in others)
+            {
+                try
                 {
-                    proc.Kill();
-                    proc.WaitForExit(500);
+                    int waitMs = (int)Math.Max(50, deadline - Environment.TickCount64);
+                    if (!proc.WaitForExit(waitMs))
+                    {
+                        proc.Kill();
+                        proc.WaitForExit(500);
+                    }
+                }
+                catch { }
+                finally
+                {
+                    proc.Dispose();
                 }
             }
-            catch { }
-            finally
+        }
+        finally
+        {
+            if (mutexAcquired)
             {
-                proc.Dispose();
+                try { startupMutex?.ReleaseMutex(); }
+                catch { }
             }
+            startupMutex?.Dispose();
         }
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     private static int NotifyOldWindowProc(nint hwnd, nint lParam)
     {
-        string cls = Win32.GetWindowClassName(hwnd);
-        if (cls == "Cueway_MainWindow" || cls == "WinMediaRouter_MainWindow")
+        try
         {
-            Win32.GetWindowThreadProcessId(hwnd, out uint pid);
-            if (pid != 0 && pid != Environment.ProcessId)
+            string cls = Win32.GetWindowClassName(hwnd);
+            if (cls == "Cueway_MainWindow" || cls == "WinMediaRouter_MainWindow")
             {
-                Win32.PostMessageW(hwnd, MainWindow.WM_APP_SHUTDOWN_INSTANCE, 0, 0);
+                Win32.GetWindowThreadProcessId(hwnd, out uint pid);
+                if (pid != 0 && pid != Environment.ProcessId)
+                {
+                    Win32.PostMessageW(hwnd, MainWindow.WM_APP_SHUTDOWN_INSTANCE, 0, 0);
+                }
             }
         }
+        catch { }
         return 1;
     }
 }

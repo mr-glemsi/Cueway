@@ -2,7 +2,7 @@
 
 #define MyAppName "Cueway"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.5.0"
+  #define MyAppVersion "1.5.1"
 #endif
 #define MyAppPublisher "Cueway"
 #define MyAppExeName "Cueway.exe"

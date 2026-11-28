@@ -44,10 +44,12 @@ internal sealed class BrowserBridgeServer : IDisposable
         public async Task<bool> SendFrameAsync(byte opcode, ReadOnlyMemory<byte> payload, CancellationToken ct = default)
         {
             if (_disposed) return false;
-            await WriteLock.WaitAsync(ct).ConfigureAwait(false);
             byte[]? frame = null;
+            bool lockTaken = false;
             try
             {
+                await WriteLock.WaitAsync(ct).ConfigureAwait(false);
+                lockTaken = true;
                 if (_disposed) return false;
                 int len = payload.Length;
                 int hdrLen = len <= 125 ? 2 : (len <= 65535 ? 4 : 10);
@@ -84,7 +86,10 @@ internal sealed class BrowserBridgeServer : IDisposable
             finally
             {
                 if (frame != null) ArrayPool<byte>.Shared.Return(frame);
-                try { WriteLock.Release(); } catch { }
+                if (lockTaken)
+                {
+                    try { WriteLock.Release(); } catch { }
+                }
             }
         }
 
@@ -104,7 +109,6 @@ internal sealed class BrowserBridgeServer : IDisposable
             try { Client.Client.Shutdown(SocketShutdown.Both); } catch { }
             try { Stream.Dispose(); } catch { }
             try { Client.Dispose(); } catch { }
-            try { WriteLock.Dispose(); } catch { }
         }
     }
 
@@ -352,9 +356,7 @@ internal sealed class BrowserBridgeServer : IDisposable
             while (!ct.IsCancellationRequested)
             {
                 var client = await listener.AcceptTcpClientAsync(ct).ConfigureAwait(false);
-                client.NoDelay = true;
-                try { client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true); } catch { }
-                _ = Task.Run(() => HandleClientAsync(client, ct), ct);
+                _ = Task.Run(() => HandleClientAsync(client, ct));
             }
         }
         catch
@@ -368,6 +370,8 @@ internal sealed class BrowserBridgeServer : IDisposable
         BridgeClientConnection? conn = null;
         try
         {
+            client.NoDelay = true;
+            try { client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true); } catch { }
             using var stream = client.GetStream();
 
             using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -498,7 +502,8 @@ internal sealed class BrowserBridgeServer : IDisposable
         {
             using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             idleCts.CancelAfter(ClientReadIdleTimeoutMs);
-            if (!await ReadExactAsync(conn.Stream, headerBuf, 2, idleCts.Token).ConfigureAwait(false))
+            var readCt = idleCts.Token;
+            if (!await ReadExactAsync(conn.Stream, headerBuf, 2, readCt).ConfigureAwait(false))
                 break;
 
             bool fin = (headerBuf[0] & 0x80) != 0;
@@ -511,13 +516,13 @@ internal sealed class BrowserBridgeServer : IDisposable
 
             if (payloadLen == 126)
             {
-                if (!await ReadExactAsync(conn.Stream, lenBuf, 2, ct).ConfigureAwait(false))
+                if (!await ReadExactAsync(conn.Stream, lenBuf, 2, readCt).ConfigureAwait(false))
                     break;
                 payloadLen = BinaryPrimitives.ReadUInt16BigEndian(lenBuf.AsSpan(0, 2));
             }
             else if (payloadLen == 127)
             {
-                if (!await ReadExactAsync(conn.Stream, lenBuf, 8, ct).ConfigureAwait(false))
+                if (!await ReadExactAsync(conn.Stream, lenBuf, 8, readCt).ConfigureAwait(false))
                     break;
                 payloadLen = BinaryPrimitives.ReadUInt64BigEndian(lenBuf);
             }
@@ -525,7 +530,7 @@ internal sealed class BrowserBridgeServer : IDisposable
             if (payloadLen > MaxPayloadBytes)
                 break;
 
-            if (!await ReadExactAsync(conn.Stream, maskKey, 4, ct).ConfigureAwait(false))
+            if (!await ReadExactAsync(conn.Stream, maskKey, 4, readCt).ConfigureAwait(false))
                 break;
 
             int intLen = (int)payloadLen;
@@ -534,7 +539,7 @@ internal sealed class BrowserBridgeServer : IDisposable
             {
                 if (payload != null && intLen > 0)
                 {
-                    if (!await ReadExactAsync(conn.Stream, payload, intLen, ct).ConfigureAwait(false))
+                    if (!await ReadExactAsync(conn.Stream, payload, intLen, readCt).ConfigureAwait(false))
                         break;
 
                     for (int i = 0; i < intLen; i++)
@@ -625,7 +630,7 @@ internal sealed class BrowserBridgeServer : IDisposable
             ? null
             : msg.Browser.Trim().ToLowerInvariant();
 
-        switch (msg.Type.ToLowerInvariant())
+        switch ((msg.Type ?? string.Empty).ToLowerInvariant())
         {
             case "hello":
                 lock (_connLock)

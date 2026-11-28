@@ -22,7 +22,7 @@ internal static class WhatsNewCatalog
                     "GPU Aura トレイフライアウト",
                     "GPU 아우라 트레이 플라이아웃",
                     "Painel Aura GPU na Bandeja",
-                    "Flyout Aura GPU nella tray",
+                    "Flyout Aura GPU di sistema",
                     "Okno GPU Aura w zasobniku",
                     "GPU Aura -ilmoitusikkuna"),
                 Strings.Tr(
@@ -77,7 +77,7 @@ internal static class WhatsNewCatalog
                     "Надёжное автоприглушение звука",
                     "Zuverlässige Auto-Absenkung",
                     "Atténuation automatique fiable",
-                    "より確実な自動ダッキング",
+                    "より確実な自動音量低下",
                     "더 안정적인 자동 덕킹",
                     "Redução Automática Confiável",
                     "Attenuazione automatica affidabile",
@@ -109,7 +109,7 @@ internal static class WhatsNewCatalog
                     "ライブ枠付きトレイアイコン",
                     "실시간 상태 테두리 트레이 아이콘",
                     "Ícone da Bandeja com Moldura Viva",
-                    "Icona nella tray con cornice live",
+                    "Icona con cornice live",
                     "Ikona w zasobniku z żywą ramką",
                     "Reaaliaikainen kehystetty kuvake"),
                 Strings.Tr(
@@ -123,7 +123,7 @@ internal static class WhatsNewCatalog
                     "最優先アプリを状態カラー枠で囲むトレイアイコンを復元し、デーモン型プレーヤーでも本体GUIアイコンを自動取得するようにしました。",
                     "활성 우선순위 앱 아이콘을 상태별 색상 테두리로 감싸는 트레이 아이콘을 복원하고, 데몬 기반 플레이어의 실제 GUI 아이콘도 찾아 표시합니다.",
                     "Restaura a moldura colorida por estado ao redor do app prioritário na bandeja e localiza o ícone gráfico real para players em daemon.",
-                    "Ripristina la cornice colorata per stato attorno all'icona dell'app prioritaria nella tray e risolve l'icona GUI reale per i player con daemon.",
+                    "Ripristina la cornice colorata per stato attorno all'icona dell'app prioritaria nella barra di sistema e risolve l'icona GUI reale per i player con daemon.",
                     "Przywraca kolorową ramkę statusu wokół ikony aplikacji priorytetowej w zasobniku oraz wyszukuje prawdziwą ikonę GUI dla odtwarzaczy działających w tle.",
                     "Palauttaa tilavärillä kehystetyn kuvakkeen ensisijaiselle sovellukselle ja hakee taustapalvelusoittimille niiden varsinaisen käyttöliittymäkuvakkeen.")),
             new WhatsNewItem(
@@ -171,19 +171,19 @@ internal static class WhatsNewCatalog
                     "Inteligentne przywracanie okien",
                     "Älykäs sovelluskohdistus"),
                 Strings.Tr(
-                    "Oynatıcı kartına tıklandığında arka planda çalışan veya sistem tepsisine gizlenmiş müzik uygulamalarını (örn. Kopuz) eşlikçi arayüzü üzerinden öne getirir.",
-                    "3-stage desktop focus now reliably brings up companion GUI windows and tray-hidden players like Kopuz when clicking a session.",
-                    "三阶段桌面聚焦逻辑可在点击会话卡片时可靠唤起 Kopuz 等守护进程与托盘隐藏播放器的主窗口。",
-                    "El enfoque de escritorio en 3 pasos ahora abre con fiabilidad ventanas auxiliares y reproductores ocultos en la bandeja como Kopuz.",
-                    "Трёхступенчатая фокусировка надёжно выводит на передний план окна-компаньоны и скрытые в трее плееры вроде Kopuz.",
-                    "Der 3-stufige Desktop-Fokus holt Begleit-GUIs und im Tray versteckte Player wie Kopuz zuverlässig in den Vordergrund.",
-                    "Le focus en 3 étapes affiche de manière fiable les interfaces compagnon et les lecteurs masqués dans la barre comme Kopuz.",
-                    "3段階のウィンドウフォーカスにより、Kopuz のようなデーモン型やトレイ常駐型の音楽アプリも確実に前面表示できるようになりました。",
-                    "3단계 데스크톱 포커스로 세션 클릭 시 Kopuz처럼 데몬이나 트레이에 숨겨진 음악 플레이어 창도 안정적으로 전면 호출합니다.",
-                    "O foco em 3 estágios traz com precisão janelas gráficas auxiliares e players ocultos na bandeja como o Kopuz ao clicar na sessão.",
-                    "Il focus a 3 fasi porta in primo piano in modo affidabile le finestre GUI e i player nascosti nella tray come Kopuz al clic sulla sessione.",
-                    "Trzyetapowe przywracanie okien niezawodnie wysuwa na wierzch aplikacje z daemonem oraz ukryte w zasobniku odtwarzacze, takie jak Kopuz.",
-                    "Kolmivaiheinen kohdistus tuo luotettavasti esiin taustapalvelua käyttävät ja ilmoitusalueelle piilotetut soittimet, kuten Kopuzin."))
+                    "Oynatıcı kartına tıklandığında arka planda çalışan veya sistem tepsisine gizlenmiş müzik uygulamalarını eşlikçi arayüzü üzerinden öne getirir.",
+                    "3-stage desktop focus now reliably brings up companion GUI windows and tray-hidden music players when clicking a session.",
+                    "三阶段桌面聚焦逻辑可在点击会话卡片时可靠唤起守护进程与托盘隐藏播放器的主窗口。",
+                    "El enfoque de escritorio en 3 pasos ahora abre con fiabilidad ventanas auxiliares y reproductores ocultos en la bandeja.",
+                    "Трёхступенчатая фокусировка надёжно выводит на передний план окна-компаньоны и скрытые в трее плееры.",
+                    "Der 3-stufige Desktop-Fokus holt Begleit-GUIs und im Tray versteckte Musikplayer zuverlässig in den Vordergrund.",
+                    "Le focus en 3 étapes affiche de manière fiable les interfaces compagnon et les lecteurs masqués dans la barre système.",
+                    "3段階のウィンドウフォーカスにより、デーモン型やトレイ常駐型の音楽アプリも確実に前面表示できるようになりました。",
+                    "3단계 데스크톱 포커스로 세션 클릭 시 데몬이나 트레이에 숨겨진 음악 플레이어 창도 안정적으로 전면 호출합니다.",
+                    "O foco em 3 estágios traz com precisão janelas gráficas auxiliares e players ocultos na bandeja ao clicar na sessão.",
+                    "Il focus a 3 fasi porta in primo piano in modo affidabile le finestre GUI e i player nascosti nella barra di sistema.",
+                    "Trzyetapowe przywracanie okien niezawodnie wysuwa na wierzch aplikacje z daemonem oraz ukryte w zasobniku odtwarzacze.",
+                    "Kolmivaiheinen kohdistus tuo luotettavasti esiin taustapalvelua käyttävät ja ilmoitusalueelle piilotetut musiikkisoittimet."))
         ]);
     }
 }

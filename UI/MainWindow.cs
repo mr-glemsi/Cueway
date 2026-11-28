@@ -19,6 +19,8 @@ internal sealed unsafe class MainWindow : IDisposable
     public const uint WM_APP_SHUTDOWN_INSTANCE = Win32.WM_APP + 201;
     public const uint WM_APP_ANIM_FRAME = Win32.WM_APP + 202;
     private const nuint TIMER_UI_ANIM = 8050;
+    private const nuint TIMER_IDLE_RELEASE = 8051;
+    private const uint IDLE_RELEASE_MS = 90_000;
     private const uint UI_ANIM_FALLBACK_MS = 8;
     private const int UI_HIGHLIGHT_DURATION_MS = 900;
     private const int UI_BRIDGE_PULSE_DURATION_MS = 1800;
@@ -71,6 +73,9 @@ internal sealed unsafe class MainWindow : IDisposable
 
     private readonly object _dispatchLock = new();
     private readonly Queue<Action> _uiQueue = new();
+    private int _invokePosted;
+    private int _wheelAccum;
+    private bool _hoverIsHand;
 
     private nint _hwnd;
     private nint _cursorArrow;
@@ -149,8 +154,22 @@ internal sealed unsafe class MainWindow : IDisposable
     private double _highlightTargetStartMs;
     private double _highlightBridgeStartMs;
     private bool _uiAnimTimerActive;
-    private bool _animFramePosted;
+    private int _vsyncPending;
     private double _lastFrameMs;
+    private static readonly WaitCallback VSyncWaitCallback = static state =>
+    {
+        var self = (MainWindow)state!;
+        int hr = Win32.DwmFlush();
+        nint targetHwnd = self._hwnd;
+        if (self._disposed || targetHwnd == 0 || Win32.IsIconic(targetHwnd))
+        {
+            Interlocked.Exchange(ref self._vsyncPending, 0);
+            return;
+        }
+        // wParam == 0 => exact VBlank repaint; wParam == 1 => DwmFlush unavailable, fall back to timer
+        if (!Win32.PostMessageW(targetHwnd, WM_APP_ANIM_FRAME, hr == 0 ? (nuint)0 : (nuint)1, 0))
+            Interlocked.Exchange(ref self._vsyncPending, 0);
+    };
     private bool _anySpringAnimating;
     private float _lastFrameDt = 0.016f;
     private float _heroAuraR;
@@ -210,6 +229,7 @@ internal sealed unsafe class MainWindow : IDisposable
         _startupService.StatusChanged += OnStartupStatusChanged;
         _bridgeServer.SessionsChanged += OnBridgeStatusChanged;
         _updateService.StateChanged += OnUpdateStateChanged;
+        _iconRenderer.IconsUpdated += OnIconsUpdated;
     }
 
     public void ConfigureHostHooks(
@@ -231,9 +251,9 @@ internal sealed unsafe class MainWindow : IDisposable
         _keyboardHook = keyboardHook;
     }
 
-    private void RefreshOutputDevicesCache()
+    private void RefreshOutputDevicesCache(bool fresh = false)
     {
-        _outputDevices = _engine.GetOutputDevices();
+        _outputDevices = fresh ? _engine.GetOutputDevices() : _engine.GetOutputDevicesCached();
         _defaultOutputDeviceId = AudioDeviceColors.GetDefaultDeviceId(_outputDevices);
         _deviceColors = AudioDeviceColors.BuildDeviceColorMap(_outputDevices, Theme.IsLight);
         _deviceColorsForLight = Theme.IsLight;
@@ -277,9 +297,8 @@ internal sealed unsafe class MainWindow : IDisposable
             {
                 string prefix = s[..parenIdx].Trim();
                 string inner = s[(parenIdx + 1)..closeIdx].Replace("(R)", "", StringComparison.OrdinalIgnoreCase).Trim();
-                if (prefix.Equals("Speakers", StringComparison.OrdinalIgnoreCase) ||
-                    prefix.Equals("Speaker", StringComparison.OrdinalIgnoreCase) ||
-                    prefix.Equals("Hoparlör", StringComparison.OrdinalIgnoreCase))
+                string fold = prefix.Replace('İ', 'i').Replace('I', 'i').ToLowerInvariant().Replace("\u0307", "");
+                if (fold is "speakers" or "speaker" or "hoparlör" or "hoparlor" or "headphones" or "headphone" or "headset" or "kulaklık" or "kulaklik")
                 {
                     s = string.IsNullOrEmpty(inner) ? prefix : $"{prefix} ({inner})";
                 }
@@ -290,7 +309,7 @@ internal sealed unsafe class MainWindow : IDisposable
 
     public void RefreshOutputDevices()
     {
-        RefreshOutputDevicesCache();
+        RefreshOutputDevicesCache(fresh: true);
         if (_openDropdown == DropdownKind.SessionOutputDevice)
         {
             _openDropdownOutputDevices = _outputDevices;
@@ -481,7 +500,7 @@ internal sealed unsafe class MainWindow : IDisposable
 
         Win32.SetWindowPos(_hwnd, 0, 0, 0, 0, 0,
             Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE | Win32.SWP_FRAMECHANGED);
-        Win32.RedrawWindow(_hwnd, null, 0, Win32.RDW_FRAME | Win32.RDW_INVALIDATE | Win32.RDW_UPDATENOW);
+        Win32.RedrawWindow(_hwnd, null, 0, Win32.RDW_FRAME | Win32.RDW_INVALIDATE);
     }
 
     public void BeginInvoke(Action action)
@@ -489,7 +508,8 @@ internal sealed unsafe class MainWindow : IDisposable
         if (_disposed || _hwnd == 0) return;
         lock (_dispatchLock)
             _uiQueue.Enqueue(action);
-        Win32.PostMessageW(_hwnd, WM_APP_DISPATCH, 0, 0);
+        if (Interlocked.Exchange(ref _invokePosted, 1) == 0)
+            Win32.PostMessageW(_hwnd, WM_APP_DISPATCH, 0, 0);
     }
 
     private static double NowMs() => Stopwatch.GetTimestamp() * (1000.0 / Stopwatch.Frequency);
@@ -510,7 +530,7 @@ internal sealed unsafe class MainWindow : IDisposable
         else
         {
             _openDropdown = kind;
-            _dropdownOpenMs = NowMs();
+            _dropdownOpenMs = _settings.ReducedAnimations ? 0 : -1.0;
             KickAnimations();
         }
     }
@@ -519,7 +539,7 @@ internal sealed unsafe class MainWindow : IDisposable
     {
         CloseOpenDropdown();
         _showWhatsNew = true;
-        _whatsNewOpenMs = NowMs();
+        _whatsNewOpenMs = _settings.ReducedAnimations ? 0 : -1.0;
         KickAnimations();
     }
 
@@ -531,12 +551,11 @@ internal sealed unsafe class MainWindow : IDisposable
         {
             if (!_settings.ReducedAnimations)
             {
-                double now = NowMs();
                 _tabSlideDir = (int)nextTab > (int)_activeTab ? 1 : -1;
-                _tabAnimStartMs = now;
+                _tabAnimStartMs = -1.0;
                 _navFromX = _navCurX;
                 _navFromW = _navCurW;
-                _navAnimStartMs = now;
+                _navAnimStartMs = -1.0;
             }
             else
             {
@@ -558,6 +577,7 @@ internal sealed unsafe class MainWindow : IDisposable
     public void ShowAndFocus(bool settingsTab = false)
     {
         if (_hwnd == 0) return;
+        Win32.KillTimer(_hwnd, TIMER_IDLE_RELEASE);
         CloseOpenDropdown();
         RefreshOutputDevicesCache();
         if (settingsTab)
@@ -584,14 +604,14 @@ internal sealed unsafe class MainWindow : IDisposable
             CancelHotkeyCapture();
             CloseOpenDropdown();
             _showWhatsNew = true;
-            _whatsNewOpenMs = NowMs();
+            _whatsNewOpenMs = _settings.ReducedAnimations ? 0 : -1.0;
         }
         if (Win32.IsIconic(_hwnd))
             Win32.ShowWindow(_hwnd, Win32.SW_RESTORE);
         else
             Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
 
-        Win32.SetForegroundWindow(_hwnd);
+        Win32.TryFocusWindow(_hwnd);
         VisibilityChanged?.Invoke(true);
         KickAnimations();
 
@@ -619,7 +639,6 @@ internal sealed unsafe class MainWindow : IDisposable
         if (_hwnd == 0) return;
         CancelHotkeyCapture();
         StopUiAnimTimer();
-        _animFramePosted = false;
         _lastFrameMs = 0;
         _anySpringAnimating = false;
         _highlightPrioAppKey = null;
@@ -639,17 +658,18 @@ internal sealed unsafe class MainWindow : IDisposable
         _prioAnimY.Clear();
         _prioTargetY.Clear();
         CloseOpenDropdown();
+        _themeEditorWindow?.CloseAndRevert();
+        _guideWindow?.HideDialog();
         _hoverId = null;
         _pressedHitId = null;
+        _hoverIsHand = false;
         Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
-        _d2d.ReleaseDeviceResources();
-        _d2d.ClearTextFormatCache();
         _hitRegions.Clear();
         _hitRegions.TrimExcess();
         _sliderRegions.Clear();
         _sliderRegions.TrimExcess();
         VisibilityChanged?.Invoke(false);
-        Win32.TrimWorkingSet();
+        Win32.SetTimer(_hwnd, TIMER_IDLE_RELEASE, IDLE_RELEASE_MS, 0);
     }
 
     internal void TriggerPriorityMoveFeedback(string appKey, bool movedUp)
@@ -954,10 +974,10 @@ internal sealed unsafe class MainWindow : IDisposable
             GetHighlightIntensity(_highlightPrioStartMs, nowMs) > 0.004f ||
             GetHighlightIntensity(_highlightTargetStartMs, nowMs) > 0.004f ||
             IsBridgePulseActive(_highlightBridgeStartMs, nowMs) ||
-            (_tabAnimStartMs > 0 && (nowMs - _tabAnimStartMs) < UI_SLIDE_DURATION_MS) ||
-            (_navAnimStartMs > 0 && (nowMs - _navAnimStartMs) < UI_SLIDE_DURATION_MS) ||
-            (_dropdownOpenMs > 0 && (nowMs - _dropdownOpenMs) < UI_POPOVER_DURATION_MS) ||
-            (_whatsNewOpenMs > 0 && (nowMs - _whatsNewOpenMs) < UI_MODAL_DURATION_MS));
+            _tabAnimStartMs < 0 || (_tabAnimStartMs > 0 && (nowMs - _tabAnimStartMs) < UI_SLIDE_DURATION_MS) ||
+            _navAnimStartMs < 0 || (_navAnimStartMs > 0 && (nowMs - _navAnimStartMs) < UI_SLIDE_DURATION_MS) ||
+            _dropdownOpenMs < 0 || (_dropdownOpenMs > 0 && (nowMs - _dropdownOpenMs) < UI_POPOVER_DURATION_MS) ||
+            _whatsNewOpenMs < 0 || (_whatsNewOpenMs > 0 && (nowMs - _whatsNewOpenMs) < UI_MODAL_DURATION_MS));
 
     private void EnsureUiAnimTimerState()
     {
@@ -985,12 +1005,20 @@ internal sealed unsafe class MainWindow : IDisposable
         }
     }
 
+    private void ScheduleNextVSyncFrame(nint hwnd)
+    {
+        if (_disposed || hwnd == 0)
+            return;
+        if (Interlocked.CompareExchange(ref _vsyncPending, 1, 0) != 0)
+            return;
+        ThreadPool.UnsafeQueueUserWorkItem(VSyncWaitCallback, this);
+    }
+
     private void HandleUiAnimTimer()
     {
         if (!Win32.IsWindowVisible(_hwnd) || !HasActiveUiAnimation(NowMs()))
         {
             StopUiAnimTimer();
-            _animFramePosted = false;
             return;
         }
         RequestRepaint();
@@ -1045,6 +1073,9 @@ internal sealed unsafe class MainWindow : IDisposable
             {
                 _deviceColors = AudioDeviceColors.BuildDeviceColorMap(_outputDevices, Theme.IsLight);
                 _deviceColorsForLight = Theme.IsLight;
+                _iconRenderer.InvalidateThemeDependentIcons();
+                _d2d.ClearIconCache();
+                _iconRenderer.FlushRetiredIcons();
                 _guideWindow?.RefreshLocalizationAndTheme();
                 _themeEditorWindow?.RefreshLocalizationAndTheme();
             }
@@ -1114,7 +1145,7 @@ internal sealed unsafe class MainWindow : IDisposable
         float size,
         float radius)
     {
-        nint hIcon = _iconRenderer.GetIconForApp(appKey, exePath);
+        nint hIcon = _iconRenderer.GetIconForAppNonBlocking(appKey, exePath);
         if (hIcon != 0 && _d2d.DrawIcon(hIcon, x, y, size))
             return;
 
@@ -1142,9 +1173,20 @@ internal sealed unsafe class MainWindow : IDisposable
 
     public void InvalidateIconCache() => _d2d.ClearIconCache();
 
-    public void RefreshVisuals() => BeginInvoke(() =>
+    private void OnIconsUpdated() => BeginInvoke(() =>
     {
         _d2d.ClearIconCache();
+        _iconRenderer.FlushRetiredIcons();
+        RequestRepaint();
+    });
+
+    public void RefreshVisuals(bool clearIcons = true) => BeginInvoke(() =>
+    {
+        if (clearIcons)
+        {
+            _d2d.ClearIconCache();
+            _iconRenderer.FlushRetiredIcons();
+        }
         RequestRepaint();
     });
 
@@ -1156,6 +1198,7 @@ internal sealed unsafe class MainWindow : IDisposable
 
     private void DrainDispatchQueue()
     {
+        Interlocked.Exchange(ref _invokePosted, 0);
         while (true)
         {
             Action? next = null;
@@ -1176,171 +1219,206 @@ internal sealed unsafe class MainWindow : IDisposable
         if (inst == null)
             return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
 
-        if (msg == inst._wmTaskbarCreated && inst._wmTaskbarCreated != 0)
+        try
         {
-            inst._taskbarCreatedCallback?.Invoke();
-            return 0;
-        }
-
-        switch (msg)
-        {
-            case WM_APP_DISPATCH:
-                inst.DrainDispatchQueue();
+            if (msg == inst._wmTaskbarCreated && inst._wmTaskbarCreated != 0)
+            {
+                inst._taskbarCreatedCallback?.Invoke();
                 return 0;
+            }
 
-            case WM_APP_ANIM_FRAME:
-                inst._animFramePosted = false;
-                if (Win32.IsWindowVisible(hwnd) && inst.HasActiveUiAnimation(NowMs()))
+            switch (msg)
+            {
+                case WM_APP_DISPATCH:
+                    inst.DrainDispatchQueue();
+                    return 0;
+
+                case WM_APP_ANIM_FRAME:
+                    Interlocked.Exchange(ref inst._vsyncPending, 0);
+                    if (wParam != 0)
+                    {
+                        inst.StartUiAnimTimer();
+                    }
+                    else if (Win32.IsWindowVisible(hwnd) && !Win32.IsIconic(hwnd) && inst.HasActiveUiAnimation(NowMs()))
+                    {
+                        Win32.InvalidateRect(hwnd, null, false);
+                    }
+                    return 0;
+
+                case WM_APP_SHUTDOWN_INSTANCE:
+                    inst.ExitRequested?.Invoke();
+                    return 0;
+
+                case TrayController.WM_TRAYICON:
+                    inst._trayMessageCallback?.Invoke(wParam, lParam);
+                    return 0;
+
+                case Win32.WM_TIMER:
+                    if (wParam == TIMER_UI_ANIM)
+                    {
+                        inst.HandleUiAnimTimer();
+                        return 0;
+                    }
+                    if (wParam == TIMER_IDLE_RELEASE)
+                    {
+                        Win32.KillTimer(hwnd, TIMER_IDLE_RELEASE);
+                        if (!Win32.IsWindowVisible(hwnd))
+                            inst._d2d.ReleaseDeviceResources();
+                        return 0;
+                    }
+                    if (inst._timerCallback != null && inst._timerCallback(wParam))
+                        return 0;
+                    break;
+
+                case Win32.WM_POWERBROADCAST:
+                    if (wParam == Win32.PBT_APMRESUMESUSPEND || wParam == Win32.PBT_APMRESUMEAUTOMATIC)
+                    {
+                        inst._wakeOrUnlockCallback?.Invoke();
+                    }
+                    return 1;
+
+                case Win32.WM_WTSSESSION_CHANGE:
+                    if (wParam == Win32.WTS_SESSION_UNLOCK)
+                    {
+                        inst._wakeOrUnlockCallback?.Invoke();
+                    }
+                    return 0;
+
+                case Win32.WM_SIZE:
+                    if ((int)wParam == Win32.SIZE_MINIMIZED)
+                    {
+                        inst.StopUiAnimTimer();
+                        return 0;
+                    }
+                    inst._clientW = Math.Max(1, (int)(lParam & 0xFFFF));
+                    inst._clientH = Math.Max(1, (int)((lParam >> 16) & 0xFFFF));
+                    inst._d2d.Resize(inst._clientW, inst._clientH);
+                    inst.ClampScroll();
                     Win32.InvalidateRect(hwnd, null, false);
-                return 0;
-
-            case WM_APP_SHUTDOWN_INSTANCE:
-                inst.ExitRequested?.Invoke();
-                return 0;
-
-            case TrayController.WM_TRAYICON:
-                inst._trayMessageCallback?.Invoke(wParam, lParam);
-                return 0;
-
-            case Win32.WM_TIMER:
-                if (wParam == TIMER_UI_ANIM)
-                {
-                    inst.HandleUiAnimTimer();
                     return 0;
-                }
-                if (inst._timerCallback != null && inst._timerCallback(wParam))
+
+                case Win32.WM_DPICHANGED:
+                    inst._dpi = (uint)(wParam & 0xFFFF);
+                    inst._d2d.ClearTextFormatCache();
+                    inst._d2d.ClearIconCache();
+                    var suggested = *(Win32.RECT*)lParam;
+                    Win32.SetWindowPos(hwnd, 0, suggested.Left, suggested.Top, suggested.Width, suggested.Height,
+                        Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
+                    Win32.InvalidateRect(hwnd, null, false);
                     return 0;
-                break;
 
-            case Win32.WM_POWERBROADCAST:
-                if (wParam == Win32.PBT_APMRESUMESUSPEND || wParam == Win32.PBT_APMRESUMEAUTOMATIC)
-                {
-                    inst._wakeOrUnlockCallback?.Invoke();
-                }
-                return 1;
-
-            case Win32.WM_WTSSESSION_CHANGE:
-                if (wParam == Win32.WTS_SESSION_UNLOCK)
-                {
-                    inst._wakeOrUnlockCallback?.Invoke();
-                }
-                return 0;
-
-            case Win32.WM_SIZE:
-                inst._clientW = Math.Max(1, (int)(lParam & 0xFFFF));
-                inst._clientH = Math.Max(1, (int)((lParam >> 16) & 0xFFFF));
-                inst._d2d.Resize(inst._clientW, inst._clientH);
-                inst.ClampScroll();
-                Win32.InvalidateRect(hwnd, null, false);
-                return 0;
-
-            case Win32.WM_DPICHANGED:
-                inst._dpi = (uint)(wParam & 0xFFFF);
-                inst._d2d.ClearTextFormatCache();
-                var suggested = *(Win32.RECT*)lParam;
-                Win32.SetWindowPos(hwnd, 0, suggested.Left, suggested.Top, suggested.Width, suggested.Height,
-                    Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
-                Win32.InvalidateRect(hwnd, null, false);
-                return 0;
-
-            case Win32.WM_GETMINMAXINFO:
-                var mmi = (Win32.MINMAXINFO*)lParam;
-                mmi->ptMinTrackSize.X = Theme.Scale(760, inst._dpi);
-                mmi->ptMinTrackSize.Y = Theme.Scale(540, inst._dpi);
-                return 0;
-
-            case Win32.WM_ERASEBKGND:
-                return 1;
-
-            case Win32.WM_PAINT:
-                inst.HandlePaint(hwnd);
-                return 0;
-
-            case Win32.WM_MOUSEMOVE:
-                inst.HandleMouseMove(lParam);
-                return 0;
-
-            case Win32.WM_MOUSELEAVE:
-                inst._trackingMouse = false;
-                if (inst._hoverId != null && inst._draggingSliderId == null)
-                {
-                    inst._hoverId = null;
-                    inst.KickAnimations();
-                }
-                return 0;
-
-            case Win32.WM_LBUTTONDOWN:
-                if (inst.HandleLeftButtonDown(lParam))
+                case Win32.WM_GETMINMAXINFO:
+                    var mmi = (Win32.MINMAXINFO*)lParam;
+                    mmi->ptMinTrackSize.X = Theme.Scale(760, inst._dpi);
+                    mmi->ptMinTrackSize.Y = Theme.Scale(540, inst._dpi);
                     return 0;
-                if (inst._pressedHitId != null)
-                    inst.RequestRepaint();
-                break;
 
-            case Win32.WM_CAPTURECHANGED:
-                inst._pressedHitId = null;
-                if (inst._draggingSliderId != null)
-                {
-                    inst._draggingSliderId = null;
-                    inst._draggingSessionId = null;
-                    inst.RequestRepaint();
-                }
-                return 0;
+                case Win32.WM_SETCURSOR:
+                    if ((lParam & 0xFFFF) == Win32.HTCLIENT)
+                    {
+                        Win32.SetCursor(inst._hoverIsHand && inst._cursorHand != 0 ? inst._cursorHand : inst._cursorArrow);
+                        return 1;
+                    }
+                    break;
 
-            case Win32.WM_LBUTTONUP:
-                inst.HandleLeftClick(lParam);
-                return 0;
+                case Win32.WM_ERASEBKGND:
+                    return 1;
 
-            case Win32.WM_MOUSEWHEEL:
-                short delta = unchecked((short)((long)wParam >> 16));
-                inst.HandleMouseWheel(delta);
-                return 0;
+                case Win32.WM_PAINT:
+                    inst.HandlePaint(hwnd);
+                    return 0;
 
-            case Win32.WM_ACTIVATE:
-                if ((wParam & 0xFFFF) == Win32.WA_INACTIVE)
-                {
+                case Win32.WM_MOUSEMOVE:
+                    inst.HandleMouseMove(lParam);
+                    return 0;
+
+                case Win32.WM_MOUSELEAVE:
+                    inst._trackingMouse = false;
+                    inst._hoverIsHand = false;
+                    if (inst._hoverId != null && inst._draggingSliderId == null)
+                    {
+                        inst._hoverId = null;
+                        inst.KickAnimations();
+                    }
+                    return 0;
+
+                case Win32.WM_LBUTTONDOWN:
+                    if (inst.HandleLeftButtonDown(lParam))
+                        return 0;
+                    if (inst._pressedHitId != null)
+                        inst.RequestRepaint();
+                    break;
+
+                case Win32.WM_CAPTURECHANGED:
+                    inst._pressedHitId = null;
+                    if (inst._draggingSliderId != null)
+                    {
+                        inst._draggingSliderId = null;
+                        inst._draggingSessionId = null;
+                        inst.RequestRepaint();
+                    }
+                    return 0;
+
+                case Win32.WM_LBUTTONUP:
+                    inst.HandleLeftClick(lParam);
+                    return 0;
+
+                case Win32.WM_MOUSEWHEEL:
+                    short delta = unchecked((short)((long)wParam >> 16));
+                    inst.HandleMouseWheel(delta);
+                    return 0;
+
+                case Win32.WM_ACTIVATE:
+                    if ((wParam & 0xFFFF) == Win32.WA_INACTIVE)
+                    {
+                        inst._pressedHitId = null;
+                        inst.CancelHotkeyCapture();
+                    }
+                    break;
+
+                case Win32.WM_KILLFOCUS:
                     inst._pressedHitId = null;
                     inst.CancelHotkeyCapture();
-                }
-                break;
+                    break;
 
-            case Win32.WM_KILLFOCUS:
-                inst._pressedHitId = null;
-                inst.CancelHotkeyCapture();
-                break;
+                case 0x0100: // WM_KEYDOWN
+                    if (wParam == 0x1B && inst._showWhatsNew)
+                    {
+                        inst.DismissWhatsNew();
+                        return 0;
+                    }
+                    if (wParam == 0x1B && inst._openDropdown != DropdownKind.None)
+                    {
+                        inst.CloseOpenDropdown();
+                        inst.RequestRepaint();
+                        return 0;
+                    }
+                    break;
 
-            case 0x0100: // WM_KEYDOWN
-                if (wParam == 0x1B && inst._showWhatsNew)
-                {
-                    inst.DismissWhatsNew();
+                case Win32.WM_CLOSE:
+                    if (inst._settings.MinimizeToTrayOnClose)
+                    {
+                        inst.HideToTray();
+                    }
+                    else
+                    {
+                        inst.CancelHotkeyCapture();
+                        inst.CloseOpenDropdown();
+                        inst.ExitRequested?.Invoke();
+                    }
                     return 0;
-                }
-                if (wParam == 0x1B && inst._openDropdown != DropdownKind.None)
-                {
-                    inst.CloseOpenDropdown();
-                    inst.RequestRepaint();
+
+                case Win32.WM_DESTROY:
+                    Win32.PostQuitMessage(0);
                     return 0;
-                }
-                break;
+            }
 
-            case Win32.WM_CLOSE:
-                if (inst._settings.MinimizeToTrayOnClose)
-                {
-                    inst.HideToTray();
-                }
-                else
-                {
-                    inst.CancelHotkeyCapture();
-                    inst.CloseOpenDropdown();
-                    inst.ExitRequested?.Invoke();
-                }
-                return 0;
-
-            case Win32.WM_DESTROY:
-                Win32.PostQuitMessage(0);
-                return 0;
+            return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
         }
-
-        return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+        catch
+        {
+            return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
     }
 
     private void HandleMouseMove(nint lParam)
@@ -1364,6 +1442,7 @@ internal sealed unsafe class MainWindow : IDisposable
         {
             float vol = Math.Clamp((float)(x - _dragTrackLeft) / Math.Max(1, _dragTrackWidth), 0f, 1f);
             _dragPreviewVolume = vol;
+            _hoverIsHand = true;
             Win32.SetCursor(_cursorHand != 0 ? _cursorHand : _cursorArrow);
 
             long nowTick = Environment.TickCount64;
@@ -1380,6 +1459,7 @@ internal sealed unsafe class MainWindow : IDisposable
         var topHit = FindHit(x, y);
         if (topHit != null && topHit.Id.EndsWith("_mute", StringComparison.Ordinal))
         {
+            _hoverIsHand = true;
             Win32.SetCursor(_cursorHand != 0 ? _cursorHand : _cursorArrow);
             if (!string.Equals(_hoverId, topHit.Id, StringComparison.Ordinal))
             {
@@ -1392,6 +1472,7 @@ internal sealed unsafe class MainWindow : IDisposable
         var slider = !_showWhatsNew && _openDropdown == DropdownKind.None ? FindSliderHit(x, y) : null;
         if (slider != null && (topHit == null || !topHit.IsButton))
         {
+            _hoverIsHand = true;
             Win32.SetCursor(_cursorHand != 0 ? _cursorHand : _cursorArrow);
             if (!string.Equals(_hoverId, slider.Id, StringComparison.Ordinal))
             {
@@ -1402,7 +1483,8 @@ internal sealed unsafe class MainWindow : IDisposable
         }
 
         string? nextHover = topHit?.Id;
-        Win32.SetCursor(topHit != null && topHit.IsButton && _cursorHand != 0 ? _cursorHand : _cursorArrow);
+        _hoverIsHand = topHit != null && topHit.IsButton;
+        Win32.SetCursor(_hoverIsHand && _cursorHand != 0 ? _cursorHand : _cursorArrow);
 
         if (!string.Equals(_hoverId, nextHover, StringComparison.Ordinal))
         {
@@ -1478,7 +1560,7 @@ internal sealed unsafe class MainWindow : IDisposable
         }
         if (hit != null && pressedId != null && string.Equals(pressedId, hit.Id, StringComparison.Ordinal))
         {
-            hit.OnClick();
+            try { hit.OnClick(); } catch { }
             RequestRepaint();
         }
     }
@@ -1489,13 +1571,26 @@ internal sealed unsafe class MainWindow : IDisposable
             return;
         if (_openDropdown != DropdownKind.None)
         {
+            _wheelAccum = 0;
             _pressedHitId = null;
             CloseOpenDropdown();
             KickAnimations();
             return;
         }
+        _wheelAccum += delta;
         int step = S(48);
-        _scrollTargetY -= (delta / 120) * step;
+        int steps = _wheelAccum / 120;
+        if (steps != 0)
+        {
+            _wheelAccum -= steps * 120;
+            _scrollTargetY -= steps * step;
+        }
+        else if (Math.Abs(_wheelAccum) >= 24)
+        {
+            float frac = _wheelAccum / 120f;
+            _wheelAccum = 0;
+            _scrollTargetY -= (int)MathF.Round(frac * step);
+        }
         ClampScroll();
         if (_settings.ReducedAnimations)
         {
@@ -1563,13 +1658,16 @@ internal sealed unsafe class MainWindow : IDisposable
         int h = Math.Max(1, _clientH);
 
         double nowMs = NowMs();
+        if (_tabAnimStartMs < 0) _tabAnimStartMs = nowMs;
+        if (_navAnimStartMs < 0) _navAnimStartMs = nowMs;
+        if (_dropdownOpenMs < 0) _dropdownOpenMs = nowMs;
+        if (_whatsNewOpenMs < 0) _whatsNewOpenMs = nowMs;
         float dt = _lastFrameMs > 0 ? Math.Clamp((float)((nowMs - _lastFrameMs) / 1000.0), 0.001f, 0.05f) : 0.016f;
         _lastFrameMs = nowMs;
         StepAnimations(dt, nowMs);
 
         try
         {
-            double tPaintStart = NowMs();
             if (!_d2d.BeginFrame(hwnd, w, h))
                 return;
 
@@ -1626,7 +1724,6 @@ internal sealed unsafe class MainWindow : IDisposable
                 DrawWhatsNewOverlay(w, h, nowMs);
 
             _d2d.EndFrame(out bool deviceLost);
-            double frameMs = NowMs() - tPaintStart;
 
             if (deviceLost)
             {
@@ -1637,24 +1734,12 @@ internal sealed unsafe class MainWindow : IDisposable
             double afterMs = NowMs();
             if (Win32.IsWindowVisible(hwnd) && HasActiveUiAnimation(afterMs))
             {
-                if (frameMs >= 2.5)
-                {
-                    StopUiAnimTimer();
-                    if (!_animFramePosted)
-                    {
-                        _animFramePosted = true;
-                        Win32.PostMessageW(hwnd, WM_APP_ANIM_FRAME, 0, 0);
-                    }
-                }
-                else
-                {
-                    StartUiAnimTimer();
-                }
+                StopUiAnimTimer();
+                ScheduleNextVSyncFrame(hwnd);
             }
             else
             {
                 StopUiAnimTimer();
-                _animFramePosted = false;
                 _lastFrameMs = 0;
             }
         }
@@ -1836,19 +1921,18 @@ internal sealed unsafe class MainWindow : IDisposable
         var activeTarget = _snapshot.ActiveTarget ?? _snapshot.NowPlayingTarget;
         string? assignedDevId = activeTarget != null ? _engine.GetSessionOutputDeviceId(activeTarget.SessionId) : null;
         string devShort = ResolveShortDeviceLabel(assignedDevId);
-        string devText = $"⇄ {devShort}";
         uint devCol = GetEffectiveDeviceColor(assignedDevId);
 
         var sleepRem = _engine.GetSleepTimerRemaining();
         bool hasSleep = sleepRem.HasValue && sleepRem.Value > TimeSpan.Zero;
         string rightText = hasSleep
-            ? $"⏱ {(int)sleepRem!.Value.TotalMinutes:D2}:{sleepRem.Value.Seconds:D2}"
+            ? $"{(int)sleepRem!.Value.TotalMinutes:D2}:{sleepRem.Value.Seconds:D2}"
             : (_settings.MediaHookEnabled ? Strings.DockMediaKeysOn : Strings.BadgeMediaHookOff);
         uint rightCol = hasSleep ? Theme.Amber : (_settings.MediaHookEnabled ? Theme.TextSecondary : Theme.Red);
 
         int seg1W = Math.Max(S(96), _d2d.MeasureTextWidth(bridgeText, 10, Win32.FW_SEMIBOLD, _dpi) + S(26));
-        int seg2W = Math.Clamp(_d2d.MeasureTextWidth(devText, 10, Win32.FW_SEMIBOLD, _dpi) + S(22), S(96), S(205));
-        int seg3W = Math.Max(S(84), _d2d.MeasureTextWidth(rightText, 10, Win32.FW_SEMIBOLD, _dpi) + S(20));
+        int seg2W = Math.Clamp(_d2d.MeasureTextWidth(devShort, 10, Win32.FW_SEMIBOLD, _dpi) + S(34), S(96), S(205));
+        int seg3W = Math.Max(S(84), _d2d.MeasureTextWidth(rightText, 10, Win32.FW_SEMIBOLD, _dpi) + (hasSleep ? S(30) : S(20)));
 
         int padH = S(10);
         int divSpace = S(12);
@@ -1926,8 +2010,9 @@ internal sealed unsafe class MainWindow : IDisposable
         if (hov2 > 0.01f)
             _d2d.FillRoundedRect(x2, innerY, seg2W, innerH, innerH * 0.5f, devCol, 0.18f * hov2);
 
-        _d2d.DrawText(devText, x2 + S(4), dockY, x2 + seg2W - S(4), dockY + dockH,
-            10, Win32.FW_SEMIBOLD, devCol, _dpi, centered: true);
+        _d2d.DrawAudioSwitchGlyph(x2 + S(13), dockY + dockH * 0.5f, S(14), devCol, _dpi);
+        _d2d.DrawText(devShort, x2 + S(22), dockY, x2 + seg2W - S(6), dockY + dockH,
+            10, Win32.FW_SEMIBOLD, devCol, _dpi);
 
         if (canPickDevice && activeTarget != null)
         {
@@ -1961,8 +2046,17 @@ internal sealed unsafe class MainWindow : IDisposable
                 () => _stateStore.UpdateSettings(s => s.MediaHookEnabled = true)));
         }
 
-        _d2d.DrawText(rightText, x3 + S(4), dockY, seg3MaxRight - S(4), dockY + dockH,
-            10, Win32.FW_SEMIBOLD, rightCol, _dpi, centered: true);
+        if (hasSleep)
+        {
+            _d2d.DrawClockGlyph(x3 + S(8), dockY + (dockH - S(11)) * 0.5f, S(11), rightCol, _dpi);
+            _d2d.DrawText(rightText, x3 + S(22), dockY, seg3MaxRight - S(6), dockY + dockH,
+                10, Win32.FW_SEMIBOLD, rightCol, _dpi);
+        }
+        else
+        {
+            _d2d.DrawText(rightText, x3 + S(4), dockY, seg3MaxRight - S(4), dockY + dockH,
+                10, Win32.FW_SEMIBOLD, rightCol, _dpi, centered: true);
+        }
     }
 
     private void OpenSessionOutputDeviceMenu(MediaSessionInfo session, Win32.RECT anchor)
@@ -1974,7 +2068,7 @@ internal sealed unsafe class MainWindow : IDisposable
             return;
         }
 
-        RefreshOutputDevicesCache();
+        RefreshOutputDevicesCache(fresh: true);
         if (_outputDevices.Count == 0)
             return;
 
@@ -2126,7 +2220,7 @@ internal sealed unsafe class MainWindow : IDisposable
 
             int dotSz = S(8);
             _d2d.FillCircle(padX, y + (barH - dotSz) * 0.5f, dotSz, Theme.Red);
-            _d2d.DrawText(snap.ErrorMessage ?? Strings.UpdateFailedBanner, padX + dotSz + S(10), y, retryX - S(12), y + barH,
+            _d2d.DrawText(snap.ResolveErrorMessage() ?? Strings.UpdateFailedBanner, padX + dotSz + S(10), y, retryX - S(12), y + barH,
                 12, Win32.FW_SEMIBOLD, Theme.TextPrimary, _dpi);
 
             DrawActionButton("upd_btn_retry", Strings.UpdateBtnRetry, retryX, btnY, retryW, btnH,
@@ -2161,8 +2255,9 @@ internal sealed unsafe class MainWindow : IDisposable
         }
 
         _d2d.PushClip(0, headerH, w, h - headerH);
-        if (MathF.Abs(slideOffsetX) > 0.25f)
-            _d2d.SetTranslation(slideOffsetX, 0f);
+        bool didTabSlide = MathF.Abs(slideOffsetX) > 0.25f;
+        if (didTabSlide)
+            _d2d.PushTransform(Direct2D.D2D1_MATRIX_3X2_F.Translation(slideOffsetX, 0f));
 
         y = _activeTab switch
         {
@@ -2173,7 +2268,8 @@ internal sealed unsafe class MainWindow : IDisposable
             _ => DrawSettingsTab(padX, y, contentW, headerH)
         };
 
-        _d2d.ResetTransform();
+        if (didTabSlide)
+            _d2d.PopTransform();
         _d2d.PopClip();
 
         // Bottom clearance keeps content readable above floating dock pill
@@ -2220,7 +2316,7 @@ internal sealed unsafe class MainWindow : IDisposable
 
         // 2. LIVE MEDIA SESSIONS (2-Col C1 Mixer Deck)
         int liveHeaderY = y;
-        int refW = S(92);
+        int refW = Math.Clamp(_d2d.MeasureTextWidth(Strings.BtnRefresh, 11, Win32.FW_SEMIBOLD, _dpi) + S(38), S(92), S(160));
         int refH = S(26);
         int refX = x + w - refW;
 
@@ -2229,8 +2325,16 @@ internal sealed unsafe class MainWindow : IDisposable
 
         if (y + refH > headerH)
         {
-            DrawActionButton("btn_refresh", $"↻ {Strings.BtnRefresh}", refX, liveHeaderY - S(2), refW, refH,
-                Theme.BgCard, Theme.BgControlHover, Theme.TextSecondary, Theme.BorderSubtle,
+            float refHovT = GetHoverT("btn_refresh");
+            int refBtnY = liveHeaderY - S(2);
+            _d2d.FillAndStrokeRoundedRect(refX, refBtnY, refW, refH, SF(8),
+                Theme.BlendRgb(Theme.BgCard, Theme.BgControlHover, refHovT), 1f, Theme.BorderSubtle, 1f);
+            _d2d.DrawRefreshGlyph(refX + S(14), refBtnY + refH * 0.5f, S(13), Theme.TextSecondary, _dpi);
+            _d2d.DrawText(Strings.BtnRefresh, refX + S(24), refBtnY, refX + refW - S(6), refBtnY + refH,
+                11, Win32.FW_SEMIBOLD, Theme.TextSecondary, _dpi, centered: true);
+            RegisterScrollableHit(
+                new Win32.RECT { Left = refX, Top = refBtnY, Right = refX + refW, Bottom = refBtnY + refH },
+                "btn_refresh",
                 () => _ = _sessionManager.RefreshAsync());
         }
         y += S(28);
@@ -2253,6 +2357,8 @@ internal sealed unsafe class MainWindow : IDisposable
                 int cx = x + col * (colW + colGap);
                 int cw = twoCol && col == 1 ? (x + w - cx) : colW;
                 int cy = y + row * (cardH + S(10));
+                if (cy + cardH < _bodyClipTop || cy > _bodyClipBottom)
+                    continue;
                 DrawSessionMixerCard(cx, cy, cw, cardH, _snapshot.Sessions[i], headerH, nowMs);
             }
 
@@ -2367,7 +2473,7 @@ internal sealed unsafe class MainWindow : IDisposable
             int arrowSz = S(10);
             int reserveRight = globeSz + globeGap + arrowSz + S(4) + (isPriority ? badgePillW + S(6) : 0);
             int titleW = _d2d.MeasureTextWidth(s.DisplayName, 13, Win32.FW_BOLD, _dpi) + S(4);
-            int nameMaxRight = Math.Min(textRight - reserveRight, textX + titleW);
+            int nameMaxRight = Math.Clamp(textX + titleW, textX, Math.Max(textX, textRight - reserveRight));
 
             _d2d.DrawText(s.DisplayName, textX, y + S(11), textRight - reserveRight, y + S(30), 13, Win32.FW_BOLD,
                 focusHovered ? Theme.Accent : Theme.TextPrimary, _dpi);
@@ -2504,8 +2610,8 @@ internal sealed unsafe class MainWindow : IDisposable
             int devPillX = prevX;
             if (showDevPill)
             {
-                string devLabel = $"⇄ {ResolveShortDeviceLabel(devId)}";
-                int devPillW = Math.Clamp(_d2d.MeasureTextWidth(devLabel, 10, Win32.FW_SEMIBOLD, _dpi) + S(20), S(92), S(148));
+                string devLabel = ResolveShortDeviceLabel(devId);
+                int devPillW = Math.Clamp(_d2d.MeasureTextWidth(devLabel, 10, Win32.FW_SEMIBOLD, _dpi) + S(34), S(96), S(162));
                 devPillX = prevX - S(10) - devPillW;
                 int devPillH = S(30);
                 int devPillY = rowCenterY - devPillH / 2;
@@ -2518,8 +2624,9 @@ internal sealed unsafe class MainWindow : IDisposable
                 _d2d.FillAndStrokeRoundedRect(devPillX, devPillY, devPillW, devPillH, SF(10),
                     devColor, 0.14f + 0.11f * devHovT,
                     devColor, 0.42f + 0.45f * devHovT, 1.1f);
-                _d2d.DrawText(devLabel, devPillX + S(6), devPillY, devPillX + devPillW - S(6), devPillY + devPillH,
-                    10, Win32.FW_SEMIBOLD, devColor, _dpi, centered: true);
+                _d2d.DrawAudioSwitchGlyph(devPillX + S(13), devPillY + devPillH * 0.5f, S(15), devColor, _dpi);
+                _d2d.DrawText(devLabel, devPillX + S(23), devPillY, devPillX + devPillW - S(7), devPillY + devPillH,
+                    10, Win32.FW_SEMIBOLD, devColor, _dpi);
 
                 var capturedPlay = playing;
                 RegisterScrollableHit(devAnchor, "act_dev_pill", () => OpenSessionOutputDeviceMenu(capturedPlay, devAnchor));
@@ -2563,7 +2670,7 @@ internal sealed unsafe class MainWindow : IDisposable
         int arrowSz = isClosed ? 0 : S(13);
         int arrowGap = isClosed ? 0 : S(6);
         int titleW = _d2d.MeasureTextWidth(playing.DisplayName, 16, Win32.FW_BOLD, _dpi) + S(6);
-        int nameMaxRight = Math.Min(textRight - globeSz - globeGap - arrowSz - arrowGap, textX + titleW);
+        int nameMaxRight = Math.Clamp(textX + titleW, textX, Math.Max(textX, textRight - globeSz - globeGap - arrowSz - arrowGap));
 
         _d2d.DrawText(playing.DisplayName, textX, y + S(18), nameMaxRight, y + S(44), 16, Win32.FW_BOLD,
             Theme.BlendRgb(Theme.TextPrimary, Theme.Accent, focusHov), _dpi);
@@ -2713,7 +2820,7 @@ internal sealed unsafe class MainWindow : IDisposable
         int rankW = rank > 0 ? Math.Max(S(24), _d2d.MeasureTextWidth(rankText, 9, Win32.FW_BOLD, _dpi) + S(10)) : 0;
         int reserveRight = globeSz + globeGap + (rankW > 0 ? rankW + S(6) : 0);
         int titleMeasured = _d2d.MeasureTextWidth(headerText, 12, Win32.FW_SEMIBOLD, _dpi) + S(4);
-        int titleRight = Math.Min(textRight - reserveRight, textX + titleMeasured);
+        int titleRight = Math.Clamp(textX + titleMeasured, textX, Math.Max(textX, textRight - reserveRight));
 
         _d2d.DrawText(headerText, textX, y + S(11), textRight - reserveRight, y + S(31), 12, Win32.FW_SEMIBOLD,
             Theme.BlendRgb(Theme.TextPrimary, Theme.Accent, focusHov), _dpi);
@@ -2821,8 +2928,11 @@ internal sealed unsafe class MainWindow : IDisposable
             Theme.BgControl, 0.85f,
             Theme.BlendRgb(Theme.BorderSubtle, deviceRgb, sliderHovT), 0.70f + 0.30f * sliderHovT, 1f);
 
-        // Filled bar clipped smoothly inside the rounded track
-        float fillW = w * dispVol;
+        // Mute button hit region on left 28px of the bar
+        int muteW = Math.Min(w / 2, S(28));
+
+        // Filled bar clipped smoothly inside the rounded track aligned to slider thumb [x+muteW .. x+w]
+        float fillW = dispVol <= 0.003f ? 0f : muteW + Math.Max(0, w - muteW) * dispVol;
         if (fillW > 2f)
         {
             uint fillStart = (isMuted && !isDraggingThis) ? Theme.Red : Theme.BlendRgb(Theme.BgControl, deviceRgb, 0.65f);
@@ -2831,9 +2941,6 @@ internal sealed unsafe class MainWindow : IDisposable
             _d2d.FillLinearGradientRoundedRect(x, y, w, h, radius, fillStart, 0.92f, fillEnd, 0.95f);
             _d2d.PopClip();
         }
-
-        // Mute button hit region on left 28px of the bar
-        int muteW = Math.Min(w / 2, S(28));
         uint speakerColor = isMuted && !isDraggingThis
             ? Theme.Red
             : (dispVol > 0.14f && !Theme.IsLight ? 0xFFFFFFu : Theme.TextPrimary);
@@ -2953,7 +3060,7 @@ internal sealed unsafe class MainWindow : IDisposable
     {
         y = DrawStatusBannerIfActive(x, y, w);
 
-        int clearW = S(142);
+        int clearW = Math.Clamp(_d2d.MeasureTextWidth(Strings.BtnResetHistory, 11, Win32.FW_SEMIBOLD, _dpi) + S(22), S(110), S(200));
         _d2d.DrawText($"{Strings.SecPriorityList} ({_priorityApps.Count})", x, y, x + w - clearW - S(10), y + S(24),
             11, Win32.FW_BOLD, Theme.TextMuted, _dpi);
 
@@ -3024,7 +3131,11 @@ internal sealed unsafe class MainWindow : IDisposable
                 }
 
                 float animRel = _prioAnimY.TryGetValue(_priorityApps[i].AppKey, out float ay) ? ay : i * (rowH + rowGap);
-                DrawPriorityRow(x, slotY, listTopY + animRel, w, _priorityApps[i], i, _priorityApps.Count, headerH, nowMs);
+                float drawY = listTopY + animRel;
+                if (MathF.Max(slotY + rowH, drawY + rowH) < _bodyClipTop - rowH ||
+                    MathF.Min(slotY, drawY) > _bodyClipBottom + rowH)
+                    continue;
+                DrawPriorityRow(x, slotY, drawY, w, _priorityApps[i], i, _priorityApps.Count, headerH, nowMs);
             }
 
             // Draw the highlighted/promoted row last so its shadow, scale lift, and halo render on top
@@ -3061,7 +3172,7 @@ internal sealed unsafe class MainWindow : IDisposable
                 ? Math.Clamp(MathF.Abs(ty - cy) / Math.Max(1f, S(36)), 0f, 1f)
                 : 0f;
             float lift = 1f + 0.015f * MathF.Max(glow * 0.45f, travel);
-            _d2d.SetTransform(Direct2D.D2D1_MATRIX_3X2_F.ScaleAt(lift, lift, x + w * 0.5f, drawYFloat + rowH * 0.5f));
+            _d2d.PushTransform(Direct2D.D2D1_MATRIX_3X2_F.ScaleAt(lift, lift, x + w * 0.5f, drawYFloat + rowH * 0.5f));
             didTransform = true;
             _d2d.FillRoundedRect(x - S(2), drawYFloat + S(4), w + S(4), rowH + S(4), SF(12), 0x000000, 0.24f * glow);
         }
@@ -3139,7 +3250,7 @@ internal sealed unsafe class MainWindow : IDisposable
         int globeGap = isWeb ? S(5) : 0;
         int nameReserve = globeSz + globeGap;
         int titleMeasured = _d2d.MeasureTextWidth(app.DisplayName, 13, Win32.FW_SEMIBOLD, _dpi) + S(4);
-        int nameDrawRight = Math.Min(textRight - nameReserve, textX + titleMeasured);
+        int nameDrawRight = Math.Clamp(textX + titleMeasured, textX, Math.Max(textX, textRight - nameReserve));
 
         _d2d.DrawText(app.DisplayName, textX, drawYFloat + S(8), textRight - nameReserve, drawYFloat + S(28), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary, _dpi);
         if (isWeb && nameDrawRight + globeSz + S(2) <= textRight)
@@ -3197,7 +3308,7 @@ internal sealed unsafe class MainWindow : IDisposable
         }
 
         if (didTransform)
-            _d2d.ResetTransform();
+            _d2d.PopTransform();
 
         return hitY + rowH;
     }
@@ -3494,8 +3605,9 @@ internal sealed unsafe class MainWindow : IDisposable
 
         _d2d.FillAndStrokeRoundedRect(x, y, w, cardH, SF(11), Theme.BgCard, 1f, Theme.BorderSubtle, 1f);
 
-        int customBtnW = S(92);
-        int activePillW = S(168);
+        var active = Theme.FindById(Theme.CurrentId) ?? presets[0];
+        int customBtnW = Math.Clamp(_d2d.MeasureTextWidth(Strings.BtnCustomTheme, 12, Win32.FW_SEMIBOLD, _dpi) + S(24), S(92), S(168));
+        int activePillW = Math.Clamp(_d2d.MeasureTextWidth(Strings.ThemeName(active.Id), 11, Win32.FW_SEMIBOLD, _dpi) + S(44), S(128), S(200));
         int ctrlH = S(30);
         int customBtnX = x + w - pad - customBtnW;
         int ctrlY = y + S(12);
@@ -3504,8 +3616,6 @@ internal sealed unsafe class MainWindow : IDisposable
 
         _d2d.DrawText(Strings.ThemeTitle, x + pad, y + S(10), textRight, y + S(30), 13, Win32.FW_SEMIBOLD, Theme.TextPrimary, _dpi);
         _d2d.DrawText(Strings.ThemeSub, x + pad, y + S(30), textRight, y + S(48), 11, Win32.FW_NORMAL, Theme.TextSecondary, _dpi);
-
-        var active = Theme.FindById(Theme.CurrentId) ?? presets[0];
         _d2d.FillAndStrokeRoundedRect(activePillX, ctrlY, activePillW, ctrlH, SF(8), Theme.BgCardElevated, 1f, Theme.BorderSubtle, 1f);
         int pillSwSz = S(14);
         int pillSwX = activePillX + S(10);
@@ -3536,6 +3646,8 @@ internal sealed unsafe class MainWindow : IDisposable
             int tx = x + pad + col * (colW + colGap);
             int tw = col == cols - 1 ? (x + w - pad - tx) : colW;
             int ty = gridY + row * (tileH + rowGap);
+            if (ty + tileH < _bodyClipTop || ty > _bodyClipBottom)
+                continue;
 
             bool selected = string.Equals(Theme.CurrentId, pal.Id, StringComparison.OrdinalIgnoreCase);
             string hitId = $"theme_card_{pal.Id}";
@@ -3553,7 +3665,7 @@ internal sealed unsafe class MainWindow : IDisposable
             _d2d.FillAndStrokeRoundedRect(tx, ty, tw, previewH, SF(8),
                 pal.BgWindow, 1f, frameStroke, 1f, selected ? 1.8f : 1.0f);
 
-            // Mini Kopuz-style UI preview inside tile
+            // Mini UI preview inside tile
             int sideX = tx + S(4);
             int sideY = ty + S(4);
             int sideW = Math.Max(S(24), (int)(tw * 0.24f));
@@ -3692,7 +3804,7 @@ internal sealed unsafe class MainWindow : IDisposable
             int globeSz = isWeb ? S(11) : 0;
             int globeGap = isWeb ? S(5) : 0;
             int titleW = _d2d.MeasureTextWidth(entry.DisplayName, 12, Win32.FW_SEMIBOLD, _dpi) + S(4);
-            int nameMaxRight = Math.Min(textRight - globeSz - globeGap, textX + titleW);
+            int nameMaxRight = Math.Clamp(textX + titleW, textX, Math.Max(textX, textRight - globeSz - globeGap));
 
             _d2d.DrawText(entry.DisplayName, textX, y, textRight - globeSz - globeGap, y + rowH,
                 12, Win32.FW_SEMIBOLD, Theme.TextPrimary, _dpi);
@@ -3885,7 +3997,7 @@ internal sealed unsafe class MainWindow : IDisposable
                     $"{AppUpdateService.FormatMegabytes(snap.BytesDownloaded)} / {AppUpdateService.FormatMegabytes(snap.TotalBytes)} MB")
                 : Strings.UpdateDownloadingIndetText(snap.LatestVersion, $"{AppUpdateService.FormatMegabytes(snap.BytesDownloaded)} MB"),
             UpdatePhase.ReadyToInstall => Strings.UpdateReadyBanner(snap.LatestVersion),
-            UpdatePhase.Failed => snap.ErrorMessage ?? Strings.SetUpdateSubFailed,
+            UpdatePhase.Failed => snap.ResolveErrorMessage() ?? Strings.SetUpdateSubFailed,
             _ => Strings.SetUpdateSubCurrent(snap.CurrentVersion)
         };
         uint subFg = snap.Phase switch
@@ -3968,7 +4080,6 @@ internal sealed unsafe class MainWindow : IDisposable
             return;
         ApplyDwmTheme();
         _guideWindow?.RefreshLocalizationAndTheme();
-        _refreshHooksCallback?.Invoke();
         RequestRepaint();
     }
 
@@ -4090,7 +4201,7 @@ internal sealed unsafe class MainWindow : IDisposable
         {
             float scale = 0.94f + 0.06f * popEase;
             float dy = -S(8) * (1f - popEase);
-            _d2d.SetTransform(Direct2D.D2D1_MATRIX_3X2_F.TranslateAndScaleAt(0f, dy, scale, scale, menuX + menuW * 0.5f, menuY));
+            _d2d.PushTransform(Direct2D.D2D1_MATRIX_3X2_F.TranslateAndScaleAt(0f, dy, scale, scale, menuX + menuW * 0.5f, menuY));
         }
 
         _d2d.FillRoundedRect(menuX - S(2), menuY + S(4), menuW + S(4), menuH + S(6), SF(12), 0x000000, 0.22f * popEase);
@@ -4284,7 +4395,8 @@ internal sealed unsafe class MainWindow : IDisposable
                 });
         }
 
-        _d2d.ResetTransform();
+        if (didPopTransform)
+            _d2d.PopTransform();
     }
 
     private void DrawTaskInstallMenuItem(
@@ -4687,7 +4799,7 @@ internal sealed unsafe class MainWindow : IDisposable
 
         if (y + rowH > headerH)
         {
-            DrawActionButton($"{id}_dec", "−", decX, btnY, btnSz, btnSz,
+            DrawActionButton($"{id}_dec", "-", decX, btnY, btnSz, btnSz,
                 Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong, onDec);
             DrawActionButton($"{id}_inc", "+", incX, btnY, btnSz, btnSz,
                 Theme.BgControl, Theme.BgControlHover, Theme.TextPrimary, Theme.BorderStrong, onInc);
@@ -4723,7 +4835,7 @@ internal sealed unsafe class MainWindow : IDisposable
         float scale = pressed ? 0.93f : (1f + 0.04f * hovT);
         bool didScale = !_settings.ReducedAnimations && MathF.Abs(scale - 1f) > 0.002f;
         if (didScale)
-            _d2d.SetTransform(Direct2D.D2D1_MATRIX_3X2_F.ScaleAt(scale, scale, cx, cy));
+            _d2d.PushTransform(Direct2D.D2D1_MATRIX_3X2_F.ScaleAt(scale, scale, cx, cy));
 
         float radius = circular ? sz * 0.5f : SF(8);
         _d2d.FillAndStrokeRoundedRect(x, y, sz, sz, radius, bg, 1f, border, 1f);
@@ -4756,7 +4868,7 @@ internal sealed unsafe class MainWindow : IDisposable
         }
 
         if (didScale)
-            _d2d.ResetTransform();
+            _d2d.PopTransform();
 
         RegisterScrollableHit(new Win32.RECT { Left = x, Top = y, Right = x + sz, Bottom = y + sz }, id, onClick);
     }
@@ -4938,7 +5050,7 @@ internal sealed unsafe class MainWindow : IDisposable
         int cols = twoCol ? 2 : 1;
         int rows = (release.Items.Length + cols - 1) / cols;
         int cardW = twoCol ? Math.Clamp(w - S(48), S(600), S(768)) : Math.Clamp(w - S(56), S(420), S(560));
-        int itemH = twoCol ? S(94) : S(70);
+        int itemH = twoCol ? S(112) : S(74);
         int itemGap = twoCol ? S(11) : S(9);
         int colGap = S(11);
         int headerBandH = S(82);
@@ -4953,11 +5065,12 @@ internal sealed unsafe class MainWindow : IDisposable
         int cardX = (w - cardW) / 2;
         int cardY = (h - cardH) / 2;
 
-        if (modalEase < 0.999f)
+        bool didModalTransform = modalEase < 0.999f;
+        if (didModalTransform)
         {
             float scale = 0.94f + 0.06f * modalEase;
             float dy = S(10) * (1f - modalEase);
-            _d2d.SetTransform(Direct2D.D2D1_MATRIX_3X2_F.TranslateAndScaleAt(0f, dy, scale, scale, cardX + cardW * 0.5f, cardY + cardH * 0.5f));
+            _d2d.PushTransform(Direct2D.D2D1_MATRIX_3X2_F.TranslateAndScaleAt(0f, dy, scale, scale, cardX + cardW * 0.5f, cardY + cardH * 0.5f));
         }
 
         _d2d.FillRoundedRect(cardX - S(6), cardY + S(8), cardW + S(12), cardH + S(12), SF(18), 0x000000, 0.30f * modalEase);
@@ -5086,7 +5199,8 @@ internal sealed unsafe class MainWindow : IDisposable
             new Win32.RECT { Left = gotX, Top = gotY, Right = gotX + gotW, Bottom = gotY + gotH },
             "whatsnew_gotit",
             DismissWhatsNew));
-        _d2d.ResetTransform();
+        if (didModalTransform)
+            _d2d.PopTransform();
     }
 
     public void Dispose()
@@ -5098,6 +5212,7 @@ internal sealed unsafe class MainWindow : IDisposable
         _startupService.StatusChanged -= OnStartupStatusChanged;
         _bridgeServer.SessionsChanged -= OnBridgeStatusChanged;
         _updateService.StateChanged -= OnUpdateStateChanged;
+        _iconRenderer.IconsUpdated -= OnIconsUpdated;
         _guideWindow?.Dispose();
         _guideWindow = null;
         _themeEditorWindow?.Dispose();
@@ -5106,6 +5221,7 @@ internal sealed unsafe class MainWindow : IDisposable
         if (_hwnd != 0)
         {
             StopUiAnimTimer();
+            Win32.KillTimer(_hwnd, TIMER_IDLE_RELEASE);
             Win32.WTSUnRegisterSessionNotification(_hwnd);
             Win32.DestroyWindow(_hwnd);
             _hwnd = 0;

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Windows.Media;
 using Windows.Media.Control;
 using Cueway.Audio;
@@ -14,11 +15,13 @@ internal sealed class MediaSessionManager : IDisposable
     private readonly BrowserBridgeServer _bridgeServer;
     private readonly MpvIpcClient _mpvClient = new();
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
+    private readonly SemaphoreSlim _smtcInitLock = new(1, 1);
     private int _refreshPending;
 
     private readonly object _sessionsLock = new();
     private GlobalSystemMediaTransportControlsSessionManager? _smtcManager;
     private long _lastSmtcRetryTick;
+    private readonly Dictionary<string, string> _lastSentSiteIcons = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, GlobalSystemMediaTransportControlsSession> _smtcSessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (string ConnectionId, int TabId)> _bridgeTargets = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (bool ExpectedPlaying, long UntilTick)> _optimisticPlayback = new(StringComparer.Ordinal);
@@ -62,16 +65,31 @@ internal sealed class MediaSessionManager : IDisposable
         if (_disposed || _smtcManager != null)
             return;
 
-        long now = Environment.TickCount64;
-        long prev = Interlocked.Read(ref _lastSmtcRetryTick);
-        if (prev != 0 && now - prev < 3000)
+        bool acquired;
+        try
+        {
+            acquired = await _smtcInitLock.WaitAsync(0).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
             return;
-        Interlocked.Exchange(ref _lastSmtcRetryTick, now);
+        }
+        if (!acquired)
+            return;
 
         try
         {
+            if (_disposed || _smtcManager != null)
+                return;
+
+            long now = Environment.TickCount64;
+            long prev = Interlocked.Read(ref _lastSmtcRetryTick);
+            if (prev != 0 && now - prev < 3000)
+                return;
+            Interlocked.Exchange(ref _lastSmtcRetryTick, now);
+
             var mgr = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync().AsTask().ConfigureAwait(false);
-            if (mgr != null && !_disposed)
+            if (mgr != null && !_disposed && _smtcManager == null)
             {
                 mgr.SessionsChanged += OnSmtcSessionsChanged;
                 mgr.CurrentSessionChanged += OnSmtcCurrentSessionChanged;
@@ -81,6 +99,11 @@ internal sealed class MediaSessionManager : IDisposable
         catch
         {
             // SMTC may fail transiently at early boot or session transition; will retry cleanly
+        }
+        finally
+        {
+            try { _smtcInitLock.Release(); }
+            catch (ObjectDisposedException) { }
         }
     }
 
@@ -101,27 +124,72 @@ internal sealed class MediaSessionManager : IDisposable
     public async Task RefreshAsync()
     {
         if (_disposed) return;
-        if (!await _refreshLock.WaitAsync(0))
+
+        bool acquired;
+        try
+        {
+            acquired = await _refreshLock.WaitAsync(0).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        if (!acquired)
         {
             Interlocked.Exchange(ref _refreshPending, 1);
             return;
         }
 
-        do
+        await Task.Run(async () =>
         {
-            Interlocked.Exchange(ref _refreshPending, 0);
+            bool holdsLock = true;
             try
             {
-                await RefreshCoreAsync().ConfigureAwait(false);
+                do
+                {
+                    Interlocked.Exchange(ref _refreshPending, 0);
+                    try
+                    {
+                        await RefreshCoreAsync().ConfigureAwait(false);
+                    }
+                    catch when (_disposed)
+                    {
+                        break;
+                    }
+                    finally
+                    {
+                        if (holdsLock)
+                        {
+                            try { _refreshLock.Release(); }
+                            catch (ObjectDisposedException) { }
+                            holdsLock = false;
+                        }
+                    }
+
+                    if (_disposed || Interlocked.Exchange(ref _refreshPending, 0) != 1)
+                        break;
+
+                    try
+                    {
+                        holdsLock = await _refreshLock.WaitAsync(0).ConfigureAwait(false);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        holdsLock = false;
+                    }
+                }
+                while (holdsLock);
             }
             finally
             {
-                _refreshLock.Release();
+                if (holdsLock)
+                {
+                    try { _refreshLock.Release(); }
+                    catch (ObjectDisposedException) { }
+                }
             }
-        }
-        while (!_disposed &&
-               Interlocked.Exchange(ref _refreshPending, 0) == 1 &&
-               await _refreshLock.WaitAsync(0));
+        }).ConfigureAwait(false);
     }
 
     private static bool IsSmtcCoveredByBridge(
@@ -305,7 +373,16 @@ internal sealed class MediaSessionManager : IDisposable
 
                     if (!string.IsNullOrEmpty(siteKey) && !string.IsNullOrEmpty(tab.IconDataUrl))
                     {
-                        SiteIconReceived?.Invoke(siteKey, tab.IconDataUrl);
+                        bool sendIcon;
+                        lock (_sessionsLock)
+                        {
+                            sendIcon = !_lastSentSiteIcons.TryGetValue(siteKey, out string? prevIcon) ||
+                                       !string.Equals(prevIcon, tab.IconDataUrl, StringComparison.Ordinal);
+                            if (sendIcon)
+                                _lastSentSiteIcons[siteKey] = tab.IconDataUrl;
+                        }
+                        if (sendIcon)
+                            SiteIconReceived?.Invoke(siteKey, tab.IconDataUrl);
                     }
 
                     string baseId = $"bridge:{browserKey}:{tab.TabId}";
@@ -367,6 +444,21 @@ internal sealed class MediaSessionManager : IDisposable
                 {
                     rawSessions = _smtcManager.GetSessions();
                 }
+                catch (COMException)
+                {
+                    var oldMgr = _smtcManager;
+                    _smtcManager = null;
+                    if (oldMgr != null)
+                    {
+                        try
+                        {
+                            oldMgr.SessionsChanged -= OnSmtcSessionsChanged;
+                            oldMgr.CurrentSessionChanged -= OnSmtcCurrentSessionChanged;
+                        }
+                        catch { }
+                    }
+                    rawSessions = [];
+                }
                 catch
                 {
                     rawSessions = [];
@@ -379,7 +471,7 @@ internal sealed class MediaSessionManager : IDisposable
                     try
                     {
                         var playback = session.GetPlaybackInfo();
-                        if (playback.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed)
+                        if (playback == null || playback.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed)
                             continue;
 
                         string aumid = session.SourceAppUserModelId ?? string.Empty;
@@ -390,7 +482,9 @@ internal sealed class MediaSessionManager : IDisposable
 
                         try
                         {
-                            var props = await session.TryGetMediaPropertiesAsync().AsTask();
+                            var props = await session.TryGetMediaPropertiesAsync().AsTask()
+                                .WaitAsync(TimeSpan.FromMilliseconds(800))
+                                .ConfigureAwait(false);
                             if (props != null)
                             {
                                 title = props.Title ?? string.Empty;
@@ -618,6 +712,9 @@ internal sealed class MediaSessionManager : IDisposable
                 _bridgeTargets.Clear();
                 foreach (var kv in liveBridgeMap)
                     _bridgeTargets[kv.Key] = kv.Value;
+
+                PruneExpiredOptimistic(_optimisticPlayback);
+                PruneExpiredOptimistic(_optimisticVolume);
 
                 _currentSessions = collected;
             }
@@ -962,6 +1059,30 @@ internal sealed class MediaSessionManager : IDisposable
         }
     }
 
+    private static void PruneExpiredOptimistic<T>(Dictionary<string, T> dict)
+    {
+        if (dict.Count == 0)
+            return;
+        long now = Environment.TickCount64;
+        List<string>? expired = null;
+        foreach (var kv in dict)
+        {
+            long until = kv.Value switch
+            {
+                ValueTuple<bool, long> p => p.Item2,
+                ValueTuple<float, bool, long> v => v.Item3,
+                _ => long.MaxValue
+            };
+            if (now >= until)
+                (expired ??= []).Add(kv.Key);
+        }
+        if (expired != null)
+        {
+            foreach (string k in expired)
+                dict.Remove(k);
+        }
+    }
+
     private static string ResolvePreferredExePath(List<RunningProcessInfo> procs, nint mainHwnd)
     {
         if (mainHwnd != 0)
@@ -1156,7 +1277,9 @@ internal sealed class MediaSessionManager : IDisposable
         {
             try
             {
-                var status = smtc.GetPlaybackInfo().PlaybackStatus;
+                var playbackInfo = smtc.GetPlaybackInfo();
+                if (playbackInfo == null) return false;
+                var status = playbackInfo.PlaybackStatus;
                 bool isCurrentlyPlaying = status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
                 bool ok = isCurrentlyPlaying
                     ? await smtc.TryPauseAsync().AsTask()
@@ -1228,7 +1351,9 @@ internal sealed class MediaSessionManager : IDisposable
                 bool ok = await smtc.TryPlayAsync().AsTask();
                 if (!ok)
                 {
-                    var status = smtc.GetPlaybackInfo().PlaybackStatus;
+                    var playbackInfo = smtc.GetPlaybackInfo();
+                if (playbackInfo == null) return false;
+                var status = playbackInfo.PlaybackStatus;
                     if (status != GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
                         ok = await smtc.TryTogglePlayPauseAsync().AsTask();
                 }
@@ -1293,7 +1418,9 @@ internal sealed class MediaSessionManager : IDisposable
                 bool ok = await smtc.TryPauseAsync().AsTask();
                 if (!ok)
                 {
-                    var status = smtc.GetPlaybackInfo().PlaybackStatus;
+                    var playbackInfo = smtc.GetPlaybackInfo();
+                if (playbackInfo == null) return false;
+                var status = playbackInfo.PlaybackStatus;
                     if (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
                         ok = await smtc.TryTogglePlayPauseAsync().AsTask();
                 }
@@ -1378,7 +1505,9 @@ internal sealed class MediaSessionManager : IDisposable
 
         try
         {
-            var status = smtc.GetPlaybackInfo().PlaybackStatus;
+            var playbackInfo = smtc.GetPlaybackInfo();
+            if (playbackInfo == null) return null;
+            var status = playbackInfo.PlaybackStatus;
             return status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
         }
         catch
@@ -1503,7 +1632,7 @@ internal sealed class MediaSessionManager : IDisposable
             {
                 var timeline = smtc.GetTimelineProperties();
                 var playback = smtc.GetPlaybackInfo();
-                if (timeline != null && timeline.EndTime > timeline.StartTime)
+                if (playback != null && timeline != null && timeline.EndTime > timeline.StartTime)
                 {
                     TimeSpan current = timeline.Position;
                     if (playback.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing &&
@@ -1539,7 +1668,7 @@ internal sealed class MediaSessionManager : IDisposable
             bool ok = await _bridgeServer.SendCommandAsync(bTarget.ConnectionId, bTarget.TabId, "set_volume", pct).ConfigureAwait(false);
 
             // Older v1 extensions (before browser reload) did not handle set_volume, so fall back to browser WASAPI volume
-            if (!ok || _bridgeServer.GetConnectionProtocolVersion(bTarget.ConnectionId) < 2)
+            if (_bridgeServer.GetConnectionProtocolVersion(bTarget.ConnectionId) < 2)
             {
                 _audioService.SetAppVolume(info.ProcessIds, clamped);
             }
@@ -1585,7 +1714,7 @@ internal sealed class MediaSessionManager : IDisposable
             UpdateCachedVolumeState(sessionId, nextVol, nextMuted);
             bool ok = await _bridgeServer.SendCommandAsync(bTarget.ConnectionId, bTarget.TabId, "toggle_mute").ConfigureAwait(false);
 
-            if (!ok || _bridgeServer.GetConnectionProtocolVersion(bTarget.ConnectionId) < 2)
+            if (_bridgeServer.GetConnectionProtocolVersion(bTarget.ConnectionId) < 2)
             {
                 _audioService.ToggleAppMute(info.ProcessIds);
             }
@@ -1795,5 +1924,6 @@ internal sealed class MediaSessionManager : IDisposable
             catch { }
         }
         _refreshLock.Dispose();
+        _smtcInitLock.Dispose();
     }
 }

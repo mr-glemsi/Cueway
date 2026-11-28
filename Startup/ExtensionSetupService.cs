@@ -205,7 +205,7 @@ internal static class ExtensionSetupService
 
         try
         {
-            Process.Start(new ProcessStartInfo(EdgeStoreUrl) { UseShellExecute = true });
+            using var _ = Process.Start(new ProcessStartInfo(EdgeStoreUrl) { UseShellExecute = true });
             return (true, Strings.MsgBridgeEdgeStoreOpened);
         }
         catch
@@ -246,7 +246,7 @@ internal static class ExtensionSetupService
             {
                 try
                 {
-                    Process.Start(new ProcessStartInfo(xpiPath) { UseShellExecute = true });
+                    using var _ = Process.Start(new ProcessStartInfo(xpiPath) { UseShellExecute = true });
                 }
                 catch { }
             }
@@ -374,7 +374,7 @@ internal static class ExtensionSetupService
     {
         try
         {
-            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{folder}\"")
+            using var _ = Process.Start(new ProcessStartInfo("explorer.exe", $"\"{folder}\"")
             {
                 UseShellExecute = true
             });
@@ -395,7 +395,7 @@ internal static class ExtensionSetupService
                 UseShellExecute = false
             };
             psi.ArgumentList.Add(url);
-            Process.Start(psi);
+            using var _ = Process.Start(psi);
         }
         catch
         {

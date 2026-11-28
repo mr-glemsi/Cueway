@@ -237,7 +237,7 @@ internal static unsafe class ProcessResolver
         _stalePids.Clear();
         foreach (var kv in _pidCache)
         {
-            if (kv.Value.Gen != activeGen)
+            if (kv.Value.Gen < activeGen)
                 _stalePids.Add(kv.Key);
         }
         foreach (int stalePid in _stalePids)

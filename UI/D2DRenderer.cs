@@ -22,6 +22,7 @@ internal sealed unsafe class D2DRenderer : IDisposable
 
     private readonly record struct TextFormatKey(
         string Family,
+        string Locale,
         int PtSize,
         int Weight,
         uint Dpi,
@@ -35,14 +36,25 @@ internal sealed unsafe class D2DRenderer : IDisposable
     private nint _roundStrokeStyle;
     private nint _renderTarget;
     private nint _solidBrush;
+    private nint _speakerBodyGeo;
     private nint _boundHwnd;
     private int _rtW;
     private int _rtH;
     private bool _disposed;
 
+    private int _clipStackDepth;
+    private ulong _clipPushedMask;
+    private readonly Stack<bool> _clipOverflowStack = new();
+    private Direct2D.D2D1_MATRIX_3X2_F _currentTransform = Direct2D.D2D1_MATRIX_3X2_F.Identity;
+    private readonly Stack<Direct2D.D2D1_MATRIX_3X2_F> _transformStack = new();
+
     private readonly Dictionary<TextFormatKey, (nint Format, nint TrimSign)> _textFormatCache = new();
-    private readonly Dictionary<(string Text, int PtSize, int Weight, uint Dpi), int> _textWidthCache = new();
+    private readonly Dictionary<(string Text, int PtSize, int Weight, uint Dpi, AppLanguage Lang), int> _textWidthCache = new();
     private readonly Dictionary<(nint HIcon, int Size), nint> _iconBitmapCache = new();
+    private readonly Dictionary<(uint StartRgb, byte StartA, uint EndRgb, byte EndA), (nint StopCol, nint Brush)> _linearGradCache = new();
+    private readonly Dictionary<(uint AccentRgb, uint SecondaryRgb, byte PeakA), (nint StopCol, nint Brush)> _specularRimCache = new();
+    private readonly Dictionary<(uint Rgb, byte CenterA), (nint StopCol, nint Brush)> _radialAuraCache = new();
+    private readonly Dictionary<(int StartDeg, int EndDeg, int HalfPxRadius), nint> _arcGeoCache = new();
 
     public D2DRenderer()
     {
@@ -79,7 +91,12 @@ internal sealed unsafe class D2DRenderer : IDisposable
         if (!EnsureRenderTarget(hwnd, w, h))
             return false;
 
-        Direct2D.RenderTarget_SetTransform(_renderTarget, Direct2D.D2D1_MATRIX_3X2_F.Identity);
+        _clipStackDepth = 0;
+        _clipPushedMask = 0;
+        _clipOverflowStack.Clear();
+        _transformStack.Clear();
+        _currentTransform = Direct2D.D2D1_MATRIX_3X2_F.Identity;
+        Direct2D.RenderTarget_SetTransform(_renderTarget, _currentTransform);
         Direct2D.RenderTarget_BeginDraw(_renderTarget);
         return true;
     }
@@ -100,31 +117,35 @@ internal sealed unsafe class D2DRenderer : IDisposable
         return hr >= 0;
     }
 
-    public void Resize(int width, int height)
+    public bool Resize(int width, int height)
     {
         if (_renderTarget == 0)
-            return;
+            return false;
         uint w = (uint)Math.Max(1, width);
         uint h = (uint)Math.Max(1, height);
+        int hr = Direct2D.HwndRenderTarget_Resize(_renderTarget, w, h);
+        if (hr < 0)
+            return false;
         _rtW = (int)w;
         _rtH = (int)h;
-        Direct2D.HwndRenderTarget_Resize(_renderTarget, w, h);
+        return true;
     }
 
     private bool EnsureRenderTarget(nint hwnd, int w, int h)
     {
         if (_renderTarget != 0 && _boundHwnd == hwnd)
         {
-            if (_rtW != w || _rtH != h)
-                Resize(w, h);
-            return true;
+            if (_rtW == w && _rtH == h)
+                return true;
+            if (Resize(w, h))
+                return true;
         }
 
         ReleaseDeviceResources();
 
         var rtProps = new Direct2D.D2D1_RENDER_TARGET_PROPERTIES
         {
-            type = 0, // D2D1_RENDER_TARGET_TYPE_DEFAULT (Hardware GPU with native VSync)
+            type = 0, // D2D1_RENDER_TARGET_TYPE_DEFAULT (Hardware GPU; VSync paced externally via DwmFlush)
             pixelFormat = new Direct2D.D2D1_PIXEL_FORMAT
             {
                 format = Direct2D.DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -138,7 +159,7 @@ internal sealed unsafe class D2DRenderer : IDisposable
         {
             hwnd = hwnd,
             pixelSize = new Direct2D.D2D1_SIZE_U { width = (uint)w, height = (uint)h },
-            presentOptions = 0
+            presentOptions = Direct2D.D2D1_PRESENT_OPTIONS_IMMEDIATELY
         };
 
         int hr = Direct2D.Factory_CreateHwndRenderTarget(_d2dFactory, in rtProps, in hwndProps, out _renderTarget);
@@ -176,9 +197,27 @@ internal sealed unsafe class D2DRenderer : IDisposable
         _iconBitmapCache.Clear();
     }
 
+    private static void ClearBrushCache<TKey>(Dictionary<TKey, (nint StopCol, nint Brush)> cache) where TKey : notnull
+    {
+        foreach (var entry in cache.Values)
+        {
+            if (entry.Brush != 0) Direct2D.Release(entry.Brush);
+            if (entry.StopCol != 0) Direct2D.Release(entry.StopCol);
+        }
+        cache.Clear();
+    }
+
     public void ReleaseDeviceResources()
     {
         ClearIconCache();
+        ClearBrushCache(_linearGradCache);
+        ClearBrushCache(_specularRimCache);
+        ClearBrushCache(_radialAuraCache);
+        _clipStackDepth = 0;
+        _clipPushedMask = 0;
+        _clipOverflowStack.Clear();
+        _transformStack.Clear();
+        _currentTransform = Direct2D.D2D1_MATRIX_3X2_F.Identity;
 
         if (_solidBrush != 0)
         {
@@ -223,32 +262,84 @@ internal sealed unsafe class D2DRenderer : IDisposable
     public void SetTransform(in Direct2D.D2D1_MATRIX_3X2_F matrix)
     {
         if (_renderTarget == 0) return;
+        _currentTransform = matrix;
         Direct2D.RenderTarget_SetTransform(_renderTarget, in matrix);
     }
 
     public void SetTranslation(float dx, float dy)
     {
         if (_renderTarget == 0) return;
-        Direct2D.RenderTarget_SetTransform(_renderTarget, Direct2D.D2D1_MATRIX_3X2_F.Translation(dx, dy));
+        _currentTransform = Direct2D.D2D1_MATRIX_3X2_F.Translation(dx, dy);
+        Direct2D.RenderTarget_SetTransform(_renderTarget, in _currentTransform);
     }
 
     public void ResetTransform()
     {
         if (_renderTarget == 0) return;
-        Direct2D.RenderTarget_SetTransform(_renderTarget, Direct2D.D2D1_MATRIX_3X2_F.Identity);
+        _currentTransform = Direct2D.D2D1_MATRIX_3X2_F.Identity;
+        Direct2D.RenderTarget_SetTransform(_renderTarget, in _currentTransform);
+    }
+
+    public void PushTransform(in Direct2D.D2D1_MATRIX_3X2_F localMatrix)
+    {
+        _transformStack.Push(_currentTransform);
+        _currentTransform = Direct2D.D2D1_MATRIX_3X2_F.Multiply(in localMatrix, in _currentTransform);
+        if (_renderTarget != 0)
+            Direct2D.RenderTarget_SetTransform(_renderTarget, in _currentTransform);
+    }
+
+    public void PopTransform()
+    {
+        _currentTransform = _transformStack.Count > 0
+            ? _transformStack.Pop()
+            : Direct2D.D2D1_MATRIX_3X2_F.Identity;
+        if (_renderTarget != 0)
+            Direct2D.RenderTarget_SetTransform(_renderTarget, in _currentTransform);
+    }
+
+    public void SetTextAntialiasGrayscale(bool grayscale)
+    {
+        if (_renderTarget == 0) return;
+        Direct2D.RenderTarget_SetTextAntialiasMode(
+            _renderTarget,
+            grayscale ? Direct2D.D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE : Direct2D.D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
     }
 
     public void PushClip(float x, float y, float w, float h)
     {
-        if (_renderTarget == 0 || w <= 0f || h <= 0f) return;
-        var r = new Direct2D.D2D1_RECT_F { left = x, top = y, right = x + w, bottom = y + h };
-        Direct2D.RenderTarget_PushAxisAlignedClip(_renderTarget, in r);
+        bool pushed = _renderTarget != 0 && w > 0f && h > 0f;
+        if (_clipStackDepth < 64)
+        {
+            if (pushed)
+                _clipPushedMask |= 1UL << _clipStackDepth;
+            else
+                _clipPushedMask &= ~(1UL << _clipStackDepth);
+        }
+        else
+        {
+            _clipOverflowStack.Push(pushed);
+        }
+        _clipStackDepth++;
+
+        if (pushed)
+        {
+            var r = new Direct2D.D2D1_RECT_F { left = x, top = y, right = x + w, bottom = y + h };
+            Direct2D.RenderTarget_PushAxisAlignedClip(_renderTarget, in r);
+        }
     }
 
     public void PopClip()
     {
-        if (_renderTarget == 0) return;
-        Direct2D.RenderTarget_PopAxisAlignedClip(_renderTarget);
+        if (_clipStackDepth <= 0)
+            return;
+        _clipStackDepth--;
+
+        bool wasPushed = _clipStackDepth < 64
+            ? (_clipPushedMask & (1UL << _clipStackDepth)) != 0
+            : (_clipOverflowStack.Count > 0 && _clipOverflowStack.Pop());
+
+        if (wasPushed && _renderTarget != 0)
+            Direct2D.RenderTarget_PopAxisAlignedClip(_renderTarget);
     }
 
     public void FillRect(float x, float y, float w, float h, uint rgb, float alpha = 1f)
@@ -347,20 +438,25 @@ internal sealed unsafe class D2DRenderer : IDisposable
     {
         if (_renderTarget == 0 || w <= 0f || h <= 0f) return;
 
-        var stops = stackalloc Direct2D.D2D1_GRADIENT_STOP[2];
-        stops[0] = new Direct2D.D2D1_GRADIENT_STOP { position = 0f, color = Direct2D.D2D1_COLOR_F.FromRgb(startRgb, startAlpha) };
-        stops[1] = new Direct2D.D2D1_GRADIENT_STOP { position = 1f, color = Direct2D.D2D1_COLOR_F.FromRgb(endRgb, endAlpha) };
-
-        if (Direct2D.RenderTarget_CreateGradientStopCollection(
-                _renderTarget, stops, 2, Direct2D.D2D1_GAMMA_2_2, Direct2D.D2D1_EXTEND_MODE_CLAMP, out nint stopCol) < 0 || stopCol == 0)
+        byte sA = (byte)Math.Clamp((int)MathF.Round(startAlpha * 255f), 0, 255);
+        byte eA = (byte)Math.Clamp((int)MathF.Round(endAlpha * 255f), 0, 255);
+        var key = (startRgb, sA, endRgb, eA);
+        if (!_linearGradCache.TryGetValue(key, out var entry) || entry.Brush == 0)
         {
-            FillRoundedRect(x, y, w, h, radius, endRgb, endAlpha);
-            return;
-        }
+            if (_linearGradCache.Count >= 48)
+                ClearBrushCache(_linearGradCache);
 
-        nint gradBrush = 0;
-        try
-        {
+            var stops = stackalloc Direct2D.D2D1_GRADIENT_STOP[2];
+            stops[0] = new Direct2D.D2D1_GRADIENT_STOP { position = 0f, color = Direct2D.D2D1_COLOR_F.FromRgb(startRgb, sA / 255f) };
+            stops[1] = new Direct2D.D2D1_GRADIENT_STOP { position = 1f, color = Direct2D.D2D1_COLOR_F.FromRgb(endRgb, eA / 255f) };
+
+            if (Direct2D.RenderTarget_CreateGradientStopCollection(
+                    _renderTarget, stops, 2, Direct2D.D2D1_GAMMA_2_2, Direct2D.D2D1_EXTEND_MODE_CLAMP, out nint stopCol) < 0 || stopCol == 0)
+            {
+                FillRoundedRect(x, y, w, h, radius, endRgb, endAlpha);
+                return;
+            }
+
             var props = new Direct2D.D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES
             {
                 startPoint = new Direct2D.D2D1_POINT_2F { x = x, y = y },
@@ -368,76 +464,99 @@ internal sealed unsafe class D2DRenderer : IDisposable
                     ? new Direct2D.D2D1_POINT_2F { x = x, y = y + h }
                     : new Direct2D.D2D1_POINT_2F { x = x + w, y = y }
             };
-            if (Direct2D.RenderTarget_CreateLinearGradientBrush(_renderTarget, in props, stopCol, out gradBrush) == 0 && gradBrush != 0)
+            if (Direct2D.RenderTarget_CreateLinearGradientBrush(_renderTarget, in props, stopCol, out nint gradBrush) < 0 || gradBrush == 0)
             {
-                float rad = MathF.Min(radius, MathF.Min(w, h) * 0.5f);
-                var rr = new Direct2D.D2D1_ROUNDED_RECT
-                {
-                    rect = new Direct2D.D2D1_RECT_F { left = x, top = y, right = x + w, bottom = y + h },
-                    radiusX = rad,
-                    radiusY = rad
-                };
-                Direct2D.RenderTarget_FillRoundedRectangle(_renderTarget, in rr, gradBrush);
+                Direct2D.Release(stopCol);
+                FillRoundedRect(x, y, w, h, radius, endRgb, endAlpha);
+                return;
             }
+            entry = (stopCol, gradBrush);
+            _linearGradCache[key] = entry;
         }
-        finally
+        else
         {
-            if (gradBrush != 0) Direct2D.Release(gradBrush);
-            Direct2D.Release(stopCol);
+            Direct2D.LinearGradientBrush_SetStartPoint(entry.Brush, new Direct2D.D2D1_POINT_2F { x = x, y = y });
+            Direct2D.LinearGradientBrush_SetEndPoint(entry.Brush, vertical
+                ? new Direct2D.D2D1_POINT_2F { x = x, y = y + h }
+                : new Direct2D.D2D1_POINT_2F { x = x + w, y = y });
         }
+
+        float rad = MathF.Min(radius, MathF.Min(w, h) * 0.5f);
+        var rr = new Direct2D.D2D1_ROUNDED_RECT
+        {
+            rect = new Direct2D.D2D1_RECT_F { left = x, top = y, right = x + w, bottom = y + h },
+            radiusX = rad,
+            radiusY = rad
+        };
+        Direct2D.RenderTarget_FillRoundedRectangle(_renderTarget, in rr, entry.Brush);
     }
 
     public void FillSpecularRim(float x, float y, float w, float h, uint accentRgb, uint secondaryRgb, float peakAlpha = 0.65f)
     {
         if (_renderTarget == 0 || w <= 0f || h <= 0f) return;
 
-        var stops = stackalloc Direct2D.D2D1_GRADIENT_STOP[4];
-        stops[0] = new Direct2D.D2D1_GRADIENT_STOP { position = 0.04f, color = Direct2D.D2D1_COLOR_F.FromRgb(accentRgb, 0f) };
-        stops[1] = new Direct2D.D2D1_GRADIENT_STOP { position = 0.35f, color = Direct2D.D2D1_COLOR_F.FromRgb(accentRgb, peakAlpha) };
-        stops[2] = new Direct2D.D2D1_GRADIENT_STOP { position = 0.65f, color = Direct2D.D2D1_COLOR_F.FromRgb(secondaryRgb, peakAlpha * 0.85f) };
-        stops[3] = new Direct2D.D2D1_GRADIENT_STOP { position = 0.96f, color = Direct2D.D2D1_COLOR_F.FromRgb(secondaryRgb, 0f) };
-
-        if (Direct2D.RenderTarget_CreateGradientStopCollection(
-                _renderTarget, stops, 4, Direct2D.D2D1_GAMMA_2_2, Direct2D.D2D1_EXTEND_MODE_CLAMP, out nint stopCol) < 0 || stopCol == 0)
-            return;
-
-        nint gradBrush = 0;
-        try
+        byte pA = (byte)Math.Clamp((int)MathF.Round(peakAlpha * 255f), 0, 255);
+        var key = (accentRgb, secondaryRgb, pA);
+        if (!_specularRimCache.TryGetValue(key, out var entry) || entry.Brush == 0)
         {
+            if (_specularRimCache.Count >= 24)
+                ClearBrushCache(_specularRimCache);
+
+            float aNorm = pA / 255f;
+            var stops = stackalloc Direct2D.D2D1_GRADIENT_STOP[4];
+            stops[0] = new Direct2D.D2D1_GRADIENT_STOP { position = 0.04f, color = Direct2D.D2D1_COLOR_F.FromRgb(accentRgb, 0f) };
+            stops[1] = new Direct2D.D2D1_GRADIENT_STOP { position = 0.35f, color = Direct2D.D2D1_COLOR_F.FromRgb(accentRgb, aNorm) };
+            stops[2] = new Direct2D.D2D1_GRADIENT_STOP { position = 0.65f, color = Direct2D.D2D1_COLOR_F.FromRgb(secondaryRgb, aNorm * 0.85f) };
+            stops[3] = new Direct2D.D2D1_GRADIENT_STOP { position = 0.96f, color = Direct2D.D2D1_COLOR_F.FromRgb(secondaryRgb, 0f) };
+
+            if (Direct2D.RenderTarget_CreateGradientStopCollection(
+                    _renderTarget, stops, 4, Direct2D.D2D1_GAMMA_2_2, Direct2D.D2D1_EXTEND_MODE_CLAMP, out nint stopCol) < 0 || stopCol == 0)
+                return;
+
             var props = new Direct2D.D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES
             {
                 startPoint = new Direct2D.D2D1_POINT_2F { x = x, y = y },
                 endPoint = new Direct2D.D2D1_POINT_2F { x = x + w, y = y }
             };
-            if (Direct2D.RenderTarget_CreateLinearGradientBrush(_renderTarget, in props, stopCol, out gradBrush) == 0 && gradBrush != 0)
+            if (Direct2D.RenderTarget_CreateLinearGradientBrush(_renderTarget, in props, stopCol, out nint gradBrush) < 0 || gradBrush == 0)
             {
-                var r = new Direct2D.D2D1_RECT_F { left = x, top = y, right = x + w, bottom = y + h };
-                Direct2D.RenderTarget_FillRectangle(_renderTarget, in r, gradBrush);
+                Direct2D.Release(stopCol);
+                return;
             }
+            entry = (stopCol, gradBrush);
+            _specularRimCache[key] = entry;
         }
-        finally
+        else
         {
-            if (gradBrush != 0) Direct2D.Release(gradBrush);
-            Direct2D.Release(stopCol);
+            Direct2D.LinearGradientBrush_SetStartPoint(entry.Brush, new Direct2D.D2D1_POINT_2F { x = x, y = y });
+            Direct2D.LinearGradientBrush_SetEndPoint(entry.Brush, new Direct2D.D2D1_POINT_2F { x = x + w, y = y });
         }
+
+        var r = new Direct2D.D2D1_RECT_F { left = x, top = y, right = x + w, bottom = y + h };
+        Direct2D.RenderTarget_FillRectangle(_renderTarget, in r, entry.Brush);
     }
 
     public void FillRadialAura(float cx, float cy, float radiusX, float radiusY, uint rgb, float centerAlpha)
     {
         if (_renderTarget == 0 || radiusX <= 1f || radiusY <= 1f || centerAlpha <= 0f) return;
 
-        var stops = stackalloc Direct2D.D2D1_GRADIENT_STOP[3];
-        stops[0] = new Direct2D.D2D1_GRADIENT_STOP { position = 0f, color = Direct2D.D2D1_COLOR_F.FromRgb(rgb, centerAlpha) };
-        stops[1] = new Direct2D.D2D1_GRADIENT_STOP { position = 0.45f, color = Direct2D.D2D1_COLOR_F.FromRgb(rgb, centerAlpha * 0.45f) };
-        stops[2] = new Direct2D.D2D1_GRADIENT_STOP { position = 1f, color = Direct2D.D2D1_COLOR_F.FromRgb(rgb, 0f) };
-
-        if (Direct2D.RenderTarget_CreateGradientStopCollection(
-                _renderTarget, stops, 3, Direct2D.D2D1_GAMMA_2_2, Direct2D.D2D1_EXTEND_MODE_CLAMP, out nint stopCol) < 0 || stopCol == 0)
-            return;
-
-        nint radBrush = 0;
-        try
+        byte cA = (byte)Math.Clamp((int)MathF.Round(centerAlpha * 255f), 0, 255);
+        var key = (rgb, cA);
+        if (!_radialAuraCache.TryGetValue(key, out var entry) || entry.Brush == 0)
         {
+            if (_radialAuraCache.Count >= 24)
+                ClearBrushCache(_radialAuraCache);
+
+            float aNorm = cA / 255f;
+            var stops = stackalloc Direct2D.D2D1_GRADIENT_STOP[3];
+            stops[0] = new Direct2D.D2D1_GRADIENT_STOP { position = 0f, color = Direct2D.D2D1_COLOR_F.FromRgb(rgb, aNorm) };
+            stops[1] = new Direct2D.D2D1_GRADIENT_STOP { position = 0.45f, color = Direct2D.D2D1_COLOR_F.FromRgb(rgb, aNorm * 0.45f) };
+            stops[2] = new Direct2D.D2D1_GRADIENT_STOP { position = 1f, color = Direct2D.D2D1_COLOR_F.FromRgb(rgb, 0f) };
+
+            if (Direct2D.RenderTarget_CreateGradientStopCollection(
+                    _renderTarget, stops, 3, Direct2D.D2D1_GAMMA_2_2, Direct2D.D2D1_EXTEND_MODE_CLAMP, out nint stopCol) < 0 || stopCol == 0)
+                return;
+
             var props = new Direct2D.D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES
             {
                 center = new Direct2D.D2D1_POINT_2F { x = cx, y = cy },
@@ -445,22 +564,28 @@ internal sealed unsafe class D2DRenderer : IDisposable
                 radiusX = radiusX,
                 radiusY = radiusY
             };
-            if (Direct2D.RenderTarget_CreateRadialGradientBrush(_renderTarget, in props, stopCol, out radBrush) == 0 && radBrush != 0)
+            if (Direct2D.RenderTarget_CreateRadialGradientBrush(_renderTarget, in props, stopCol, out nint radBrush) < 0 || radBrush == 0)
             {
-                var ellipse = new Direct2D.D2D1_ELLIPSE
-                {
-                    point = new Direct2D.D2D1_POINT_2F { x = cx, y = cy },
-                    radiusX = radiusX,
-                    radiusY = radiusY
-                };
-                Direct2D.RenderTarget_FillEllipse(_renderTarget, in ellipse, radBrush);
+                Direct2D.Release(stopCol);
+                return;
             }
+            entry = (stopCol, radBrush);
+            _radialAuraCache[key] = entry;
         }
-        finally
+        else
         {
-            if (radBrush != 0) Direct2D.Release(radBrush);
-            Direct2D.Release(stopCol);
+            Direct2D.RadialGradientBrush_SetCenter(entry.Brush, new Direct2D.D2D1_POINT_2F { x = cx, y = cy });
+            Direct2D.RadialGradientBrush_SetRadiusX(entry.Brush, radiusX);
+            Direct2D.RadialGradientBrush_SetRadiusY(entry.Brush, radiusY);
         }
+
+        var ellipse = new Direct2D.D2D1_ELLIPSE
+        {
+            point = new Direct2D.D2D1_POINT_2F { x = cx, y = cy },
+            radiusX = radiusX,
+            radiusY = radiusY
+        };
+        Direct2D.RenderTarget_FillEllipse(_renderTarget, in ellipse, entry.Brush);
     }
 
     public void DrawCardGlow(float x, float y, float w, float h, float radius, uint colorRgb, float intensity, bool isLight, uint dpi)
@@ -484,7 +609,8 @@ internal sealed unsafe class D2DRenderer : IDisposable
         if (_dwFactory == 0) return 0;
 
         string family = Strings.ResolveDirectWriteFontFamily();
-        var key = new TextFormatKey(family, ptSize, weight, dpi, hAlign, vAlign, wrap, ellipsis);
+        string locale = Strings.ResolveDirectWriteLocale();
+        var key = new TextFormatKey(family, locale, ptSize, weight, dpi, hAlign, vAlign, wrap, ellipsis);
         if (_textFormatCache.TryGetValue(key, out var cached) && cached.Format != 0)
             return cached.Format;
 
@@ -499,7 +625,7 @@ internal sealed unsafe class D2DRenderer : IDisposable
                 Direct2D.DWRITE_FONT_STYLE_NORMAL,
                 Direct2D.DWRITE_FONT_STRETCH_NORMAL,
                 fontSizePx,
-                "en-us",
+                locale,
                 out nint fmt) < 0 || fmt == 0)
         {
             return 0;
@@ -524,7 +650,7 @@ internal sealed unsafe class D2DRenderer : IDisposable
     {
         if (string.IsNullOrEmpty(text)) return 0;
 
-        var cacheKey = (text, ptSize, weight, dpi);
+        var cacheKey = (text, ptSize, weight, dpi, Strings.Current);
         if (_textWidthCache.TryGetValue(cacheKey, out int cachedWidth))
             return cachedWidth;
 
@@ -567,7 +693,8 @@ internal sealed unsafe class D2DRenderer : IDisposable
         bool centered = false,
         TextAlign? align = null,
         VerticalAlign vAlign = VerticalAlign.Center,
-        float alpha = 1f)
+        float alpha = 1f,
+        bool allowColorFont = false)
     {
         if (_renderTarget == 0 || string.IsNullOrEmpty(text) || right <= left || bottom <= top || alpha <= 0f)
             return;
@@ -577,13 +704,15 @@ internal sealed unsafe class D2DRenderer : IDisposable
         if (fmt == 0) return;
 
         var rc = new Direct2D.D2D1_RECT_F { left = left, top = top, right = right, bottom = bottom };
+        uint opts = Direct2D.D2D1_DRAW_TEXT_OPTIONS_CLIP |
+                    (allowColorFont ? Direct2D.D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT : 0u);
         Direct2D.RenderTarget_DrawText(
             _renderTarget,
             text,
             fmt,
             in rc,
             SetSolidBrush(rgb, alpha),
-            Direct2D.D2D1_DRAW_TEXT_OPTIONS_CLIP | Direct2D.D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+            opts);
     }
 
     public void DrawWrappedText(
@@ -596,7 +725,8 @@ internal sealed unsafe class D2DRenderer : IDisposable
         int weight,
         uint rgb,
         uint dpi,
-        float alpha = 1f)
+        float alpha = 1f,
+        bool allowColorFont = false)
     {
         if (_renderTarget == 0 || string.IsNullOrEmpty(text) || right <= left || bottom <= top || alpha <= 0f)
             return;
@@ -605,13 +735,15 @@ internal sealed unsafe class D2DRenderer : IDisposable
         if (fmt == 0) return;
 
         var rc = new Direct2D.D2D1_RECT_F { left = left, top = top, right = right, bottom = bottom };
+        uint opts = Direct2D.D2D1_DRAW_TEXT_OPTIONS_CLIP |
+                    (allowColorFont ? Direct2D.D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT : 0u);
         Direct2D.RenderTarget_DrawText(
             _renderTarget,
             text,
             fmt,
             in rc,
             SetSolidBrush(rgb, alpha),
-            Direct2D.D2D1_DRAW_TEXT_OPTIONS_CLIP | Direct2D.D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+            opts);
     }
 
     public bool DrawIcon(nint hIcon, float x, float y, float size)
@@ -714,6 +846,40 @@ internal sealed unsafe class D2DRenderer : IDisposable
         }
     }
 
+    private nint GetOrCreateSpeakerBodyGeo()
+    {
+        if (_speakerBodyGeo != 0 || _d2dFactory == 0)
+            return _speakerBodyGeo;
+
+        if (Direct2D.Factory_CreatePathGeometry(_d2dFactory, out nint geo) < 0 || geo == 0)
+            return 0;
+
+        nint sink = 0;
+        bool ok = false;
+        try
+        {
+            if (Direct2D.PathGeometry_Open(geo, out sink) == 0 && sink != 0)
+            {
+                Direct2D.Sink_BeginFigure(sink, new Direct2D.D2D1_POINT_2F { x = -1.15f, y = -0.42f }, Direct2D.D2D1_FIGURE_BEGIN_FILLED);
+                Direct2D.Sink_AddLine(sink, new Direct2D.D2D1_POINT_2F { x = -0.55f, y = -0.42f });
+                Direct2D.Sink_AddLine(sink, new Direct2D.D2D1_POINT_2F { x = 0.12f, y = -0.95f });
+                Direct2D.Sink_AddLine(sink, new Direct2D.D2D1_POINT_2F { x = 0.12f, y = 0.95f });
+                Direct2D.Sink_AddLine(sink, new Direct2D.D2D1_POINT_2F { x = -0.55f, y = 0.42f });
+                Direct2D.Sink_AddLine(sink, new Direct2D.D2D1_POINT_2F { x = -1.15f, y = 0.42f });
+                Direct2D.Sink_EndFigure(sink, Direct2D.D2D1_FIGURE_END_CLOSED);
+                Direct2D.Sink_Close(sink);
+                _speakerBodyGeo = geo;
+                ok = true;
+            }
+        }
+        finally
+        {
+            if (sink != 0) Direct2D.Release(sink);
+            if (!ok) Direct2D.Release(geo);
+        }
+        return _speakerBodyGeo;
+    }
+
     public void DrawSpeakerGlyph(float x, float y, float sz, bool isMuted, uint rgb, uint dpi)
     {
         if (_renderTarget == 0 || _d2dFactory == 0) return;
@@ -722,32 +888,12 @@ internal sealed unsafe class D2DRenderer : IDisposable
         float cy = y + sz * 0.5f;
         float u = sz * 0.22f;
 
-        if (Direct2D.Factory_CreatePathGeometry(_d2dFactory, out nint geo) == 0 && geo != 0)
+        nint bodyGeo = GetOrCreateSpeakerBodyGeo();
+        if (bodyGeo != 0 && u > 0.01f)
         {
-            nint sink = 0;
-            try
-            {
-                if (Direct2D.PathGeometry_Open(geo, out sink) == 0 && sink != 0)
-                {
-                    float x0 = cx - u * 1.15f;
-                    float x1 = cx - u * 0.55f;
-                    float x2 = cx + u * 0.12f;
-                    Direct2D.Sink_BeginFigure(sink, new Direct2D.D2D1_POINT_2F { x = x0, y = cy - u * 0.42f }, Direct2D.D2D1_FIGURE_BEGIN_FILLED);
-                    Direct2D.Sink_AddLine(sink, new Direct2D.D2D1_POINT_2F { x = x1, y = cy - u * 0.42f });
-                    Direct2D.Sink_AddLine(sink, new Direct2D.D2D1_POINT_2F { x = x2, y = cy - u * 0.95f });
-                    Direct2D.Sink_AddLine(sink, new Direct2D.D2D1_POINT_2F { x = x2, y = cy + u * 0.95f });
-                    Direct2D.Sink_AddLine(sink, new Direct2D.D2D1_POINT_2F { x = x1, y = cy + u * 0.42f });
-                    Direct2D.Sink_AddLine(sink, new Direct2D.D2D1_POINT_2F { x = x0, y = cy + u * 0.42f });
-                    Direct2D.Sink_EndFigure(sink, Direct2D.D2D1_FIGURE_END_CLOSED);
-                    Direct2D.Sink_Close(sink);
-                    Direct2D.RenderTarget_FillGeometry(_renderTarget, geo, SetSolidBrush(rgb));
-                }
-            }
-            finally
-            {
-                if (sink != 0) Direct2D.Release(sink);
-                Direct2D.Release(geo);
-            }
+            PushTransform(Direct2D.D2D1_MATRIX_3X2_F.TranslateAndScaleAt(cx, cy, u, u, 0f, 0f));
+            Direct2D.RenderTarget_FillGeometry(_renderTarget, bodyGeo, SetSolidBrush(rgb));
+            PopTransform();
         }
 
         float strokeW = MathF.Max(1.3f, Theme.ScaleF(1.35f, dpi));
@@ -768,33 +914,66 @@ internal sealed unsafe class D2DRenderer : IDisposable
     private void DrawArc(float cx, float cy, float radius, float startDeg, float endDeg, uint rgb, float strokeWidth)
     {
         if (_renderTarget == 0 || _d2dFactory == 0 || radius <= 0.5f) return;
-        float r0 = startDeg * (MathF.PI / 180f);
-        float r1 = endDeg * (MathF.PI / 180f);
-        var p0 = new Direct2D.D2D1_POINT_2F { x = cx + MathF.Cos(r0) * radius, y = cy + MathF.Sin(r0) * radius };
-        var p1 = new Direct2D.D2D1_POINT_2F { x = cx + MathF.Cos(r1) * radius, y = cy + MathF.Sin(r1) * radius };
 
-        if (Direct2D.Factory_CreatePathGeometry(_d2dFactory, out nint geo) < 0 || geo == 0) return;
-        nint sink = 0;
-        try
+        int sDeg = (int)MathF.Round(startDeg);
+        int eDeg = (int)MathF.Round(endDeg);
+        int halfPxR = Math.Clamp((int)MathF.Round(radius * 2f), 1, 2000);
+        float actualR = halfPxR * 0.5f;
+        var key = (sDeg, eDeg, halfPxR);
+
+        if (!_arcGeoCache.TryGetValue(key, out nint geo) || geo == 0)
         {
-            if (Direct2D.PathGeometry_Open(geo, out sink) < 0 || sink == 0) return;
-            Direct2D.Sink_BeginFigure(sink, p0, Direct2D.D2D1_FIGURE_BEGIN_HOLLOW);
-            var seg = new Direct2D.D2D1_ARC_SEGMENT
+            if (_arcGeoCache.Count >= 48)
             {
-                point = p1,
-                size = new Direct2D.D2D1_SIZE_F { width = radius, height = radius },
-                sweepDirection = Direct2D.D2D1_SWEEP_DIRECTION_CLOCKWISE,
-                arcSize = MathF.Abs(endDeg - startDeg) > 180f ? Direct2D.D2D1_ARC_SIZE_LARGE : Direct2D.D2D1_ARC_SIZE_SMALL
-            };
-            Direct2D.Sink_AddArc(sink, in seg);
-            Direct2D.Sink_EndFigure(sink, Direct2D.D2D1_FIGURE_END_OPEN);
-            Direct2D.Sink_Close(sink);
-            Direct2D.RenderTarget_DrawGeometry(_renderTarget, geo, SetSolidBrush(rgb), strokeWidth, _roundStrokeStyle);
+                foreach (nint g in _arcGeoCache.Values)
+                {
+                    if (g != 0) Direct2D.Release(g);
+                }
+                _arcGeoCache.Clear();
+            }
+
+            float r0 = sDeg * (MathF.PI / 180f);
+            float r1 = eDeg * (MathF.PI / 180f);
+            var p0 = new Direct2D.D2D1_POINT_2F { x = MathF.Cos(r0) * actualR, y = MathF.Sin(r0) * actualR };
+            var p1 = new Direct2D.D2D1_POINT_2F { x = MathF.Cos(r1) * actualR, y = MathF.Sin(r1) * actualR };
+
+            if (Direct2D.Factory_CreatePathGeometry(_d2dFactory, out nint createdGeo) < 0 || createdGeo == 0)
+                return;
+
+            nint sink = 0;
+            bool ok = false;
+            try
+            {
+                if (Direct2D.PathGeometry_Open(createdGeo, out sink) == 0 && sink != 0)
+                {
+                    Direct2D.Sink_BeginFigure(sink, p0, Direct2D.D2D1_FIGURE_BEGIN_HOLLOW);
+                    var seg = new Direct2D.D2D1_ARC_SEGMENT
+                    {
+                        point = p1,
+                        size = new Direct2D.D2D1_SIZE_F { width = actualR, height = actualR },
+                        sweepDirection = Direct2D.D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                        arcSize = Math.Abs(eDeg - sDeg) > 180 ? Direct2D.D2D1_ARC_SIZE_LARGE : Direct2D.D2D1_ARC_SIZE_SMALL
+                    };
+                    Direct2D.Sink_AddArc(sink, in seg);
+                    Direct2D.Sink_EndFigure(sink, Direct2D.D2D1_FIGURE_END_OPEN);
+                    Direct2D.Sink_Close(sink);
+                    geo = createdGeo;
+                    _arcGeoCache[key] = geo;
+                    ok = true;
+                }
+            }
+            finally
+            {
+                if (sink != 0) Direct2D.Release(sink);
+                if (!ok) Direct2D.Release(createdGeo);
+            }
         }
-        finally
+
+        if (geo != 0)
         {
-            if (sink != 0) Direct2D.Release(sink);
-            Direct2D.Release(geo);
+            PushTransform(Direct2D.D2D1_MATRIX_3X2_F.Translation(cx, cy));
+            Direct2D.RenderTarget_DrawGeometry(_renderTarget, geo, SetSolidBrush(rgb), strokeWidth, _roundStrokeStyle);
+            PopTransform();
         }
     }
 
@@ -898,6 +1077,19 @@ internal sealed unsafe class D2DRenderer : IDisposable
         DrawLine(cx, cy, x + sz * 0.74f, cy, rgb, sw);
     }
 
+    public void DrawRefreshGlyph(float cx, float cy, float sz, uint rgb, uint dpi)
+    {
+        float sw = MathF.Max(1.3f, Theme.ScaleF(1.4f, dpi));
+        float r = sz * 0.34f;
+        DrawArc(cx, cy, r, -42f, 240f, rgb, sw);
+        float tipRad = -42f * (MathF.PI / 180f);
+        float tx = cx + MathF.Cos(tipRad) * r;
+        float ty = cy + MathF.Sin(tipRad) * r;
+        float ah = MathF.Max(2.5f, sz * 0.16f);
+        DrawLine(tx, ty, tx - ah * 0.95f, ty - ah * 0.15f, rgb, sw);
+        DrawLine(tx, ty, tx - ah * 0.05f, ty - ah * 0.95f, rgb, sw);
+    }
+
     public void DrawLockGlyph(float cx, float cy, float sz, uint rgb, uint dpi)
     {
         float sw = MathF.Max(1.3f, Theme.ScaleF(1.35f, dpi));
@@ -938,6 +1130,16 @@ internal sealed unsafe class D2DRenderer : IDisposable
         ClearTextFormatCache();
         ReleaseDeviceResources();
 
+        if (_speakerBodyGeo != 0)
+        {
+            Direct2D.Release(_speakerBodyGeo);
+            _speakerBodyGeo = 0;
+        }
+        foreach (nint g in _arcGeoCache.Values)
+        {
+            if (g != 0) Direct2D.Release(g);
+        }
+        _arcGeoCache.Clear();
         if (_roundStrokeStyle != 0)
         {
             Direct2D.Release(_roundStrokeStyle);

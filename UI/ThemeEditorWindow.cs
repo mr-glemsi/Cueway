@@ -57,6 +57,8 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
 
     private string? _hoverId;
     private bool _trackingMouse;
+    private bool _hoverIsHand;
+    private bool _previewActive;
     private bool _disposed;
 
     public ThemeEditorWindow(
@@ -145,39 +147,44 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
         Win32.DwmSetWindowAttribute(_hwnd, Win32.DWMWA_BORDER_COLOR, &bdr, sizeof(uint));
         Win32.SetWindowPos(_hwnd, 0, 0, 0, 0, 0,
             Win32.SWP_NOMOVE | Win32.SWP_NOSIZE | Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE | Win32.SWP_FRAMECHANGED);
-        Win32.RedrawWindow(_hwnd, null, 0, Win32.RDW_FRAME | Win32.RDW_INVALIDATE | Win32.RDW_UPDATENOW);
+        Win32.RedrawWindow(_hwnd, null, 0, Win32.RDW_FRAME | Win32.RDW_INVALIDATE);
     }
 
     private void UpdateEditControlStyle()
     {
         if (_editHwnd == 0) return;
 
-        if (_editFont != 0)
-        {
-            Win32.DeleteObject(_editFont);
-            _editFont = 0;
-        }
+        nint oldFont = _editFont;
         var (editFace, editWeight) = Strings.ResolveFont(Win32.FW_SEMIBOLD);
-        _editFont = Win32.CreateFontW(
+        nint newFont = Win32.CreateFontW(
             -S(13), 0, 0, 0, editWeight, 0, 0, 0,
             1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, editFace);
-        if (_editFont != 0)
+        if (newFont != 0)
         {
-            Win32.SendMessageW(_editHwnd, Win32.WM_SETFONT, (nuint)_editFont, 1);
+            _editFont = newFont;
+            Win32.SendMessageW(_editHwnd, Win32.WM_SETFONT, (nuint)newFont, 1);
+            if (oldFont != 0)
+                Win32.DeleteObject(oldFont);
         }
 
         uint targetBg = Theme.BgControl;
         if (_editBgBrush == 0 || _editBgBrushRgb != targetBg)
         {
-            if (_editBgBrush != 0)
+            nint oldBrush = _editBgBrush;
+            nint newBrush = Win32.CreateSolidBrush(Theme.ToColorRef(targetBg));
+            if (newBrush != 0)
             {
-                Win32.DeleteObject(_editBgBrush);
-                _editBgBrush = 0;
+                _editBgBrush = newBrush;
+                _editBgBrushRgb = targetBg;
+                Win32.InvalidateRect(_editHwnd, null, true);
+                if (oldBrush != 0)
+                    Win32.DeleteObject(oldBrush);
             }
-            _editBgBrush = Win32.CreateSolidBrush(Theme.ToColorRef(targetBg));
-            _editBgBrushRgb = targetBg;
         }
-        Win32.InvalidateRect(_editHwnd, null, true);
+        else
+        {
+            Win32.InvalidateRect(_editHwnd, null, true);
+        }
     }
 
     public void RefreshLocalizationAndTheme()
@@ -271,6 +278,7 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
     private void ApplyLivePreview()
     {
         var palette = BuildPreviewPalette();
+        _previewActive = true;
         Theme.SetPreviewPalette(palette);
         UpdateEditControlStyle();
         ApplyDwmTheme();
@@ -278,17 +286,23 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
         RequestRepaint();
     }
 
-    private void CloseAndRevert()
+    public void CloseAndRevert()
     {
-        Theme.SetPreviewPalette(null);
-        _onPreviewChanged();
-        if (_hwnd != 0)
+        bool wasVisible = _hwnd != 0 && Win32.IsWindowVisible(_hwnd);
+        if (_previewActive)
+        {
+            _previewActive = false;
+            Theme.SetPreviewPalette(null);
+            _onPreviewChanged();
+        }
+        if (wasVisible)
             Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
     }
 
     private void SaveAndClose()
     {
         string name = ReadNameInput();
+        _previewActive = false;
         Theme.SetPreviewPalette(null);
         var saved = _stateStore.SaveCustomTheme(_editingThemeId, name, _bgRgb, _cardRgb, _accentRgb, activate: true);
         _onPreviewChanged();
@@ -302,6 +316,7 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
         if (string.IsNullOrWhiteSpace(_editingThemeId))
             return;
         string name = ReadNameInput();
+        _previewActive = false;
         Theme.SetPreviewPalette(null);
         _stateStore.DeleteCustomTheme(_editingThemeId);
         _onPreviewChanged();
@@ -326,7 +341,9 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
     {
         if (_editHwnd == 0) return;
         int w = Math.Max(120, _clientW - S(64));
-        Win32.SetWindowPos(_editHwnd, 0, S(32), S(105), w, S(22), Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
+        int editH = S(20);
+        int editY = S(89) + Math.Max(0, (S(36) - editH) / 2);
+        Win32.SetWindowPos(_editHwnd, 0, S(32), editY, w, editH, Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
     }
 
     private void RequestRepaint()
@@ -342,74 +359,93 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
         if (inst == null)
             return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
 
-        switch (msg)
+        try
         {
-            case Win32.WM_SIZE:
-                inst._clientW = (int)(lParam & 0xFFFF);
-                inst._clientH = (int)((lParam >> 16) & 0xFFFF);
-                inst.PositionEditControl();
-                inst.RequestRepaint();
-                return 0;
-
-            case Win32.WM_DPICHANGED:
-                uint newDpi = (uint)(wParam & 0xFFFF);
-                if (newDpi >= 96 && newDpi != inst._dpi)
-                {
-                    inst._dpi = newDpi;
-                    inst.ClearFontCache();
-                    inst.UpdateEditControlStyle();
+            switch (msg)
+            {
+                case Win32.WM_SIZE:
+                    inst._clientW = (int)(lParam & 0xFFFF);
+                    inst._clientH = (int)((lParam >> 16) & 0xFFFF);
                     inst.PositionEditControl();
                     inst.RequestRepaint();
-                }
-                return 0;
+                    return 0;
 
-            case Win32.WM_CTLCOLOREDIT:
-                if (lParam == inst._editHwnd && inst._editBgBrush != 0)
-                {
-                    Win32.SetTextColor((nint)wParam, Theme.ToColorRef(Theme.TextPrimary));
-                    Win32.SetBkColor((nint)wParam, Theme.ToColorRef(Theme.BgControl));
-                    return inst._editBgBrush;
-                }
-                break;
-
-            case Win32.WM_ERASEBKGND:
-                return 1;
-
-            case Win32.WM_PAINT:
-                inst.HandlePaint(hwnd);
-                return 0;
-
-            case Win32.WM_MOUSEMOVE:
-                inst.HandleMouseMove(lParam);
-                return 0;
-
-            case Win32.WM_MOUSELEAVE:
-                inst._trackingMouse = false;
-                if (inst._hoverId != null)
-                {
-                    inst._hoverId = null;
+                case Win32.WM_DPICHANGED:
+                    uint newDpi = (uint)(wParam & 0xFFFF);
+                    if (newDpi >= 96 && newDpi != inst._dpi)
+                    {
+                        inst._dpi = newDpi;
+                        inst.ClearFontCache();
+                        inst.UpdateEditControlStyle();
+                    }
+                    var suggested = *(Win32.RECT*)lParam;
+                    Win32.SetWindowPos(hwnd, 0, suggested.Left, suggested.Top, suggested.Width, suggested.Height,
+                        Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
+                    inst.PositionEditControl();
                     inst.RequestRepaint();
-                }
-                return 0;
+                    return 0;
 
-            case Win32.WM_LBUTTONUP:
-                inst.HandleLeftClick(lParam);
-                return 0;
+                case Win32.WM_SETCURSOR:
+                    if ((lParam & 0xFFFF) == Win32.HTCLIENT)
+                    {
+                        Win32.SetCursor(inst._hoverIsHand && inst._cursorHand != 0 ? inst._cursorHand : inst._cursorArrow);
+                        return 1;
+                    }
+                    break;
 
-            case Win32.WM_KEYDOWN:
-                if (wParam == Win32.VK_ESCAPE)
-                {
+                case Win32.WM_CTLCOLOREDIT:
+                    if (lParam == inst._editHwnd && inst._editBgBrush != 0)
+                    {
+                        Win32.SetTextColor((nint)wParam, Theme.ToColorRef(Theme.TextPrimary));
+                        Win32.SetBkColor((nint)wParam, Theme.ToColorRef(Theme.BgControl));
+                        return inst._editBgBrush;
+                    }
+                    break;
+
+                case Win32.WM_ERASEBKGND:
+                    return 1;
+
+                case Win32.WM_PAINT:
+                    inst.HandlePaint(hwnd);
+                    return 0;
+
+                case Win32.WM_MOUSEMOVE:
+                    inst.HandleMouseMove(lParam);
+                    return 0;
+
+                case Win32.WM_MOUSELEAVE:
+                    inst._trackingMouse = false;
+                    inst._hoverIsHand = false;
+                    if (inst._hoverId != null)
+                    {
+                        inst._hoverId = null;
+                        inst.RequestRepaint();
+                    }
+                    return 0;
+
+                case Win32.WM_LBUTTONUP:
+                    inst.HandleLeftClick(lParam);
+                    return 0;
+
+                case Win32.WM_KEYDOWN:
+                    if (wParam == Win32.VK_ESCAPE)
+                    {
+                        inst.CloseAndRevert();
+                        return 0;
+                    }
+                    break;
+
+                case Win32.WM_CLOSE:
                     inst.CloseAndRevert();
                     return 0;
-                }
-                break;
+            }
 
-            case Win32.WM_CLOSE:
-                inst.CloseAndRevert();
-                return 0;
+            return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
         }
-
-        return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+        catch
+        {
+            return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
     }
 
     private void HandleMouseMove(nint lParam)
@@ -430,7 +466,8 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
         int y = unchecked((short)((lParam >> 16) & 0xFFFF));
         HitRegion? hit = FindHit(x, y);
         string? nextHover = hit?.Id;
-        Win32.SetCursor(hit != null && hit.IsButton && _cursorHand != 0 ? _cursorHand : _cursorArrow);
+        _hoverIsHand = hit != null && hit.IsButton;
+        Win32.SetCursor(_hoverIsHand && _cursorHand != 0 ? _cursorHand : _cursorArrow);
 
         if (!string.Equals(_hoverId, nextHover, StringComparison.Ordinal))
         {
@@ -443,7 +480,7 @@ internal sealed unsafe class ThemeEditorWindow : IDisposable
     {
         int x = unchecked((short)(lParam & 0xFFFF));
         int y = unchecked((short)((lParam >> 16) & 0xFFFF));
-        FindHit(x, y)?.OnClick();
+        try { FindHit(x, y)?.OnClick(); } catch { }
     }
 
     private HitRegion? FindHit(int x, int y)

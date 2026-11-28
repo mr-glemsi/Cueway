@@ -34,6 +34,24 @@ internal static class Strings
         _ => IsWindows11OrLater ? "Segoe UI Variable Text" : "Segoe UI"
     };
 
+    public static string ResolveDirectWriteLocale() => Current switch
+    {
+        AppLanguage.Tr => "tr-TR",
+        AppLanguage.En => "en-US",
+        AppLanguage.Zh => "zh-CN",
+        AppLanguage.Es => "es-ES",
+        AppLanguage.Ru => "ru-RU",
+        AppLanguage.De => "de-DE",
+        AppLanguage.Fr => "fr-FR",
+        AppLanguage.Ja => "ja-JP",
+        AppLanguage.Ko => "ko-KR",
+        AppLanguage.Pt => "pt-BR",
+        AppLanguage.It => "it-IT",
+        AppLanguage.Pl => "pl-PL",
+        AppLanguage.Fi => "fi-FI",
+        _ => "en-US"
+    };
+
     public static (string FaceName, int Weight) ResolveFont(int requestedWeight) => Current switch
     {
         AppLanguage.Zh => ("Microsoft YaHei UI", requestedWeight),
@@ -41,11 +59,13 @@ internal static class Strings
             ? ("Yu Gothic UI Semibold", 600)
             : ("Yu Gothic UI", requestedWeight),
         AppLanguage.Ko => ("Malgun Gothic", requestedWeight),
-        _ => requestedWeight >= 700
-            ? (IsWindows11OrLater ? "Segoe UI Variable Text" : "Segoe UI Semibold", IsWindows11OrLater ? 700 : 600)
-            : requestedWeight >= 500
-                ? ("Segoe UI Semibold", 600)
-                : ("Segoe UI", 400)
+        _ => IsWindows11OrLater
+            ? ("Segoe UI Variable Text", requestedWeight >= 700 ? 700 : requestedWeight >= 500 ? 600 : 400)
+            : requestedWeight >= 700
+                ? ("Segoe UI", 700)
+                : requestedWeight >= 500
+                    ? ("Segoe UI Semibold", 600)
+                    : ("Segoe UI", 400)
     };
 
     public static readonly LanguageOption[] Languages =
@@ -337,7 +357,7 @@ internal static class Strings
         };
     }
 
-    public static string BtnCustomTheme => T("+ Özel", "+ Custom", "+ 自定义", "+ Propio", "+ Своя", "+ Eigene", "+ Perso", "+ カスタム", "+ 사용자", "+ Novo", "+ Nuovo", "+ Własny", "+ Oma");
+    public static string BtnCustomTheme => T("+ Özel", "+ Custom", "+ 自定义", "+ Propio", "+ Своя", "+ Eigene", "+ Perso", "+ カスタム", "+ 커스텀", "+ Novo", "+ Nuovo", "+ Własny", "+ Oma");
     public static string ThemeStudioTitle => T("Özel Tema Stüdyosu", "Custom Theme Studio", "自定义主题工坊", "Estudio de Temas", "Студия тем", "Theme-Studio", "Studio de Thèmes", "テーマスタジオ", "테마 스튜디오", "Estúdio de Temas", "Studio Temi", "Studio motywów", "Teemastudio");
     public static string ThemeStudioSub => T("Renklerini seç, canlı önizle ve kaydet", "Pick your colors, preview live, and save", "挑选色彩、实时预览并保存", "Elige colores, previsualiza y guarda", "Выберите цвета, оцените и сохраните", "Farben wählen, live testen und speichern", "Choisissez vos couleurs et enregistrez", "色を選んでライブプレビュー＆保存", "색상을 고르고 실시간 미리보기 후 저장", "Escolha suas cores, visualize ao vivo e salve", "Scegli i colori, guarda l'anteprima e salva", "Wybierz kolory, zobacz podgląd na żywo i zapisz", "Valitse värit, esikatsele reaaliajassa ja tallenna");
     public static string ThemeFieldName => T("Tema Adı", "Theme Name", "主题名称", "Nombre", "Название", "Name", "Nom du thème", "テーマ名", "테마 이름", "Nome do Tema", "Nome tema", "Nazwa motywu", "Teeman nimi");
@@ -413,13 +433,13 @@ internal static class Strings
         "Uruchamiaj w tle w zasobniku bez otwierania głównego okna (--minimized)",
         "Käynnistä taustalla ilmoitusalueelle avaamatta pääikkunaa (--minimized)");
 
-    public static string SetMinCloseTitle => T("Kapat (✕) Tuşunda Tepsiye Küçült", "Minimize to Tray on Close (✕)", "点击关闭按钮时最小化到托盘", "Minimizar a bandeja al cerrar (✕)", "Сворачивать в трей при закрытии (✕)", "Beim Schließen (✕) in Infobereich minimieren", "Réduire dans la barre à la fermeture (✕)", "閉じる (✕) でトレイに最小化", "닫기 (✕) 시 트레이로 최소화", "Minimizar para a Bandeja ao Fechar (✕)", "Riduci a icona alla chiusura (✕)", "Minimalizuj do zasobnika przy zamykaniu (✕)", "Pienennä ilmoitusalueelle suljettaessa (✕)");
+    public static string SetMinCloseTitle => T("Kapat (×) Tuşunda Tepsiye Küçült", "Minimize to Tray on Close (×)", "点击关闭按钮时最小化到托盘", "Minimizar a bandeja al cerrar (×)", "Сворачивать в трей при закрытии (×)", "Beim Schließen (×) in Infobereich minimieren", "Réduire dans la barre à la fermeture (×)", "閉じる (×) でトレイに最小化", "닫기 (×) 시 트레이로 최소화", "Minimizar para a Bandeja ao Fechar (×)", "Riduci a icona alla chiusura (×)", "Minimalizuj do zasobnika przy zamykaniu (×)", "Pienennä ilmoitusalueelle suljettaessa (×)");
     public static string SetMinCloseSub => T(
         "Kapat düğmesine basıldığında uygulamayı kapatmak yerine sistem tepsisinde çalışmaya devam et",
         "Keep running in the system tray instead of exiting when closing the window",
         "点击窗口关闭按钮时隐藏到系统托盘继续运行，而不是退出程序",
         "Seguir ejecutándose en la bandeja en lugar de cerrar la aplicación",
-        "Продолжать работу в трее вместо закрытия программы при нажатии ✕",
+        "Продолжать работу в трее вместо закрытия программы при нажатии ×",
         "Beim Schließen im Infobereich weiterlaufen statt zu beenden",
         "Continuer en arrière-plan au lieu de quitter lors de la fermeture",
         "ウィンドウを閉じても終了せずシステムトレイで常駐を続けます",
@@ -829,7 +849,7 @@ internal static class Strings
         "Abbassa solo il volume della destinazione attiva senza uscire dal gioco",
         "Zmniejsza głośność wyłącznie aktywnego celu bez wychodzenia z gry",
         "Laskee vain aktiivisen kohteen äänenvoimakkuutta poistumatta pelistä");
-    public static string SetHkVolMuteTitle => T("Hedef Sesi Kapat / Aç", "Mute / Unmute Target", "静音 / 恢复目标声音", "Silenciar / Reactivar objetivo", "Заглушить / Вкл. звук цели", "Ziel stummschalten", "Couper / Rétablir le son cible", "対象のミュート切替", "대상 음소거 전환", "Silenciar / Reativar Alvo", "Disattiva / Riattiva audio alvo", "Wycisz / Odcisz cel", "Mykistä / Poista mykistys");
+    public static string SetHkVolMuteTitle => T("Hedef Sesi Kapat / Aç", "Mute / Unmute Target", "静音 / 恢复目标声音", "Silenciar / Reactivar objetivo", "Заглушить / Вкл. звук цели", "Ziel stummschalten", "Couper / Rétablir le son cible", "対象のミュート切替", "대상 음소거 전환", "Silenciar / Reativar Alvo", "Disattiva / Riattiva audio destinazione", "Wycisz / Odcisz cel", "Mykistä / Poista mykistys");
     public static string SetHkVolMuteSub => T(
         "Yalnızca aktif hedef uygulama veya sekmenin sesini susturur ya da geri açar",
         "Toggle mute strictly for the active target app or browser tab",
@@ -902,7 +922,7 @@ internal static class Strings
     public static string HotkeyUnassigned => T("Atanmadı", "Not set", "未设置", "Sin asignar", "Не задано", "Nicht belegt", "Non défini", "未設定", "미지정", "Não definido", "Non impostato", "Nie przypisano", "Ei asetettu");
     public static string HotkeyListening => T("Tuşa basın...", "Press keys...", "请按键...", "Pulsa teclas...", "Нажмите...", "Taste drücken...", "Appuyez...", "キー入力待ち...", "키를 누르세요...", "Pressione...", "Premi i tasti...", "Naciśnij...", "Paina näppäintä...");
     public static string HotkeyHint => T(
-        "Kısayola tıklayıp tuş kombinasyonuna basın (örn. Ctrl+Alt+Y)  •  Esc: İptal  •  Backspace / ×: Temizle",
+        "Kısayola tıklayıp tuş kombinasyonuna basın (ör. Ctrl+Alt+Y)  •  Esc: İptal  •  Backspace / ×: Temizle",
         "Click a shortcut pill and press any combo (e.g. Ctrl+Alt+Y)  •  Esc: Cancel  •  Backspace / ×: Clear",
         "点击快捷键按钮并按下组合键（例如 Ctrl+Alt+Y） •  Esc：取消  •  Backspace / ×：清除",
         "Haz clic y pulsa una combinación (ej. Ctrl+Alt+Y)  •  Esc: Cancelar  •  Backspace / ×: Borrar",
@@ -1060,18 +1080,18 @@ internal static class Strings
         "Hallitsee saman selaimen välilehtiä itsenäisesti viemättä ikkunan kohdistusta");
     public static string BadgeBridgeConnected(int browsers, int tabs) => Current switch
     {
-        AppLanguage.En => $"Connected ({browsers} • {tabs} tabs)",
+        AppLanguage.En => $"Connected ({browsers} • {tabs} {(tabs == 1 ? "tab" : "tabs")})",
         AppLanguage.Zh => $"已连接 ({browsers} 浏览器 • {tabs} 标签页)",
-        AppLanguage.Es => $"Conectado ({browsers} • {tabs} pestañas)",
+        AppLanguage.Es => $"Conectado ({browsers} • {tabs} {(tabs == 1 ? "pestaña" : "pestañas")})",
         AppLanguage.Ru => $"Подкл. ({browsers} • {tabs} вкл.)",
-        AppLanguage.De => $"Verbunden ({browsers} • {tabs} Tabs)",
-        AppLanguage.Fr => $"Connecté ({browsers} • {tabs} onglets)",
+        AppLanguage.De => $"Verbunden ({browsers} • {tabs} {(tabs == 1 ? "Tab" : "Tabs")})",
+        AppLanguage.Fr => $"Connecté ({browsers} • {tabs} {(tabs == 1 ? "onglet" : "onglets")})",
         AppLanguage.Ja => $"接続済み ({browsers} • {tabs} タブ)",
         AppLanguage.Ko => $"연결됨 ({browsers} • {tabs}개 탭)",
-        AppLanguage.Pt => $"Conectado ({browsers} • {tabs} abas)",
-        AppLanguage.It => $"Connesso ({browsers} • {tabs} schede)",
-        AppLanguage.Pl => $"Połączono ({browsers} • {tabs} kart)",
-        AppLanguage.Fi => $"Yhdistetty ({browsers} • {tabs} välilehteä)",
+        AppLanguage.Pt => $"Conectado ({browsers} • {tabs} {(tabs == 1 ? "aba" : "abas")})",
+        AppLanguage.It => $"Connesso ({browsers} • {tabs} {(tabs == 1 ? "scheda" : "schede")})",
+        AppLanguage.Pl => $"Połączono ({browsers} • {tabs} {(tabs == 1 ? "karta" : (tabs % 10 is >= 2 and <= 4 && tabs % 100 is not (>= 12 and <= 14) ? "karty" : "kart"))})",
+        AppLanguage.Fi => $"Yhdistetty ({browsers} • {tabs} {(tabs == 1 ? "välilehti" : "välilehteä")})",
         _ => $"Bağlı ({browsers} tarayıcı • {tabs} sekme)"
     };
     public static string BadgeBridgeDisconnected => T("Bağlı Değil", "Not Connected", "未连接", "Desconectado", "Не подключено", "Nicht verbunden", "Non connecté", "未接続", "연결 안 됨", "Desconectado", "Non connesso", "Niepołączono", "Ei yhteyttä");
@@ -1285,14 +1305,14 @@ internal static class Strings
         "3. Laajennus käynnistyy ja Cueway muodostaa yhteyden heti!");
 
     public static string GuideAnimDevMode => T("Geliştirici modu", "Developer mode", "开发人员模式", "Modo desarrollador", "Режим разработчика", "Entwicklermodus", "Mode développeur", "デベロッパーモード", "개발자 모드", "Modo desenvolvedor", "Modalità sviluppatore", "Tryb dewelopera", "Kehittäjätila");
-    public static string GuideAnimLoadUnpacked => T("Paketlenmemiş yükle", "Load unpacked", "加载已解压的", "Cargar descomprimida", "Загрузить распаков.", "Entpackte laden", "Charger non empaquetée", "パッケージ化されていない読み込み", "압축해제된 확장 로드", "Carregar sem comp.", "Carica non pacchett.", "Załaduj rozpakowane", "Lataa pakkaamaton");
+    public static string GuideAnimLoadUnpacked => T("Paketlenmemiş yükle", "Load unpacked", "加载已解压的", "Cargar descomprimida", "Загрузить распаков.", "Entpackte laden", "Charger non empaquetée", "パッケージ化されていない拡張機能を読み込む", "압축해제된 확장 로드", "Carregar sem comp.", "Carica non pacchett.", "Załaduj rozpakowane", "Lataa pakkaamaton");
     public static string GuideAnimSelectFolder => T("Klasör Seç", "Select Folder", "选择文件夹", "Seleccionar", "Выбрать папку", "Auswählen", "Sélectionner", "フォルダー選択", "폴더 선택", "Selecionar", "Seleziona", "Wybierz folder", "Valitse kansio");
     public static string GuideAnimLoadTemp => T("Geçici Eklenti Yükle...", "Load Temporary Add-on...", "临时载入附加组件...", "Cargar complemento...", "Загрузить временное...", "Temporäres Add-on...", "Charger module temp...", "一時的なアドオンを読み込む...", "임시 부가 기능 로드...", "Carregar temporário...", "Carica temporaneo...", "Wczytaj tymczasowy...", "Lataa väliaikainen...");
     public static string GuideAnimOpenBtn => T("Aç", "Open", "打开", "Abrir", "Открыть", "Öffnen", "Ouvrir", "開く", "열기", "Abrir", "Apri", "Otwórz", "Avaa");
     public static string GuideAnimPasteHint => T("Ctrl+V ile yol yapıştırıldı", "Path pasted with Ctrl+V", "已按 Ctrl+V 粘贴路径", "Ruta pegada con Ctrl+V", "Путь вставлен (Ctrl+V)", "Pfad mit Strg+V eingefügt", "Chemin collé (Ctrl+V)", "Ctrl+V でパスを貼り付けました", "Ctrl+V로 경로가 붙여넣어졌습니다", "Caminho colado com Ctrl+V", "Percorso incollato (Ctrl+V)", "Wklejono ścieżkę (Ctrl+V)", "Polku liitetty (Ctrl+V)");
     public static string GuideAnimShortcutKey => T("Ctrl + V", "Ctrl + V", "Ctrl + V", "Ctrl + V", "Ctrl + V", "Strg + V", "Ctrl + V", "Ctrl + V", "Ctrl + V", "Ctrl + V", "Ctrl + V", "Ctrl + V", "Ctrl + V");
     public static string GuideAnimConnectedLive => T("● Bağlı (Canlı)", "● Connected (Live)", "● 已连接（实时）", "● Conectado (En vivo)", "● Подключено (Live)", "● Verbunden (Aktiv)", "● Connecté (Direct)", "● 接続済み (Live)", "● 연결됨 (실시간)", "● Conectado (Ao vivo)", "● Connesso (Attivo)", "● Połączono (Na żywo)", "● Yhdistetty (Suora)");
-    public static string GuideAnimActiveVer => T("● Etkin 1.0.0", "● Active 1.0.0", "● 已启用 1.0.0", "● Activa 1.0.0", "● Активно 1.0.0", "● Aktiv 1.0.0", "● Actif 1.0.0", "● 有効 1.0.0", "● 활성 1.0.0", "● Ativa 1.0.0", "● Attiva 1.0.0", "● Aktywna 1.0.0", "● Aktiivinen 1.0.0");
+    public static string GuideAnimActiveVer => T("● Etkin 1.2.6", "● Active 1.2.6", "● 已启用 1.2.6", "● Activa 1.2.6", "● Активно 1.2.6", "● Aktiv 1.2.6", "● Active 1.2.6", "● 有効 1.2.6", "● 활성 1.2.6", "● Ativa 1.2.6", "● Attiva 1.2.6", "● Aktywna 1.2.6", "● Aktiivinen 1.2.6");
     public static string GuideAnimRunningConnected => T("● Çalışıyor • Bağlı", "● Running • Connected", "● 运行中 • 已连接", "● En ejecución • Conectado", "● Работает • Подкл.", "● Aktiv • Verbunden", "● Actif • Connecté", "● 実行中 • 接続済", "● 실행 중 • 연결됨", "● Ativo • Conectado", "● Attivo • Connesso", "● Działa • Połączono", "● Käynnissä • Yhdistetty");
     public static string GuideAnimRunning => T("● Çalışıyor", "● Running", "● 运行中", "● En ejecución", "● Выполняется", "● Läuft", "● En cours", "● 実行中", "● 실행 중", "● Em execução", "● In esecuzione", "● Działa", "● Käynnissä");
     public static string GuideAnimFileNamePrompt => T("Dosya adı:", "File name:", "文件名:", "Nombre:", "Имя файла:", "Dateiname:", "Nom du fichier :", "ファイル名:", "파일 이름:", "Nome:", "Nome file:", "Nazwa pliku:", "Tiedostonimi:");
@@ -1762,19 +1782,19 @@ internal static class Strings
         "Przełącz urządzenie wyjściowe audio",
         "Vaihda äänilähtölaite");
     public static string SetHkCycleAudioSub => T(
-        "Varsayılan ses çıkışını (kulaklık ↔ hoparlör) tek kısayolla sıradaki cihaza geçir",
-        "Cycle default Windows audio output (headphones ↔ speakers) with a single shortcut",
-        "使用单个快捷键在默认音频输出设备之间切换（如耳机 ↔ 扬声器）",
-        "Alterna la salida de audio predeterminada (auriculares ↔ altavoces) con un atajo",
-        "Переключает устройство вывода звука (наушники ↔ колонки) одним сочетанием",
-        "Wechselt per Tastenkürzel direkt zwischen Standard-Audiogeräten (Kopfhörer ↔ Lautsprecher)",
-        "Bascule la sortie audio Windows par défaut (casque ↔ haut-parleurs) d'un raccourci",
+        "Varsayılan ses çıkışını (kulaklık / hoparlör) tek kısayolla sıradaki cihaza geçir",
+        "Cycle default Windows audio output (headphones / speakers) with a single shortcut",
+        "使用单个快捷键在默认音频输出设备之间切换（如耳机 / 扬声器）",
+        "Alterna la salida de audio predeterminada (auriculares / altavoces) con un atajo",
+        "Переключает устройство вывода звука (наушники / колонки) одним сочетанием",
+        "Wechselt per Tastenkürzel direkt zwischen Standard-Audiogeräten (Kopfhörer / Lautsprecher)",
+        "Bascule la sortie audio Windows par défaut (casque / haut-parleurs) d'un raccourci",
         "ヘッドホンやスピーカーなど Windows の既定オーディオ出力をワンキーで切り替えます",
-        "헤드폰 ↔ 스피커 등 기본 오디오 출력 장치를 단축키 하나로 전환합니다",
-        "Alterna rapidamente o dispositivo de saída padrão (fone ↔ caixas) com um atalho",
-        "Passa da un dispositivo audio predefinito all'altro (cuffie ↔ altoparlanti) con un tasto",
-        "Przełącza domyślne wyjście audio (słuchawki ↔ głośniki) jednym skrótem",
-        "Vaihtaa Windowsin oletusäänilähdön (kuulokkeet ↔ kaiuttimet) pikanäppäimellä");
+        "헤드폰 / 스피커 등 기본 오디오 출력 장치를 단축키 하나로 전환합니다",
+        "Alterna rapidamente o dispositivo de saída padrão (fone / caixas) com um atalho",
+        "Passa da un dispositivo audio predefinito all'altro (cuffie / altoparlanti) con un tasto",
+        "Przełącza domyślne wyjście audio (słuchawki / głośniki) jednym skrótem",
+        "Vaihtaa Windowsin oletusäänilähdön (kuulokkeet / kaiuttimet) pikanäppäimellä");
 
     public static string FlyoutAudioDeviceFallback => T(
         "Ses Çıkışı", "Output Device", "输出设备", "Salida de audio", "Аудиовыход",
@@ -1967,23 +1987,23 @@ internal static class Strings
         "Reduzir Animações", "Riduci animazioni", "Ogranicz animacje", "Vähennä animaatioita");
 
     public static string SetReducedAnimSub => T(
-        "Sekme geçişi ve görsel efektleri kapatarak anında çizime geçer.",
-        "Disable tab transitions and visual effects for instant rendering.",
-        "关闭标签切换和视觉动效以实现即时绘制。",
-        "Desactiva las transiciones y efectos visuales para un dibujo instantáneo.",
-        "Отключает переходы вкладок и эффекты для мгновенной отрисовки.",
-        "Deaktiviert Tab-Übergänge und visuelle Effekte für sofortige Darstellung.",
-        "Désactive les transitions d'onglets et effets visuels pour un rendu instantané.",
-        "タブ切り替えや視覚効果をオフにして即時描画します。",
-        "탭 전환 및 시각 효과를 꺼서 즉시 렌더링합니다.",
-        "Desativa transições de abas e efeitos visuais para renderização instantânea.",
-        "Disattiva transizioni ed effetti visivi per un rendering istantaneo.",
-        "Wyłącza przejścia kart i efekty wizualne dla natychmiastowego rysowania.",
-        "Poistaa välilehtisiirtymät ja tehosteet välittömään piirtoon.");
+        "Sekme geçişi ve görsel efektleri kapatarak anında çizime geçer",
+        "Disable tab transitions and visual effects for instant rendering",
+        "关闭标签切换和视觉动效以实现即时绘制",
+        "Desactiva las transiciones y efectos visuales para un dibujo instantáneo",
+        "Отключает переходы вкладок и эффекты для мгновенной отрисовки",
+        "Deaktiviert Tab-Übergänge und visuelle Effekte für sofortige Darstellung",
+        "Désactive les transitions d'onglets et effets visuels pour un rendu instantané",
+        "タブ切り替えや視覚効果をオフにして即時描画します",
+        "탭 전환 및 시각 효과를 꺼서 즉시 렌더링합니다",
+        "Desativa transições de abas e efeitos visuais para renderização instantânea",
+        "Disattiva transizioni ed effetti visivi per un rendering istantaneo",
+        "Wyłącza przejścia kart i efekty wizualne dla natychmiastowego rysowania",
+        "Poistaa välilehtisiirtymät ja tehosteet välittömään piirtoon");
 
     public static string DockMediaKeysOn => T(
         "Medya Tuşu: Aktif", "Media Keys: On", "媒体键：开启", "Teclas: Activas", "Клавиши: Вкл.",
-        "Medientasten: Ein", "Touches: Actif", "メディアキー: 有効", "미디어 키: 켜짐",
+        "Medientasten: Ein", "Touches : Actives", "メディアキー: 有効", "미디어 키: 켜짐",
         "Teclas: Ativas", "Tasti: Attivi", "Klawisze: Wł.", "Näppäimet: Päällä");
 
     public static string DockDefaultOutput => T(

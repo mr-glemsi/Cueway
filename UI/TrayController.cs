@@ -41,6 +41,7 @@ internal sealed unsafe class TrayController : IDisposable
     private int _lastSleepMins;
     private string? _lastTip;
     private string? _lastThemeId;
+    private bool _forceRefresh;
 
     public event Action? ToggleFlyoutRequested;
     public event Action? ShowMainWindowRequested;
@@ -76,6 +77,7 @@ internal sealed unsafe class TrayController : IDisposable
     public void ForceRefresh(RouterStateSnapshot snapshot)
     {
         if (_disposed) return;
+        _forceRefresh = true;
         _lastAppKey = null;
         Update(snapshot);
     }
@@ -104,7 +106,11 @@ internal sealed unsafe class TrayController : IDisposable
         if (tip.Length > 127)
             tip = tip[..127];
 
-        if (_added &&
+        bool force = _forceRefresh;
+        _forceRefresh = false;
+
+        if (!force &&
+            _added &&
             _currentTrayIcon != 0 &&
             _lastIsPlaying == isPlaying &&
             _lastIsMuted == isMuted &&
@@ -268,7 +274,8 @@ internal sealed unsafe class TrayController : IDisposable
                     Win32.AppendMenuW(hSleepMenu, Win32.MF_SEPARATOR, 0, null);
                     Win32.AppendMenuW(hSleepMenu, Win32.MF_STRING, MENU_SLEEP_CANCEL, Strings.TrayMenuSleepCancel);
                 }
-                Win32.AppendMenuW(hMenu, Win32.MF_POPUP, (nuint)hSleepMenu, Strings.TrayMenuSleepTimer);
+                if (Win32.AppendMenuW(hMenu, Win32.MF_POPUP, (nuint)hSleepMenu, Strings.TrayMenuSleepTimer))
+                    hSleepMenu = 0; // Owned by hMenu once attached; DestroyMenu(hMenu) destroys submenus
             }
 
             Win32.AppendMenuW(hMenu, Win32.MF_STRING, MENU_SETTINGS, Strings.TrayMenuSettings);

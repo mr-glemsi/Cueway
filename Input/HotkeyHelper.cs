@@ -75,13 +75,32 @@ internal static class HotkeyHelper
         if (string.IsNullOrWhiteSpace(text))
             return false;
 
+        string trimmed = text.Trim();
         HotkeyModifiers mods = HotkeyModifiers.None;
         uint vk = 0;
 
-        string[] parts = text.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        foreach (string rawPart in parts)
+        int i = 0;
+        while (i < trimmed.Length)
         {
-            string token = rawPart.Trim();
+            while (i < trimmed.Length && (trimmed[i] == '+' || char.IsWhiteSpace(trimmed[i])))
+                i++;
+            if (i >= trimmed.Length)
+                break;
+
+            string token;
+            if (trimmed.AsSpan(i).StartsWith("Num+", StringComparison.OrdinalIgnoreCase) &&
+                (i + 4 == trimmed.Length || char.IsWhiteSpace(trimmed[i + 4]) || trimmed[i + 4] == '+'))
+            {
+                token = "Num+";
+                i += 4;
+            }
+            else
+            {
+                int nextPlus = trimmed.IndexOf('+', i);
+                token = (nextPlus >= 0 ? trimmed[i..nextPlus] : trimmed[i..]).Trim();
+                i = nextPlus >= 0 ? nextPlus + 1 : trimmed.Length;
+            }
+
             if (token.Length == 0)
                 continue;
 
@@ -120,10 +139,10 @@ internal static class HotkeyHelper
         if (!TryParse(normalized, out var binding, allowAnySingleKey))
             return normalized.Trim();
 
-        if (!spaced)
+        if (!spaced || !TryFormatVk(binding.VkCode, out string keyToken))
             return binding.NormalizedText;
 
-        return binding.NormalizedText.Replace("+", " + ");
+        return FormatTokens(binding.Modifiers, keyToken, spaced: true);
     }
 
     private static string FormatTokens(HotkeyModifiers modifiers, string keyToken, bool spaced)

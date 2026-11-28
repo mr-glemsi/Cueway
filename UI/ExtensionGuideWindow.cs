@@ -53,6 +53,7 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
 
     private string? _hoverId;
     private bool _trackingMouse;
+    private bool _hoverIsHand;
     private string? _bannerText;
     private bool _bannerIsError;
     private long _bannerUntil;
@@ -228,75 +229,103 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
     private static nint WndProc(nint hwnd, uint msg, nuint wParam, nint lParam)
     {
         var inst = _instance;
-        if (inst != null && hwnd == inst._hwnd)
+        try
         {
-            switch (msg)
+            if (inst != null && hwnd == inst._hwnd)
             {
-                case Win32.WM_CLOSE:
-                    inst.HideDialog();
-                    return 0;
-
-                case Win32.WM_ERASEBKGND:
-                    return 1;
-
-                case Win32.WM_SIZE:
-                    inst._clientW = (int)(lParam & 0xFFFF);
-                    inst._clientH = (int)((lParam >> 16) & 0xFFFF);
-                    return 0;
-
-                case Win32.WM_TIMER:
-                    if (wParam == TIMER_ANIM)
-                    {
-                        inst.OnAnimTimer();
+                switch (msg)
+                {
+                    case Win32.WM_CLOSE:
+                        inst.HideDialog();
                         return 0;
-                    }
-                    break;
 
-                case WM_APP_BRIDGE_REFRESH:
-                    inst.RequestRepaint();
-                    return 0;
+                    case Win32.WM_ERASEBKGND:
+                        return 1;
 
-                case Win32.WM_DPICHANGED:
-                    uint newDpi = (uint)(wParam & 0xFFFF);
-                    if (newDpi >= 96) inst._dpi = newDpi;
-                    inst.ClearFontCache();
-                    var suggested = *(Win32.RECT*)lParam;
-                    Win32.SetWindowPos(hwnd, 0, suggested.Left, suggested.Top, suggested.Width, suggested.Height,
-                        Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
-                    inst.RequestRepaint();
-                    return 0;
+                    case Win32.WM_SIZE:
+                        inst._clientW = (int)(lParam & 0xFFFF);
+                        inst._clientH = (int)((lParam >> 16) & 0xFFFF);
+                        return 0;
 
-                case Win32.WM_PAINT:
-                    inst.PaintWindow();
-                    return 0;
+                    case Win32.WM_TIMER:
+                        if (wParam == TIMER_ANIM)
+                        {
+                            inst.OnAnimTimer();
+                            return 0;
+                        }
+                        break;
 
-                case Win32.WM_MOUSEMOVE:
-                    inst.OnMouseMove(lParam);
-                    return 0;
-
-                case Win32.WM_MOUSELEAVE:
-                    inst._trackingMouse = false;
-                    if (inst._hoverId != null)
-                    {
-                        inst._hoverId = null;
+                    case WM_APP_BRIDGE_REFRESH:
                         inst.RequestRepaint();
-                    }
-                    return 0;
+                        return 0;
 
-                case Win32.WM_LBUTTONDOWN:
-                    inst.OnMouseDown(lParam);
-                    return 0;
+                    case Win32.WM_DPICHANGED:
+                        uint newDpi = (uint)(wParam & 0xFFFF);
+                        if (newDpi >= 96) inst._dpi = newDpi;
+                        inst.ClearFontCache();
+                        var suggested = *(Win32.RECT*)lParam;
+                        Win32.SetWindowPos(hwnd, 0, suggested.Left, suggested.Top, suggested.Width, suggested.Height,
+                            Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
+                        inst.RequestRepaint();
+                        return 0;
 
-                case Win32.WM_LBUTTONUP:
-                    if (inst._scrubbing)
-                    {
+                    case Win32.WM_SETCURSOR:
+                        if ((lParam & 0xFFFF) == Win32.HTCLIENT)
+                        {
+                            Win32.SetCursor((inst._hoverIsHand || inst._scrubbing) && inst._cursorHand != 0 ? inst._cursorHand : inst._cursorArrow);
+                            return 1;
+                        }
+                        break;
+
+                    case Win32.WM_PAINT:
+                        inst.PaintWindow();
+                        return 0;
+
+                    case Win32.WM_MOUSEMOVE:
+                        inst.OnMouseMove(lParam);
+                        return 0;
+
+                    case Win32.WM_MOUSELEAVE:
+                        inst._trackingMouse = false;
+                        inst._hoverIsHand = false;
+                        if (inst._hoverId != null)
+                        {
+                            inst._hoverId = null;
+                            inst.RequestRepaint();
+                        }
+                        return 0;
+
+                    case Win32.WM_LBUTTONDOWN:
+                        inst.OnMouseDown(lParam);
+                        return 0;
+
+                    case Win32.WM_CAPTURECHANGED:
                         inst._scrubbing = false;
-                        Win32.ReleaseCapture();
-                    }
-                    return 0;
+                        return 0;
+
+                    case Win32.WM_LBUTTONUP:
+                        if (inst._scrubbing)
+                        {
+                            inst._scrubbing = false;
+                            Win32.ReleaseCapture();
+                        }
+                        return 0;
+
+                    case Win32.WM_KEYDOWN:
+                        if (wParam == Win32.VK_ESCAPE)
+                        {
+                            inst.HideDialog();
+                            return 0;
+                        }
+                        break;
+                }
             }
+            return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
         }
-        return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+        catch
+        {
+            return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
     }
 
     private void OnAnimTimer()
@@ -349,7 +378,8 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
         }
 
         string? nextHover = FindHit(mx, my)?.Id;
-        Win32.SetCursor(nextHover != null && _cursorHand != 0 ? _cursorHand : _cursorArrow);
+        _hoverIsHand = nextHover != null || PointInRect(_timelineTrackRect, mx, my);
+        Win32.SetCursor(_hoverIsHand && _cursorHand != 0 ? _cursorHand : _cursorArrow);
 
         if (!string.Equals(nextHover, _hoverId, StringComparison.Ordinal))
         {
@@ -370,7 +400,7 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
             return;
         }
 
-        FindHit(mx, my)?.OnClick();
+        try { FindHit(mx, my)?.OnClick(); } catch { }
     }
 
     private void UpdateScrubFromX(int mx)
@@ -463,6 +493,11 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
         nint paintDc = Win32.BeginPaint(_hwnd, &ps);
         if (paintDc == 0) return;
 
+        if (Win32.GetClientRect(_hwnd, out var rc))
+        {
+            _clientW = rc.Width;
+            _clientH = rc.Height;
+        }
         int w = _clientW;
         int h = _clientH;
         if (w <= 0 || h <= 0)
@@ -768,7 +803,7 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
         GdiPlus.FillRoundedRect(gfx, bx, by, bw, addrH, SF(8), GdiPlus.Argb(Theme.BgHeader));
         GdiPlus.FillAndStrokeRoundedRect(gfx, bx + S(12), by + S(4), bw - S(24), S(18), SF(4),
             GdiPlus.Argb(Theme.BgCard), GdiPlus.Argb(Theme.BorderSubtle));
-        DrawText(dc, "edge://extensions", bx + S(20), by + S(4), bx + bw - S(20), by + S(22),
+        DrawText(dc, "chrome://extensions", bx + S(20), by + S(4), bx + bw - S(20), by + S(22),
             10, Win32.FW_MEDIUM, Theme.TextSecondary);
 
         // Developer mode toggle (top-right inside browser)
@@ -836,7 +871,7 @@ internal sealed unsafe class ExtensionGuideWindow : IDisposable
             int pathBoxY = py + S(25);
             GdiPlus.FillAndStrokeRoundedRect(gfx, px + S(12), pathBoxY, pw - S(24), S(25), SF(4),
                 GdiPlus.Argb(Theme.BgWindow), GdiPlus.Argb(pasted ? Theme.Accent : Theme.BorderStrong));
-            DrawText(dc, pasted ? "...\\BrowserExtension\\Chromium" : "C:\\...",
+            DrawText(dc, pasted ? "...\\BrowserExtension\\chromium" : "C:\\...",
                 px + S(20), pathBoxY, px + pw - S(20), pathBoxY + S(25),
                 10, Win32.FW_MEDIUM, pasted ? Theme.TextPrimary : Theme.TextMuted);
 

@@ -100,6 +100,9 @@ internal static unsafe partial class GdiPlus
     public static partial int GdipFillRectangle(nint graphics, nint brush, float x, float y, float width, float height);
 
     [LibraryImport("gdiplus.dll")]
+    public static partial int GdipDrawRectangle(nint graphics, nint pen, float x, float y, float width, float height);
+
+    [LibraryImport("gdiplus.dll")]
     public static partial int GdipCreateBitmapFromScan0(int width, int height, int stride, int format, nint scan0, out nint bitmap);
 
     [LibraryImport("gdiplus.dll")]
@@ -172,6 +175,11 @@ internal static unsafe partial class GdiPlus
         if (GdipCreatePen1(argbColor, width, UnitPixel, out nint pen) != 0 || pen == 0) return;
         try
         {
+            if (radius <= 0.5f)
+            {
+                GdipDrawRectangle(graphics, pen, x, y, w, h);
+                return;
+            }
             nint path = CreateRoundedRectPath(x, y, w, h, radius);
             if (path != 0)
             {
@@ -187,6 +195,20 @@ internal static unsafe partial class GdiPlus
 
     public static void FillAndStrokeRoundedRect(nint graphics, float x, float y, float w, float h, float radius, uint fillArgb, uint borderArgb, float borderWidth = 1f)
     {
+        if (radius <= 0.5f)
+        {
+            if ((fillArgb >> 24) > 0 && GdipCreateSolidFill(fillArgb, out nint solid) == 0 && solid != 0)
+            {
+                try { GdipFillRectangle(graphics, solid, x, y, w, h); }
+                finally { GdipDeleteBrush(solid); }
+            }
+            if ((borderArgb >> 24) > 0 && GdipCreatePen1(borderArgb, borderWidth, UnitPixel, out nint rectPen) == 0 && rectPen != 0)
+            {
+                try { GdipDrawRectangle(graphics, rectPen, x, y, w, h); }
+                finally { GdipDeletePen(rectPen); }
+            }
+            return;
+        }
         nint path = CreateRoundedRectPath(x, y, w, h, radius);
         if (path == 0) return;
         try

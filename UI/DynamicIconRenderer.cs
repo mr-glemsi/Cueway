@@ -27,6 +27,11 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
     private readonly Dictionary<string, nint> _siteIconCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _cachedSiteIconHashes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<int, nint> _brandIconCache = new();
+    private readonly Queue<nint> _retiredIcons = new();
+    private readonly HashSet<string> _pendingWarmups = new(StringComparer.OrdinalIgnoreCase);
+    private bool _disposed;
+
+    public event Action? IconsUpdated;
 
     public nint GetIconForApp(string? appKey, string? exePath)
     {
@@ -38,6 +43,185 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
                 return siteIcon;
         }
         return GetOrExtractAppIcon(exePath);
+    }
+
+    public nint GetIconForAppNonBlocking(string? appKey, string? exePath)
+    {
+        if (_disposed) return 0;
+
+        string? siteKey = BrowserSiteScanner.ExtractSiteKeyFromAppKey(appKey);
+        if (!string.IsNullOrEmpty(siteKey))
+        {
+            string normalizedKey = siteKey.ToLowerInvariant();
+            string cacheKey = $"{normalizedKey}:48";
+            lock (_cacheLock)
+            {
+                if (_siteIconCache.TryGetValue(cacheKey, out nint siteIcon) && siteIcon != 0)
+                    return siteIcon;
+            }
+            QueueWarmupIcon(appKey, exePath);
+            return 0;
+        }
+
+        if (string.IsNullOrWhiteSpace(exePath))
+            return 0;
+
+        lock (_cacheLock)
+        {
+            if (_exeIconCache.TryGetValue(exePath, out nint exeIcon))
+                return exeIcon;
+        }
+
+        QueueWarmupIcon(appKey, exePath);
+        return 0;
+    }
+
+    public void WarmupIconsAsync(IEnumerable<(string? AppKey, string? ExePath)> items)
+    {
+        if (_disposed) return;
+
+        List<(string? AppKey, string? ExePath, string WarmupKey)>? toLoad = null;
+        lock (_cacheLock)
+        {
+            foreach (var (appKey, exePath) in items)
+            {
+                string? siteKey = BrowserSiteScanner.ExtractSiteKeyFromAppKey(appKey);
+                if (!string.IsNullOrEmpty(siteKey))
+                {
+                    string norm = siteKey.ToLowerInvariant();
+                    string cacheKey = $"{norm}:48";
+                    if (_siteIconCache.ContainsKey(cacheKey))
+                        continue;
+                    string wKey = $"site:{norm}";
+                    if (_pendingWarmups.Add(wKey))
+                        (toLoad ??= []).Add((appKey, exePath, wKey));
+                }
+                else if (!string.IsNullOrWhiteSpace(exePath))
+                {
+                    if (_exeIconCache.ContainsKey(exePath))
+                        continue;
+                    string wKey = $"exe:{exePath}";
+                    if (_pendingWarmups.Add(wKey))
+                        (toLoad ??= []).Add((appKey, exePath, wKey));
+                }
+            }
+        }
+
+        if (toLoad == null || toLoad.Count == 0)
+            return;
+
+        _ = Task.Run(() =>
+        {
+            bool anyLoaded = false;
+            try
+            {
+                foreach (var (appKey, exePath, _) in toLoad)
+                {
+                    if (_disposed) break;
+                    if (GetIconForApp(appKey, exePath) != 0)
+                        anyLoaded = true;
+                }
+            }
+            catch { }
+            finally
+            {
+                lock (_cacheLock)
+                {
+                    foreach (var (_, _, wKey) in toLoad)
+                        _pendingWarmups.Remove(wKey);
+                }
+            }
+
+            if (anyLoaded && !_disposed)
+                IconsUpdated?.Invoke();
+        });
+    }
+
+    private void QueueWarmupIcon(string? appKey, string? exePath)
+    {
+        string? siteKey = BrowserSiteScanner.ExtractSiteKeyFromAppKey(appKey);
+        string? warmupKey = !string.IsNullOrEmpty(siteKey)
+            ? $"site:{siteKey.ToLowerInvariant()}"
+            : (!string.IsNullOrWhiteSpace(exePath) ? $"exe:{exePath}" : null);
+
+        if (warmupKey == null)
+            return;
+
+        lock (_cacheLock)
+        {
+            if (_disposed || !_pendingWarmups.Add(warmupKey))
+                return;
+        }
+
+        _ = Task.Run(() =>
+        {
+            nint loaded = 0;
+            try
+            {
+                if (!_disposed)
+                    loaded = GetIconForApp(appKey, exePath);
+            }
+            catch { }
+            finally
+            {
+                lock (_cacheLock)
+                {
+                    _pendingWarmups.Remove(warmupKey);
+                }
+            }
+
+            if (loaded != 0 && !_disposed)
+                IconsUpdated?.Invoke();
+        });
+    }
+
+    public void FlushRetiredIcons()
+    {
+        List<nint>? toDestroy = null;
+        lock (_cacheLock)
+        {
+            while (_retiredIcons.Count > 0)
+                (toDestroy ??= []).Add(_retiredIcons.Dequeue());
+        }
+
+        if (toDestroy != null)
+        {
+            foreach (nint h in toDestroy)
+            {
+                if (h != 0) Win32.DestroyIcon(h);
+            }
+        }
+    }
+
+    public void InvalidateThemeDependentIcons()
+    {
+        lock (_cacheLock)
+        {
+            if (_siteIconCache.Count == 0)
+                return;
+
+            List<string>? toRemove = null;
+            foreach (string key in _siteIconCache.Keys)
+            {
+                int colonIdx = key.IndexOf(':');
+                string siteKey = colonIdx > 0 ? key[..colonIdx] : key;
+                if (HasBuiltInBrandVector(siteKey))
+                    continue;
+                string safeKey = SanitizeSiteKey(siteKey);
+                if (!string.IsNullOrEmpty(safeKey) && File.Exists(Path.Combine(SiteIconsDir, $"{safeKey}.png")))
+                    continue;
+                (toRemove ??= []).Add(key);
+            }
+
+            if (toRemove != null)
+            {
+                foreach (string k in toRemove)
+                {
+                    if (_siteIconCache.Remove(k, out nint oldIcon) && oldIcon != 0)
+                        _retiredIcons.Enqueue(oldIcon);
+                }
+            }
+        }
     }
 
     public nint GetOrExtractAppIcon(string? exePath)
@@ -201,7 +385,7 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
                 foreach (string k in toRemove)
                 {
                     if (_siteIconCache.Remove(k, out nint oldIcon) && oldIcon != 0)
-                        Win32.DestroyIcon(oldIcon);
+                        _retiredIcons.Enqueue(oldIcon);
                 }
             }
         }
@@ -281,6 +465,15 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
                 Win32.DestroyIcon(hIcon);
                 return existing;
             }
+            if (_siteIconCache.Count >= 128)
+            {
+                foreach (string k in _siteIconCache.Keys)
+                {
+                    if (_siteIconCache.Remove(k, out nint evicted) && evicted != 0)
+                        _retiredIcons.Enqueue(evicted);
+                    break;
+                }
+            }
             _siteIconCache[cacheKey] = hIcon;
             return hIcon;
         }
@@ -352,6 +545,15 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
             {
                 Win32.DestroyIcon(hIcon);
                 return existing;
+            }
+            if (_brandIconCache.Count >= 16)
+            {
+                foreach (int k in _brandIconCache.Keys)
+                {
+                    if (_brandIconCache.Remove(k, out nint evicted) && evicted != 0)
+                        _retiredIcons.Enqueue(evicted);
+                    break;
+                }
             }
             _brandIconCache[size] = hIcon;
             return hIcon;
@@ -785,6 +987,15 @@ internal sealed unsafe class DynamicIconRenderer : IDisposable
     {
         lock (_cacheLock)
         {
+            if (_disposed) return;
+            _disposed = true;
+
+            while (_retiredIcons.Count > 0)
+            {
+                nint retired = _retiredIcons.Dequeue();
+                if (retired != 0) Win32.DestroyIcon(retired);
+            }
+
             foreach (nint icon in _exeIconCache.Values)
             {
                 if (icon != 0) Win32.DestroyIcon(icon);

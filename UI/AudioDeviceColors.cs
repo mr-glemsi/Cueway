@@ -98,15 +98,24 @@ internal static class AudioDeviceColors
         if (string.IsNullOrWhiteSpace(name))
             return -1;
 
-        string lower = name.ToLowerInvariant();
+        string lower = name
+            .Replace('İ', 'i')
+            .Replace('I', 'i')
+            .ToLowerInvariant()
+            .Replace("\u0307", string.Empty);
 
-        if (ContainsAny(lower, "earbud", "airpod", "buds", "in-ear", "tws", "kulak içi", "kulak ici", "freebuds", "wf-"))
+        if (ContainsAny(lower, "earbud", "airpod", "buds", "in-ear", "tws", "kulak ici", "freebuds", "wf-",
+                "oreillette", "oortjes", "イヤホン", "이어폰"))
             return 2; // Emerald
 
-        if (ContainsAny(lower, "headset", "headphone", "earphone", "kulaklık", "kulaklik", "hyperx", "steelseries", "razer", "corsair", "arctis", "cloud"))
+        if (ContainsAny(lower, "headset", "headphone", "earphone", "kulaklik", "kopfhörer", "kopfhorer", "casque",
+                "auriculares", "cuffie", "słuchawki", "sluchawki", "наушники", "kuulokkeet", "ヘッドホン", "헤드폰", "耳机",
+                "hyperx", "steelseries", "razer", "corsair", "arctis", "cloud"))
             return 0; // Blue
 
-        if (ContainsAny(lower, "speaker", "hoparlör", "hoparlor", "realtek", "line out", "hdmi", "displayport", "soundbar", "monitor", "tv", "high definition"))
+        if (ContainsAny(lower, "speaker", "hoparlor", "hoparlör", "lautsprecher", "haut-parleur", "altavoz", "altavoces",
+                "altoparlante", "altoparlanti", "głośnik", "glosnik", "динамик", "kaiutin", "スピーカー", "스피커", "扬声器",
+                "realtek", "line out", "hdmi", "displayport", "soundbar", "monitor", "tv", "high definition"))
             return 1; // Red
 
         return -1;

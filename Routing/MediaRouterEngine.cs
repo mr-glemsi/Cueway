@@ -55,16 +55,20 @@ internal sealed class MediaRouterEngine : IDisposable
     private readonly Dictionary<string, string> _autoPausedBy = new(StringComparer.Ordinal); // pausedSessionId -> triggerSessionId
     private readonly HashSet<string> _suppressNextTransition = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DuckedEntry> _autoDucked = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (float OriginalVolume, long UntilTick)> _recentRestoredOriginal = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _volumeRampVersion = new(StringComparer.Ordinal);
 
     // Per-site volume memory, voice call mic auto-ducking & sleep timer state
     private readonly HashSet<string> _volumeMemoryAppliedSessions = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, (float OriginalVolume, SessionSource Source)> _micDucked = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (float OriginalVolume, SessionSource Source, int[] ProcessIds)> _micDucked = new(StringComparer.Ordinal);
     private long _micStoppedSinceTick;
     private long _sleepTimerEndTick;
     private bool _sleepFadeActive;
     private readonly Dictionary<string, (float OriginalVolume, SessionSource Source)> _sleepFadedSessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string?> _sessionOutputDeviceIds = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (string? DeviceId, long UntilTick)> _optimisticOutputDevices = new(StringComparer.Ordinal);
+    private long _evalGeneration;
+    private long _lastCommittedEvalGen;
 
     private long BumpRampVersionLocked(string sessionId)
     {
@@ -128,6 +132,7 @@ internal sealed class MediaRouterEngine : IDisposable
 
     private void Evaluate(bool forceNotify)
     {
+        long myGen = Interlocked.Increment(ref _evalGeneration);
         var sessions = _sessionManager.GetSessionsSnapshot();
         var settings = _stateStore.GetSettingsSnapshot();
         bool gameActive = settings.GameFullscreenGuardEnabled && FullscreenGameDetector.IsFullscreenGameActive(settings);
@@ -137,16 +142,18 @@ internal sealed class MediaRouterEngine : IDisposable
         string? defaultOutId = null;
         if (sessions.Count > 0 && _audioService.IsPerAppAudioRoutingSupported())
         {
-            var allPids = new List<int>(sessions.Count);
+            var knownAudioPids = _audioService.GetKnownAudioPidsSnapshot();
+            var pidSet = new HashSet<int>();
             foreach (var s in sessions)
             {
                 foreach (int p in s.ProcessIds)
                 {
-                    if (p > 0) allPids.Add(p);
+                    if (p > 0 && (knownAudioPids.Count == 0 || knownAudioPids.Contains((uint)p)))
+                        pidSet.Add(p);
                 }
             }
-            if (allPids.Count > 0)
-                appOutMap = _audioService.GetAppOutputDeviceIds(allPids);
+            if (pidSet.Count > 0)
+                appOutMap = _audioService.GetAppOutputDeviceIds(pidSet.ToList());
         }
         if (sessions.Count > 1 && (settings.AutoDuckingEnabled || settings.AutoPauseEnabled))
         {
@@ -165,6 +172,9 @@ internal sealed class MediaRouterEngine : IDisposable
 
         lock (_lock)
         {
+            if (myGen < _lastCommittedEvalGen)
+                return;
+            _lastCommittedEvalGen = myGen;
             _gameGuardActive = gameActive;
 
             if (!string.IsNullOrEmpty(_lockedAppKey) && _stateStore.IsAppIgnored(_lockedAppKey))
@@ -264,6 +274,21 @@ internal sealed class MediaRouterEngine : IDisposable
             }
 
             _sessionOutputDeviceIds.Clear();
+            long outNowTick = Environment.TickCount64;
+            if (_optimisticOutputDevices.Count > 0)
+            {
+                List<string>? expOpt = null;
+                foreach (var kv in _optimisticOutputDevices)
+                {
+                    if (outNowTick >= kv.Value.UntilTick)
+                        (expOpt ??= []).Add(kv.Key);
+                }
+                if (expOpt != null)
+                {
+                    foreach (string k in expOpt)
+                        _optimisticOutputDevices.Remove(k);
+                }
+            }
             if (appOutMap != null)
             {
                 foreach (var s in sessions)
@@ -276,6 +301,10 @@ internal sealed class MediaRouterEngine : IDisposable
                             assigned = devId;
                             break;
                         }
+                    }
+                    if (_optimisticOutputDevices.TryGetValue(s.SessionId, out var optOut) && outNowTick < optOut.UntilTick)
+                    {
+                        assigned = optOut.DeviceId;
                     }
                     _sessionOutputDeviceIds[s.SessionId] = assigned;
                 }
@@ -356,6 +385,7 @@ internal sealed class MediaRouterEngine : IDisposable
             // Voice call / microphone auto-ducking
             EvaluateMicDuckingLocked(sessions, toAutoPause, settings.MicDuckingEnabled, micActive, settings.DuckVolumePercent / 100f, toApplySavedVol, toDuck, toUnduck);
 
+            PruneStaleRampVersionsLocked(sessions);
             UpdatePrevPlayingLocked(sessions);
 
             prevSnapshot = _snapshot;
@@ -809,6 +839,22 @@ internal sealed class MediaRouterEngine : IDisposable
             ? new HashSet<string>(toAutoPause, StringComparer.Ordinal)
             : null;
 
+        long nowDuckTick = Environment.TickCount64;
+        if (_recentRestoredOriginal.Count > 0)
+        {
+            List<string>? expiredRestored = null;
+            foreach (var kv in _recentRestoredOriginal)
+            {
+                if (nowDuckTick >= kv.Value.UntilTick)
+                    (expiredRestored ??= []).Add(kv.Key);
+            }
+            if (expiredRestored != null)
+            {
+                foreach (string k in expiredRestored)
+                    _recentRestoredOriginal.Remove(k);
+            }
+        }
+
         // Duck other effectively playing sessions on the same output device when a new media source starts playing
         if (allowNewDucks)
         {
@@ -837,10 +883,13 @@ internal sealed class MediaRouterEngine : IDisposable
                             continue;
                         if (_autoDucked.ContainsKey(other.SessionId) || _micDucked.ContainsKey(other.SessionId))
                             continue;
-                        if (other.Volume > duckTarget + 0.02f)
+                        bool hasRecentOrig = _recentRestoredOriginal.Remove(other.SessionId, out var recentOrig) &&
+                                             nowDuckTick < recentOrig.UntilTick;
+                        float effectiveOrig = hasRecentOrig ? MathF.Max(other.Volume, recentOrig.OriginalVolume) : other.Volume;
+                        if (effectiveOrig > duckTarget + 0.02f)
                         {
                             _autoDucked[other.SessionId] = new DuckedEntry(
-                                other.Volume,
+                                effectiveOrig,
                                 candidate.SessionId,
                                 other.Source,
                                 other.AppKey,
@@ -877,6 +926,7 @@ internal sealed class MediaRouterEngine : IDisposable
                     if (sessionMap.ContainsKey(id) ||
                         (entry.Source != SessionSource.BrowserBridge && entry.ProcessIds.Length > 0))
                     {
+                        _recentRestoredOriginal[id] = (entry.OriginalVolume, nowDuckTick + 1200);
                         long ver = BumpRampVersionLocked(id);
                         toUnduck.Add((id, entry.OriginalVolume, entry.Source, ver, entry.ProcessIds));
                     }
@@ -955,6 +1005,30 @@ internal sealed class MediaRouterEngine : IDisposable
         }
     }
 
+    private void PruneStaleRampVersionsLocked(List<MediaSessionInfo> sessions)
+    {
+        if (_volumeRampVersion.Count <= 16)
+            return;
+
+        var live = new HashSet<string>(sessions.Count + _autoDucked.Count + _micDucked.Count, StringComparer.Ordinal);
+        foreach (var s in sessions) live.Add(s.SessionId);
+        foreach (string k in _autoDucked.Keys) live.Add(k);
+        foreach (string k in _micDucked.Keys) live.Add(k);
+        foreach (string k in _sleepFadedSessions.Keys) live.Add(k);
+
+        List<string>? stale = null;
+        foreach (string k in _volumeRampVersion.Keys)
+        {
+            if (!live.Contains(k))
+                (stale ??= []).Add(k);
+        }
+        if (stale != null)
+        {
+            foreach (string k in stale)
+                _volumeRampVersion.Remove(k);
+        }
+    }
+
     private void EvaluateMicDuckingLocked(
         List<MediaSessionInfo> sessions,
         List<string> toAutoPause,
@@ -973,7 +1047,14 @@ internal sealed class MediaRouterEngine : IDisposable
         {
             var stale = _micDucked.Keys.Where(k => !sessionMap.ContainsKey(k)).ToList();
             foreach (string k in stale)
-                _micDucked.Remove(k);
+            {
+                if (_micDucked.Remove(k, out var entry) &&
+                    entry.Source != SessionSource.BrowserBridge &&
+                    entry.ProcessIds.Length > 0)
+                {
+                    toUnduck.Add((k, entry.OriginalVolume, entry.Source, BumpRampVersionLocked(k), entry.ProcessIds));
+                }
+            }
         }
 
         if (!enabled)
@@ -981,7 +1062,7 @@ internal sealed class MediaRouterEngine : IDisposable
             foreach (var kv in _micDucked)
             {
                 if (sessionMap.ContainsKey(kv.Key))
-                    toUnduck.Add((kv.Key, kv.Value.OriginalVolume, kv.Value.Source, BumpRampVersionLocked(kv.Key), null));
+                    toUnduck.Add((kv.Key, kv.Value.OriginalVolume, kv.Value.Source, BumpRampVersionLocked(kv.Key), kv.Value.ProcessIds));
             }
             _micDucked.Clear();
             _micStoppedSinceTick = 0;
@@ -994,6 +1075,27 @@ internal sealed class MediaRouterEngine : IDisposable
             HashSet<string>? pendingPauseSet = toAutoPause.Count > 0
                 ? new HashSet<string>(toAutoPause, StringComparer.Ordinal)
                 : null;
+
+            // If AutoDucking is handing back a session right while mic is active, hand it off to _micDucked cleanly
+            for (int i = toUnduck.Count - 1; i >= 0; i--)
+            {
+                var pendingRestore = toUnduck[i];
+                if (!sessionMap.TryGetValue(pendingRestore.SessionId, out var s))
+                    continue;
+                if (s.IsPassiveTab || !s.IsEffectivelyPlaying)
+                    continue;
+                if (s.Source == SessionSource.AudioSession && !ProcessResolver.IsKnownMediaAudioProcess(s.AppKey))
+                    continue;
+                if (pendingPauseSet != null && pendingPauseSet.Contains(s.SessionId))
+                    continue;
+                if (pendingRestore.RestoreVol > duckTarget + 0.02f && !_micDucked.ContainsKey(s.SessionId))
+                {
+                    toUnduck.RemoveAt(i);
+                    _micDucked[s.SessionId] = (pendingRestore.RestoreVol, s.Source, s.ProcessIds);
+                    if (s.Volume > duckTarget + 0.02f)
+                        toDuck.Add((s.SessionId, duckTarget, s.Source, BumpRampVersionLocked(s.SessionId)));
+                }
+            }
 
             foreach (var s in sessions)
             {
@@ -1017,7 +1119,7 @@ internal sealed class MediaRouterEngine : IDisposable
                 {
                     if (savedIdx >= 0)
                         toApplySavedVol.RemoveAt(savedIdx);
-                    _micDucked[s.SessionId] = (effectiveOrigVol, s.Source);
+                    _micDucked[s.SessionId] = (effectiveOrigVol, s.Source, s.ProcessIds);
                     toDuck.Add((s.SessionId, duckTarget, s.Source, BumpRampVersionLocked(s.SessionId)));
                 }
             }
@@ -1033,7 +1135,7 @@ internal sealed class MediaRouterEngine : IDisposable
                 foreach (var kv in _micDucked)
                 {
                     if (sessionMap.ContainsKey(kv.Key))
-                        toUnduck.Add((kv.Key, kv.Value.OriginalVolume, kv.Value.Source, BumpRampVersionLocked(kv.Key), null));
+                        toUnduck.Add((kv.Key, kv.Value.OriginalVolume, kv.Value.Source, BumpRampVersionLocked(kv.Key), kv.Value.ProcessIds));
                 }
                 _micDucked.Clear();
                 _micStoppedSinceTick = 0;
@@ -1048,9 +1150,16 @@ internal sealed class MediaRouterEngine : IDisposable
             return;
 
         var sessions = _sessionManager.GetSessionsSnapshot();
-        var playing = sessions.Where(s => s.IsPlaying).ToList();
+        var playing = sessions.Where(s => s.IsEffectivelyPlaying).ToList();
         if (playing.Count == 0)
             return;
+
+        lock (_lock)
+        {
+            _autoPausedBy.Clear();
+            foreach (var s in playing)
+                _suppressNextTransition.Add(s.SessionId);
+        }
 
         _ = Task.Run(async () =>
         {
@@ -1065,6 +1174,7 @@ internal sealed class MediaRouterEngine : IDisposable
 
     public void ToggleManualLockOnActiveOrSelected(string? sessionId = null)
     {
+        MediaSessionInfo? discoveredTarget = null;
         lock (_lock)
         {
             if (sessionId != null)
@@ -1082,7 +1192,8 @@ internal sealed class MediaRouterEngine : IDisposable
                         _lockedSessionId = target.SessionId;
                         _lockedAppKey = target.AppKey;
                         _explicitPromoteAppKey = null;
-                        _stateStore.RecordDiscoveredApp(target.AppKey, target.DisplayName, target.ExePath);
+                        _autoPausedBy.Clear();
+                        discoveredTarget = target;
                     }
                 }
             }
@@ -1098,8 +1209,14 @@ internal sealed class MediaRouterEngine : IDisposable
                     _lockedSessionId = _snapshot.ActiveTarget.SessionId;
                     _lockedAppKey = _snapshot.ActiveTarget.AppKey;
                     _explicitPromoteAppKey = null;
+                    _autoPausedBy.Clear();
                 }
             }
+        }
+
+        if (discoveredTarget != null)
+        {
+            _stateStore.RecordDiscoveredApp(discoveredTarget.AppKey, discoveredTarget.DisplayName, discoveredTarget.ExePath);
         }
 
         Evaluate(forceNotify: true);
@@ -1413,6 +1530,8 @@ internal sealed class MediaRouterEngine : IDisposable
 
     public List<AudioOutputDevice> GetOutputDevices() => _audioService.GetOutputDevices();
 
+    public List<AudioOutputDevice> GetOutputDevicesCached() => _audioService.GetOutputDevicesCached();
+
     public bool SelectOutputDevice(string deviceId, string? displayName = null)
     {
         bool ok = _audioService.SetDefaultOutputDevice(deviceId);
@@ -1458,6 +1577,7 @@ internal sealed class MediaRouterEngine : IDisposable
 
         var changedPids = new HashSet<int>(session.ProcessIds);
         RouterStateSnapshot updatedSnap;
+        long optUntil = Environment.TickCount64 + 1500;
         lock (_lock)
         {
             foreach (var s in _snapshot.Sessions)
@@ -1467,6 +1587,7 @@ internal sealed class MediaRouterEngine : IDisposable
                     if (changedPids.Contains(p))
                     {
                         _sessionOutputDeviceIds[s.SessionId] = normalizedId;
+                        _optimisticOutputDevices[s.SessionId] = (normalizedId, optUntil);
                         break;
                     }
                 }
@@ -1475,7 +1596,6 @@ internal sealed class MediaRouterEngine : IDisposable
         }
 
         StateChanged?.Invoke(updatedSnap);
-        Evaluate(forceNotify: false);
         _ = _sessionManager.RefreshAsync();
         NotifyOsd(session.DisplayName, deviceName ?? Strings.AudioDeviceSystemDefault, session.ExePath, appKey: session.AppKey);
         return true;
@@ -1602,7 +1722,12 @@ internal sealed class MediaRouterEngine : IDisposable
                     foreach (var s in _snapshot.Sessions)
                     {
                         if (!s.IsPassiveTab && (s.IsPlaying || s.IsEffectivelyPlaying) && s.Volume > 0.01f)
-                            _sleepFadedSessions[s.SessionId] = (s.Volume, s.Source);
+                        {
+                            float baseOrig = _autoDucked.TryGetValue(s.SessionId, out var ducked)
+                                ? ducked.OriginalVolume
+                                : (_micDucked.TryGetValue(s.SessionId, out var micD) ? micD.OriginalVolume : s.Volume);
+                            _sleepFadedSessions[s.SessionId] = (baseOrig, s.Source);
+                        }
                     }
                 }
 

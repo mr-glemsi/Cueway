@@ -65,8 +65,11 @@ internal static unsafe partial class Win32
     public const uint WM_QUIT = 0x0012;
     public const uint WM_ERASEBKGND = 0x0014;
     public const uint WM_SHOWWINDOW = 0x0018;
+    public const uint WM_SETCURSOR = 0x0020;
     public const uint WM_GETMINMAXINFO = 0x0024;
     public const uint WM_PAINT = 0x000F;
+    public const int HTCLIENT = 1;
+    public const int SIZE_MINIMIZED = 1;
     public const uint WM_COMMAND = 0x0111;
     public const uint WM_TIMER = 0x0113;
     public const uint WM_MOUSEMOVE = 0x0200;
@@ -265,6 +268,7 @@ internal static unsafe partial class Win32
     public static readonly nint INVALID_HANDLE_VALUE = new(-1);
     public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
     public const uint TME_LEAVE = 0x00000002;
+    public const uint COINIT_MULTITHREADED = 0x0;
     public const uint COINIT_APARTMENTTHREADED = 0x2;
     public const int GWL_STYLE = -16;
     public const int GWL_EXSTYLE = -20;
@@ -645,6 +649,22 @@ internal static unsafe partial class Win32
     [LibraryImport("user32.dll")]
     public static partial uint GetDpiForWindow(nint hwnd);
 
+    [LibraryImport("shcore.dll")]
+    private static partial int GetDpiForMonitor(nint hmonitor, int dpiType, out uint dpiX, out uint dpiY);
+
+    public static uint GetMonitorDpi(nint hMonitor, uint fallbackDpi = 96)
+    {
+        if (hMonitor == 0)
+            return fallbackDpi >= 96 ? fallbackDpi : 96;
+        try
+        {
+            if (GetDpiForMonitor(hMonitor, 0, out uint dx, out _) == 0 && dx >= 96)
+                return dx;
+        }
+        catch { }
+        return fallbackDpi >= 96 ? fallbackDpi : 96;
+    }
+
     [LibraryImport("user32.dll")]
     public static partial nint MonitorFromWindow(nint hwnd, uint dwFlags);
 
@@ -833,6 +853,9 @@ internal static unsafe partial class Win32
     // DWM
     [LibraryImport("dwmapi.dll")]
     public static partial int DwmSetWindowAttribute(nint hwnd, uint dwAttribute, void* pvAttribute, uint cbAttribute);
+
+    [LibraryImport("dwmapi.dll")]
+    public static partial int DwmFlush();
 
     // WTS
     [LibraryImport("wtsapi32.dll")]
@@ -1085,35 +1108,42 @@ internal static unsafe partial class Win32
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     private static int EnumVisibleWindowsProc(nint hwnd, nint lParam)
     {
-        if (lParam == 0 || !IsWindowVisible(hwnd))
-            return 1;
-
-        if (GCHandle.FromIntPtr(lParam).Target is not List<VisibleWindowInfo> list)
-            return 0;
-
-        bool iconic = IsIconic(hwnd);
-        GetWindowRect(hwnd, out var rc);
-        int width = rc.Width;
-        int height = rc.Height;
-        if (!iconic && (width < 20 || height < 20))
-            return 1;
-
-        GetWindowThreadProcessId(hwnd, out uint pid);
-        uint corePid = 0;
-        if (IsWindowClass(hwnd, "ApplicationFrameWindow"))
+        try
         {
-            nint coreHwnd = FindWindowExW(hwnd, 0, "Windows.UI.Core.CoreWindow", null);
-            if (coreHwnd != 0)
-                GetWindowThreadProcessId(coreHwnd, out corePid);
+            if (lParam == 0 || !IsWindowVisible(hwnd))
+                return 1;
+
+            if (GCHandle.FromIntPtr(lParam).Target is not List<VisibleWindowInfo> list)
+                return 0;
+
+            bool iconic = IsIconic(hwnd);
+            GetWindowRect(hwnd, out var rc);
+            int width = rc.Width;
+            int height = rc.Height;
+            if (!iconic && (width < 20 || height < 20))
+                return 1;
+
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            uint corePid = 0;
+            if (IsWindowClass(hwnd, "ApplicationFrameWindow"))
+            {
+                nint coreHwnd = FindWindowExW(hwnd, 0, "Windows.UI.Core.CoreWindow", null);
+                if (coreHwnd != 0)
+                    GetWindowThreadProcessId(coreHwnd, out corePid);
+            }
+
+            uint exStyle = unchecked((uint)GetWindowLongW(hwnd, GWL_EXSTYLE));
+            bool isToolWindow = (exStyle & WS_EX_TOOLWINDOW) != 0;
+            bool hasOwner = GetWindow(hwnd, GW_OWNER) != 0;
+            string title = GetWindowText(hwnd);
+
+            list.Add(new VisibleWindowInfo(hwnd, pid, corePid, title, isToolWindow, hasOwner, iconic, width, height));
+            return 1;
         }
-
-        uint exStyle = unchecked((uint)GetWindowLongW(hwnd, GWL_EXSTYLE));
-        bool isToolWindow = (exStyle & WS_EX_TOOLWINDOW) != 0;
-        bool hasOwner = GetWindow(hwnd, GW_OWNER) != 0;
-        string title = GetWindowText(hwnd);
-
-        list.Add(new VisibleWindowInfo(hwnd, pid, corePid, title, isToolWindow, hasOwner, iconic, width, height));
-        return 1;
+        catch
+        {
+            return 1;
+        }
     }
 
     public static nint FindMainWindowInSnapshot(
@@ -1224,78 +1254,85 @@ internal static unsafe partial class Win32
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     private static int EnumAppWindowProc(nint hwnd, nint lParam)
     {
-        if (lParam == 0 || !IsWindowVisible(hwnd))
-            return 1;
-
-        if (GCHandle.FromIntPtr(lParam).Target is not WindowSearchState state)
-            return 0;
-
-        GetWindowThreadProcessId(hwnd, out uint pid);
-        bool matches = pid != 0 && state.TargetPids.Contains(pid);
-
-        if (!matches)
+        try
         {
-            if (IsWindowClass(hwnd, "ApplicationFrameWindow"))
+            if (lParam == 0 || !IsWindowVisible(hwnd))
+                return 1;
+
+            if (GCHandle.FromIntPtr(lParam).Target is not WindowSearchState state)
+                return 0;
+
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            bool matches = pid != 0 && state.TargetPids.Contains(pid);
+
+            if (!matches)
             {
-                nint coreHwnd = FindWindowExW(hwnd, 0, "Windows.UI.Core.CoreWindow", null);
-                if (coreHwnd != 0)
+                if (IsWindowClass(hwnd, "ApplicationFrameWindow"))
                 {
-                    GetWindowThreadProcessId(coreHwnd, out uint corePid);
-                    if (corePid != 0 && state.TargetPids.Contains(corePid))
-                        matches = true;
+                    nint coreHwnd = FindWindowExW(hwnd, 0, "Windows.UI.Core.CoreWindow", null);
+                    if (coreHwnd != 0)
+                    {
+                        GetWindowThreadProcessId(coreHwnd, out uint corePid);
+                        if (corePid != 0 && state.TargetPids.Contains(corePid))
+                            matches = true;
+                    }
                 }
             }
-        }
 
-        if (!matches)
+            if (!matches)
+                return 1;
+
+            uint exStyle = unchecked((uint)GetWindowLongW(hwnd, GWL_EXSTYLE));
+            bool isToolWindow = (exStyle & WS_EX_TOOLWINDOW) != 0;
+            bool hasOwner = GetWindow(hwnd, GW_OWNER) != 0;
+            bool iconic = IsIconic(hwnd);
+
+            GetWindowRect(hwnd, out var rc);
+            int width = rc.Width;
+            int height = rc.Height;
+            if (!iconic && (width < 20 || height < 20))
+                return 1;
+
+            int score = 0;
+            if (!isToolWindow && !hasOwner)
+                score += 300;
+
+            string title = GetWindowText(hwnd);
+            if (!string.IsNullOrWhiteSpace(title))
+                score += 120;
+
+            if (!string.IsNullOrEmpty(state.PreferredTitle) &&
+                !string.IsNullOrEmpty(title) &&
+                title.Contains(state.PreferredTitle, StringComparison.OrdinalIgnoreCase))
+            {
+                score += 1000;
+            }
+
+            if (iconic)
+            {
+                score += 80;
+            }
+            else if (width >= 60 && height >= 40)
+            {
+                score += (int)Math.Clamp(((long)width * height) / 20000L, 1L, 150L);
+            }
+            else
+            {
+                score -= 200;
+            }
+
+            if (score > state.BestScore)
+            {
+                state.BestScore = score;
+                state.BestHwnd = hwnd;
+            }
+
             return 1;
-
-        uint exStyle = unchecked((uint)GetWindowLongW(hwnd, GWL_EXSTYLE));
-        bool isToolWindow = (exStyle & WS_EX_TOOLWINDOW) != 0;
-        bool hasOwner = GetWindow(hwnd, GW_OWNER) != 0;
-        bool iconic = IsIconic(hwnd);
-
-        GetWindowRect(hwnd, out var rc);
-        int width = rc.Width;
-        int height = rc.Height;
-        if (!iconic && (width < 20 || height < 20))
+        }
+        catch
+        {
             return 1;
-
-        int score = 0;
-        if (!isToolWindow && !hasOwner)
-            score += 300;
-
-        string title = GetWindowText(hwnd);
-        if (!string.IsNullOrWhiteSpace(title))
-            score += 120;
-
-        if (!string.IsNullOrEmpty(state.PreferredTitle) &&
-            !string.IsNullOrEmpty(title) &&
-            title.Contains(state.PreferredTitle, StringComparison.OrdinalIgnoreCase))
-        {
-            score += 1000;
         }
-
-        if (iconic)
-        {
-            score += 80;
-        }
-        else if (width >= 60 && height >= 40)
-        {
-            score += (int)Math.Clamp(((long)width * height) / 20000L, 1L, 150L);
-        }
-        else
-        {
-            score -= 200;
-        }
-
-        if (score > state.BestScore)
-        {
-            state.BestScore = score;
-            state.BestHwnd = hwnd;
-        }
-
-        return 1;
     }
 
     private sealed class WindowListSearchState
@@ -1340,32 +1377,39 @@ internal static unsafe partial class Win32
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     private static int EnumWindowListProc(nint hwnd, nint lParam)
     {
-        if (lParam == 0 || !IsWindowVisible(hwnd))
-            return 1;
-
-        if (GCHandle.FromIntPtr(lParam).Target is not WindowListSearchState state)
-            return 0;
-
-        GetWindowThreadProcessId(hwnd, out uint pid);
-        if (pid == 0 || !state.TargetPids.Contains(pid))
-            return 1;
-
-        uint exStyle = unchecked((uint)GetWindowLongW(hwnd, GWL_EXSTYLE));
-        if ((exStyle & WS_EX_TOOLWINDOW) != 0)
-            return 1;
-
-        if (GetWindow(hwnd, GW_OWNER) != 0)
-            return 1;
-
-        if (!IsIconic(hwnd))
+        try
         {
-            GetWindowRect(hwnd, out var rc);
-            if (rc.Width < 120 || rc.Height < 80)
+            if (lParam == 0 || !IsWindowVisible(hwnd))
                 return 1;
-        }
 
-        state.Windows.Add(hwnd);
-        return 1;
+            if (GCHandle.FromIntPtr(lParam).Target is not WindowListSearchState state)
+                return 0;
+
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            if (pid == 0 || !state.TargetPids.Contains(pid))
+                return 1;
+
+            uint exStyle = unchecked((uint)GetWindowLongW(hwnd, GWL_EXSTYLE));
+            if ((exStyle & WS_EX_TOOLWINDOW) != 0)
+                return 1;
+
+            if (GetWindow(hwnd, GW_OWNER) != 0)
+                return 1;
+
+            if (!IsIconic(hwnd))
+            {
+                GetWindowRect(hwnd, out var rc);
+                if (rc.Width < 120 || rc.Height < 80)
+                    return 1;
+            }
+
+            state.Windows.Add(hwnd);
+            return 1;
+        }
+        catch
+        {
+            return 1;
+        }
     }
 
     public static bool TryFocusWindow(nint hwnd)

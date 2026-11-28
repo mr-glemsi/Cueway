@@ -11,13 +11,13 @@ odak çalmadan bağımsız kontrol etmek için tarayıcınıza Cueway Companion 
      - Chrome: chrome://extensions
   2. "Geliştirici modu" (Developer mode) anahtarını açın.
   3. "Paketlenmemiş öğe yükle" (Load unpacked) butonuna tıklayın ve
-     "Chromium" alt klasörünü seçin.
-     (Not: Ayarlar > "Edge / Chrome Kur" butonu klasör yolunu panoya kopyalayıp ilgili ekranı otomatik açar.)
+     "chromium" alt klasörünü seçin.
+     (Not: Ayarlar > "Edge (Mağaza)", "Chrome Kur" veya "Firefox Kur" butonları kurulum adımlarını otomatik başlatır.)
 
 2) Zen Browser / Mozilla Firefox
 --------------------------------
   1. Adres çubuğuna  about:debugging#/runtime/this-firefox  yazıp açın.
   2. "Geçici Eklenti Yükle..." (Load Temporary Add-on...) butonuna tıklayın.
-  3. "Firefox" alt klasöründeki "manifest.json" dosyasını seçin.
+  3. "firefox" alt klasöründeki "manifest.json" dosyasını seçin.
      (Kalıcı XPI kurulumu için tarayıcının imza politikasına bağlı olarak Developer/Unbranded sürümde
       xpinstall.signatures.required = false kullanılabilir.)

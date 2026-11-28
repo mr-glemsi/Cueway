@@ -18,11 +18,17 @@ internal readonly record struct AudioOutputDevice(
 internal sealed class CoreAudioService : IDisposable
 {
     private readonly object _lock = new();
+    private readonly object _devicesCacheLock = new();
     private CoreAudio.NotificationClientCcw? _ccw;
     private nint _notificationEnumerator;
-    private long _lastDeviceEventTick;
+    private long _lastListEventTick;
+    private long _lastGuardEventTick;
     private long _suppressDeviceGuardUntilTick;
     private int _perAppRoutingSupported = -1;
+    private List<AudioOutputDevice>? _cachedOutputDevices;
+    private long _cachedOutputDevicesTick;
+    private int _devicesRefreshInFlight;
+    private volatile HashSet<uint> _lastKnownAudioPids = [];
     private bool _disposed;
 
     public event Action<string>? DefaultOutputDeviceChanged;
@@ -59,29 +65,110 @@ internal sealed class CoreAudioService : IDisposable
                 // Ignore if audio service unavailable at startup
             }
         }
+
+        _ = Task.Run(RefreshOutputDevicesCache);
     }
 
-    private void OnEndpointCallback(string reason)
+    private static bool TryAtomicThrottle(ref long lastTick, long now, long cooldownMs)
     {
-        long now = Environment.TickCount64;
-        long prev = Interlocked.Read(ref _lastDeviceEventTick);
-        if (now - prev < 450)
+        while (true)
+        {
+            long prev = Volatile.Read(ref lastTick);
+            if (prev != 0 && now - prev < cooldownMs)
+                return false;
+            if (Interlocked.CompareExchange(ref lastTick, now, prev) == prev)
+                return true;
+        }
+    }
+
+    private bool IsRenderDeviceId(string? deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId))
+            return true;
+
+        nint enumerator = Volatile.Read(ref _notificationEnumerator);
+        if (enumerator != 0)
+        {
+            bool? queried = CoreAudio.TryGetDeviceDataFlow(enumerator, deviceId, out int flow);
+            if (queried == true)
+                return flow == CoreAudio.eRender;
+        }
+
+        // Capture endpoint IDs start with {0.0.1.; render endpoint IDs start with {0.0.0.
+        return !deviceId.StartsWith("{0.0.1.", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void OnEndpointCallback(string reason, string? deviceId)
+    {
+        if (_disposed)
             return;
 
-        Interlocked.Exchange(ref _lastDeviceEventTick, now);
-        OutputDevicesChanged?.Invoke();
+        long now = Environment.TickCount64;
+        if (TryAtomicThrottle(ref _lastListEventTick, now, 300))
+        {
+            _ = Task.Run(() =>
+            {
+                RefreshOutputDevicesCache();
+                if (!_disposed)
+                    OutputDevicesChanged?.Invoke();
+            });
+        }
 
         if (reason is "DeviceAdded" or "DeviceEnabled")
             return;
+
+        if (!IsRenderDeviceId(deviceId))
+            return;
+
         if (reason == "DefaultOutputChanged" && now <= Interlocked.Read(ref _suppressDeviceGuardUntilTick))
+            return;
+
+        if (!TryAtomicThrottle(ref _lastGuardEventTick, now, 450))
             return;
 
         DefaultOutputDeviceChanged?.Invoke(reason);
     }
 
+    public List<AudioOutputDevice> GetOutputDevicesCached()
+    {
+        List<AudioOutputDevice>? snap;
+        long age;
+        lock (_devicesCacheLock)
+        {
+            snap = _cachedOutputDevices;
+            age = snap != null ? Environment.TickCount64 - _cachedOutputDevicesTick : long.MaxValue;
+        }
+
+        if (snap == null || age > 10_000)
+        {
+            if (Interlocked.CompareExchange(ref _devicesRefreshInFlight, 1, 0) == 0)
+            {
+                _ = Task.Run(() =>
+                {
+                    try { RefreshOutputDevicesCache(); }
+                    finally { Interlocked.Exchange(ref _devicesRefreshInFlight, 0); }
+                });
+            }
+        }
+
+        return snap != null ? [.. snap] : [];
+    }
+
+    private void RefreshOutputDevicesCache()
+    {
+        if (_disposed)
+            return;
+        var list = GetOutputDevices();
+        lock (_devicesCacheLock)
+        {
+            _cachedOutputDevices = list;
+            _cachedOutputDevicesTick = Environment.TickCount64;
+        }
+    }
+
     public string? GetDefaultOutputDeviceId()
     {
-        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_MULTITHREADED);
         bool mustUninit = coHr == 0 || coHr == 1;
 
         nint enumerator = 0;
@@ -111,7 +198,7 @@ internal sealed class CoreAudioService : IDisposable
     public unsafe List<AudioOutputDevice> GetOutputDevices()
     {
         var devices = new List<AudioOutputDevice>();
-        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_MULTITHREADED);
         bool mustUninit = coHr == 0 || coHr == 1;
 
         nint enumerator = 0;
@@ -204,17 +291,29 @@ internal sealed class CoreAudioService : IDisposable
             return false;
 
         Interlocked.Exchange(ref _suppressDeviceGuardUntilTick, Environment.TickCount64 + 1500);
-        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_MULTITHREADED);
         bool mustUninit = coHr == 0 || coHr == 1;
         try
         {
             bool ok = CoreAudio.PolicyConfig_SetDefaultEndpoint(deviceId);
             if (ok)
-                OutputDevicesChanged?.Invoke();
+            {
+                _ = Task.Run(() =>
+                {
+                    RefreshOutputDevicesCache();
+                    if (!_disposed)
+                        OutputDevicesChanged?.Invoke();
+                });
+            }
+            else
+            {
+                Interlocked.Exchange(ref _suppressDeviceGuardUntilTick, 0);
+            }
             return ok;
         }
         catch
         {
+            Interlocked.Exchange(ref _suppressDeviceGuardUntilTick, 0);
             return false;
         }
         finally
@@ -241,7 +340,7 @@ internal sealed class CoreAudioService : IDisposable
         if (cached >= 0)
             return cached == 1;
 
-        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_MULTITHREADED);
         bool mustUninit = coHr == 0 || coHr == 1;
         nint factory = 0;
         bool ok = false;
@@ -269,7 +368,7 @@ internal sealed class CoreAudioService : IDisposable
         if (pids.Count == 0 || !IsPerAppAudioRoutingSupported())
             return result;
 
-        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_MULTITHREADED);
         bool mustUninit = coHr == 0 || coHr == 1;
         nint factory = 0;
         try
@@ -304,11 +403,10 @@ internal sealed class CoreAudioService : IDisposable
 
         Interlocked.Exchange(ref _suppressDeviceGuardUntilTick, Environment.TickCount64 + 2500);
 
-        int representativePid = 0;
-        int anyAudioPid = 0;
-        int firstPositive = 0;
+        var targetPids = new List<int>(4);
         var audioByPid = GetAudioStatesByPid();
         var seenAll = new HashSet<int>();
+        int firstPositive = 0;
         foreach (int p in pids)
         {
             if (p <= 0 || !seenAll.Add(p))
@@ -317,31 +415,42 @@ internal sealed class CoreAudioService : IDisposable
                 firstPositive = p;
             if (audioByPid.TryGetValue((uint)p, out var state))
             {
-                if (anyAudioPid == 0)
-                    anyAudioPid = p;
                 if (state.HasActiveSession)
-                {
-                    representativePid = p;
-                    break;
-                }
+                    targetPids.Insert(0, p);
+                else
+                    targetPids.Add(p);
             }
         }
-        int targetPid = representativePid != 0 ? representativePid : (anyAudioPid != 0 ? anyAudioPid : firstPositive);
-        if (targetPid == 0)
+        if (targetPids.Count == 0 && firstPositive != 0)
+            targetPids.Add(firstPositive);
+        if (targetPids.Count == 0)
             return false;
 
-        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_MULTITHREADED);
         bool mustUninit = coHr == 0 || coHr == 1;
         nint factory = 0;
         try
         {
             if (!CoreAudio.TryCreateAudioPolicyConfigFactory(out factory) || factory == 0)
+            {
+                Interlocked.Exchange(ref _suppressDeviceGuardUntilTick, 0);
                 return false;
+            }
 
-            return CoreAudio.AudioPolicyConfig_SetPersistedDefaultAudioEndpoint(factory, (uint)targetPid, deviceId);
+            bool anyOk = false;
+            int limit = Math.Min(targetPids.Count, 4);
+            for (int i = 0; i < limit; i++)
+            {
+                if (CoreAudio.AudioPolicyConfig_SetPersistedDefaultAudioEndpoint(factory, (uint)targetPids[i], deviceId))
+                    anyOk = true;
+            }
+            if (!anyOk)
+                Interlocked.Exchange(ref _suppressDeviceGuardUntilTick, 0);
+            return anyOk;
         }
         catch
         {
+            Interlocked.Exchange(ref _suppressDeviceGuardUntilTick, 0);
             return false;
         }
         finally
@@ -353,7 +462,7 @@ internal sealed class CoreAudioService : IDisposable
 
     public bool IsAnyMicrophoneSessionActive()
     {
-        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_MULTITHREADED);
         bool mustUninit = coHr == 0 || coHr == 1;
         uint selfPid = (uint)Environment.ProcessId;
 
@@ -436,13 +545,19 @@ internal sealed class CoreAudioService : IDisposable
         return false;
     }
 
+    public HashSet<uint> GetKnownAudioPidsSnapshot() => _lastKnownAudioPids;
+
     public Dictionary<uint, AudioProcessState> GetAudioStatesByPid()
     {
         var result = new Dictionary<uint, AudioProcessState>();
+        var seenPids = new HashSet<uint>();
         ForEachAudioSession((pid, isActive, volPtr, peak) =>
         {
-            CoreAudio.SimpleAudioVolume_GetMute(volPtr, out bool isMuted);
-            CoreAudio.SimpleAudioVolume_GetMasterVolume(volPtr, out float level);
+            seenPids.Add(pid);
+            if (CoreAudio.SimpleAudioVolume_GetMute(volPtr, out bool isMuted) != 0)
+                return;
+            if (CoreAudio.SimpleAudioVolume_GetMasterVolume(volPtr, out float level) != 0 || !float.IsFinite(level))
+                return;
 
             if (result.TryGetValue(pid, out var existing))
             {
@@ -475,6 +590,7 @@ internal sealed class CoreAudioService : IDisposable
                 result[pid] = new AudioProcessState(true, isActive, isMuted, level, peak);
             }
         }, includePeak: true);
+        _lastKnownAudioPids = seenPids;
         return result;
     }
 
@@ -554,7 +670,7 @@ internal sealed class CoreAudioService : IDisposable
         if (pidSet.Count == 0)
             return null;
 
-        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_MULTITHREADED);
         bool mustUninit = coHr == 0 || coHr == 1;
         var matchedVolumes = new List<nint>(4);
         bool found = false;
@@ -607,7 +723,7 @@ internal sealed class CoreAudioService : IDisposable
         bool includePeak = false,
         HashSet<uint>? filterPids = null)
     {
-        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_APARTMENTTHREADED);
+        int coHr = Win32.CoInitializeEx(0, Win32.COINIT_MULTITHREADED);
         bool mustUninit = coHr == 0 || coHr == 1;
 
         nint enumerator = 0;

@@ -73,6 +73,7 @@ internal sealed class StateStore : IDisposable
     private AppState LoadInternal()
     {
         bool fileExists = File.Exists(_filePath);
+        bool parseFailed = false;
         if (fileExists)
         {
             for (int attempt = 0; attempt < 4; attempt++)
@@ -98,6 +99,7 @@ internal sealed class StateStore : IDisposable
                         }
                         return loaded;
                     }
+                    parseFailed = true;
                     break;
                 }
                 catch (IOException) when (attempt < 3)
@@ -113,9 +115,20 @@ internal sealed class StateStore : IDisposable
                 }
                 catch
                 {
+                    parseFailed = true;
                     break;
                 }
             }
+        }
+
+        if (parseFailed)
+        {
+            try
+            {
+                string backupPath = $"{_filePath}.corrupt";
+                File.Copy(_filePath, backupPath, overwrite: true);
+            }
+            catch { }
         }
 
         var fresh = new AppState();
@@ -164,13 +177,27 @@ internal sealed class StateStore : IDisposable
         {
         }
 
-        string json = JsonSerializer.Serialize(state, AppJsonContext.Default.AppState);
+        string json;
+        try
+        {
+            json = JsonSerializer.Serialize(state, AppJsonContext.Default.AppState);
+        }
+        catch
+        {
+            return;
+        }
+
         string tempPath = $"{_filePath}.{Environment.ProcessId}.tmp";
+        byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(json);
         for (int attempt = 0; attempt < 4; attempt++)
         {
             try
             {
-                File.WriteAllText(tempPath, json);
+                using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    fs.Write(utf8, 0, utf8.Length);
+                    fs.Flush(flushToDisk: true);
+                }
                 File.Move(tempPath, _filePath, overwrite: true);
                 return;
             }

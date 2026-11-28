@@ -19,9 +19,8 @@ internal sealed class MpvIpcClient
 
         try
         {
-            using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.None);
+            using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
             pipe.Connect(30);
-            pipe.ReadTimeout = 80;
 
             string title = GetStringProperty(pipe, "media-title") ?? GetStringProperty(pipe, "filename") ?? "mpv";
             bool? paused = GetBoolProperty(pipe, "pause");
@@ -129,32 +128,44 @@ internal sealed class MpvIpcClient
         try
         {
             byte[] req = Encoding.UTF8.GetBytes(commandLine);
-            pipe.Write(req, 0, req.Length);
-            pipe.Flush();
+            using var writeCts = new CancellationTokenSource(60);
+            pipe.WriteAsync(req, 0, req.Length, writeCts.Token).GetAwaiter().GetResult();
+            pipe.FlushAsync(writeCts.Token).GetAwaiter().GetResult();
 
-            var sb = new StringBuilder(128);
-            Span<byte> buf = stackalloc byte[256];
-            long start = Environment.TickCount64;
-            while (Environment.TickCount64 - start < 80)
+            using var cts = new CancellationTokenSource(80);
+            byte[] buf = new byte[1024];
+            int buffered = 0;
+
+            while (!cts.IsCancellationRequested)
             {
-                int read = pipe.Read(buf);
-                if (read <= 0) break;
-                string chunk = Encoding.UTF8.GetString(buf[..read]);
-                int nl = chunk.IndexOf('\n');
-                if (nl >= 0)
+                if (buffered >= buf.Length)
+                    Array.Resize(ref buf, buf.Length * 2);
+
+                int read = pipe.ReadAsync(buf, buffered, buf.Length - buffered, cts.Token).GetAwaiter().GetResult();
+                if (read <= 0)
+                    break;
+                buffered += read;
+
+                int lineStart = 0;
+                while (true)
                 {
-                    sb.Append(chunk, 0, nl);
-                    string line = sb.ToString().Trim();
+                    int nlRel = Array.IndexOf(buf, (byte)'\n', lineStart, buffered - lineStart);
+                    if (nlRel < 0)
+                        break;
+
+                    string line = Encoding.UTF8.GetString(buf, lineStart, nlRel - lineStart).Trim();
+                    lineStart = nlRel + 1;
                     // Skip async event lines until we receive the command response ("error" field)
                     if (line.Contains("\"error\"", StringComparison.Ordinal))
                         return line;
-                    sb.Clear();
-                    if (nl + 1 < chunk.Length)
-                        sb.Append(chunk[(nl + 1)..]);
                 }
-                else
+
+                if (lineStart > 0)
                 {
-                    sb.Append(chunk);
+                    int rem = buffered - lineStart;
+                    if (rem > 0)
+                        Buffer.BlockCopy(buf, lineStart, buf, 0, rem);
+                    buffered = rem;
                 }
             }
         }

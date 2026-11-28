@@ -11,6 +11,7 @@ internal static unsafe partial class Direct2D
 
     public const uint D2D1_FACTORY_TYPE_SINGLE_THREADED = 0;
     public const uint DWRITE_FACTORY_TYPE_SHARED = 0;
+    public const uint D2D1_PRESENT_OPTIONS_IMMEDIATELY = 0x00000002;
 
     public const uint DXGI_FORMAT_B8G8R8A8_UNORM = 87;
     public const uint D2D1_ALPHA_MODE_PREMULTIPLIED = 1;
@@ -245,6 +246,16 @@ internal static unsafe partial class Direct2D
             m22 = sy,
             dx = cx - sx * cx + dx,
             dy = cy - sy * cy + dy
+        };
+
+        public static D2D1_MATRIX_3X2_F Multiply(in D2D1_MATRIX_3X2_F a, in D2D1_MATRIX_3X2_F b) => new()
+        {
+            m11 = a.m11 * b.m11 + a.m12 * b.m21,
+            m12 = a.m11 * b.m12 + a.m12 * b.m22,
+            m21 = a.m21 * b.m11 + a.m22 * b.m21,
+            m22 = a.m21 * b.m12 + a.m22 * b.m22,
+            dx = a.dx * b.m11 + a.dy * b.m21 + b.dx,
+            dy = a.dx * b.m12 + a.dy * b.m22 + b.dy
         };
     }
 
@@ -579,6 +590,38 @@ internal static unsafe partial class Direct2D
         D2D1_COLOR_F c = color;
         nint* vtbl = *(nint**)brush;
         ((delegate* unmanaged[Stdcall]<nint, D2D1_COLOR_F*, void>)vtbl[8])(brush, &c);
+    }
+
+    // ID2D1LinearGradientBrush (+0 [8]): SetStartPoint, (+1 [9]): SetEndPoint
+    public static void LinearGradientBrush_SetStartPoint(nint brush, D2D1_POINT_2F startPoint)
+    {
+        nint* vtbl = *(nint**)brush;
+        ((delegate* unmanaged[Stdcall]<nint, D2D1_POINT_2F, void>)vtbl[8])(brush, startPoint);
+    }
+
+    public static void LinearGradientBrush_SetEndPoint(nint brush, D2D1_POINT_2F endPoint)
+    {
+        nint* vtbl = *(nint**)brush;
+        ((delegate* unmanaged[Stdcall]<nint, D2D1_POINT_2F, void>)vtbl[9])(brush, endPoint);
+    }
+
+    // ID2D1RadialGradientBrush (+0 [8]): SetCenter, (+2 [10]): SetRadiusX, (+3 [11]): SetRadiusY
+    public static void RadialGradientBrush_SetCenter(nint brush, D2D1_POINT_2F center)
+    {
+        nint* vtbl = *(nint**)brush;
+        ((delegate* unmanaged[Stdcall]<nint, D2D1_POINT_2F, void>)vtbl[8])(brush, center);
+    }
+
+    public static void RadialGradientBrush_SetRadiusX(nint brush, float radiusX)
+    {
+        nint* vtbl = *(nint**)brush;
+        ((delegate* unmanaged[Stdcall]<nint, float, void>)vtbl[10])(brush, radiusX);
+    }
+
+    public static void RadialGradientBrush_SetRadiusY(nint brush, float radiusY)
+    {
+        nint* vtbl = *(nint**)brush;
+        ((delegate* unmanaged[Stdcall]<nint, float, void>)vtbl[11])(brush, radiusY);
     }
 
     // ID2D1PathGeometry (+0 [17]): Open

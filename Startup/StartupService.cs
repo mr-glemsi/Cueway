@@ -86,12 +86,16 @@ internal sealed class StartupService
                     CreateNoWindow = true,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
-                    RedirectStandardError = true
+                    RedirectStandardError = false
                 };
                 using var p = Process.Start(psi);
                 if (p == null) return (false, false);
                 string xml = p.StandardOutput.ReadToEnd();
-                p.WaitForExit(3000);
+                if (!p.WaitForExit(3000))
+                {
+                    try { p.Kill(); } catch { }
+                    return (false, false);
+                }
                 bool ok = p.ExitCode == 0;
                 bool isHighest = ok && xml.Contains("HighestAvailable", StringComparison.OrdinalIgnoreCase);
                 return (ok, isHighest);
@@ -344,7 +348,9 @@ internal sealed class StartupService
             };
             using var proc = Process.Start(psi);
             if (proc == null) return -1;
-            proc.WaitForExit(10_000);
+            int waitMs = useUac ? 60_000 : 10_000;
+            if (!proc.WaitForExit(waitMs))
+                return -1;
             return proc.ExitCode;
         }).ConfigureAwait(false);
     }
@@ -363,7 +369,7 @@ internal sealed class StartupService
                 Verb = "runas",
                 Arguments = openSettings ? "--show-settings" : "--show"
             };
-            Process.Start(psi);
+            using var _ = Process.Start(psi);
             return true;
         }
         catch
@@ -379,7 +385,7 @@ internal sealed class StartupService
             string? dir = Path.GetDirectoryName(filePath);
             if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
             {
-                Process.Start(new ProcessStartInfo("explorer.exe", $"\"{dir}\"")
+                using var _ = Process.Start(new ProcessStartInfo("explorer.exe", $"\"{dir}\"")
                 {
                     UseShellExecute = true
                 });

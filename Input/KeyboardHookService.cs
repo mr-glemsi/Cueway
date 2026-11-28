@@ -51,7 +51,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
     private long _lastPlayPauseDownTick;
     private bool _stopHeld;
     private long _lastStopDownTick;
-    private readonly HashSet<uint> _heldCustomVks = [];
+    private readonly Dictionary<uint, long> _heldCustomVks = [];
     private readonly HashSet<uint> _swallowedCaptureVks = [];
     private Action<string?>? _onCaptureResult;
     private Action<string>? _onCapturePreview;
@@ -149,7 +149,20 @@ internal sealed unsafe class KeyboardHookService : IDisposable
 
     public void OnSystemWakeOrUnlock()
     {
+        _heldCustomVks.Clear();
+        _swallowedCaptureVks.Clear();
+        _heldMediaVk = 0;
+        _playPauseHeld = false;
+        _stopHeld = false;
         EnsureHookInstalled(forceSwap: true);
+    }
+
+    private bool TryMarkCustomKeyDown(uint vkCode, long now)
+    {
+        if (_heldCustomVks.TryGetValue(vkCode, out long downTick) && now - downTick < 2500)
+            return false;
+        _heldCustomVks[vkCode] = now;
+        return true;
     }
 
     public void HandleTimer(nuint timerId)
@@ -177,7 +190,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                     var action = _heldMediaVk == Win32.VK_MEDIA_NEXT_TRACK
                         ? MediaActionKind.SeekForward
                         : MediaActionKind.SeekBackward;
-                    _ = _engine.DispatchMediaActionAsync(action, secondary: false);
+                    _ = Task.Run(() => _engine.DispatchMediaActionAsync(action, secondary: false));
                 }
                 break;
 
@@ -191,7 +204,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                     var action = vk == Win32.VK_MEDIA_NEXT_TRACK
                         ? MediaActionKind.Next
                         : MediaActionKind.Previous;
-                    _ = _engine.DispatchMediaActionAsync(action, sec);
+                    _ = Task.Run(() => _engine.DispatchMediaActionAsync(action, sec));
                 }
                 break;
         }
@@ -225,33 +238,33 @@ internal sealed unsafe class KeyboardHookService : IDisposable
     private static nint LowLevelKeyboardProc(int nCode, nuint wParam, nint lParam)
     {
         var inst = _instance;
-        if (nCode >= 0 && inst != null && !inst._disposed)
+        try
         {
-            var kb = *(Win32.KBDLLHOOKSTRUCT*)lParam;
-            bool isInjected = (kb.flags & Win32.LLKHF_INJECTED) != 0;
-            bool isMediaKey = kb.vkCode is Win32.VK_MEDIA_PLAY_PAUSE
-                or Win32.VK_MEDIA_NEXT_TRACK
-                or Win32.VK_MEDIA_PREV_TRACK
-                or Win32.VK_MEDIA_STOP;
-
-            // Wireless/USB/Bluetooth headsets often deliver VK_MEDIA_* via Windows hidserv/AVRCP
-            // with LLKHF_INJECTED set, and laptop Fn layers/macros can inject single-key hotkeys.
-            // Because Cueway uses SMTC/IPC (never SendInput), allow injected events during capture
-            // and for the PlayPause shortcut while keeping the guard for other shortcuts.
-            bool allowInjected = isMediaKey ||
-                                 inst.IsCapturingHotkey ||
-                                 (!inst._hotkeys.PlayPause.IsEmpty && inst._hotkeys.PlayPause.VkCode == kb.vkCode) ||
-                                 (!inst._hotkeys.PromotePlaying.IsEmpty && inst._hotkeys.PromotePlaying.VkCode == kb.vkCode);
-
-            if (!isInjected || allowInjected)
+            if (nCode >= 0 && inst != null && !inst._disposed)
             {
-                bool isDown = wParam == Win32.WM_KEYDOWN || wParam == Win32.WM_SYSKEYDOWN;
-                bool isUp = wParam == Win32.WM_KEYUP || wParam == Win32.WM_SYSKEYUP;
+                var kb = *(Win32.KBDLLHOOKSTRUCT*)lParam;
+                bool isInjected = (kb.flags & Win32.LLKHF_INJECTED) != 0;
+                bool isMediaKey = kb.vkCode is Win32.VK_MEDIA_PLAY_PAUSE
+                    or Win32.VK_MEDIA_NEXT_TRACK
+                    or Win32.VK_MEDIA_PREV_TRACK
+                    or Win32.VK_MEDIA_STOP;
 
-                if (inst.ProcessKey(kb.vkCode, isDown, isUp, isInjected))
-                    return 1; // Swallow event so Windows default handler never runs
+                bool allowInjected = isMediaKey ||
+                                     inst.IsCapturingHotkey ||
+                                     (!inst._hotkeys.PlayPause.IsEmpty && inst._hotkeys.PlayPause.VkCode == kb.vkCode) ||
+                                     (!inst._hotkeys.PromotePlaying.IsEmpty && inst._hotkeys.PromotePlaying.VkCode == kb.vkCode);
+
+                if (!isInjected || allowInjected)
+                {
+                    bool isDown = wParam == Win32.WM_KEYDOWN || wParam == Win32.WM_SYSKEYDOWN;
+                    bool isUp = wParam == Win32.WM_KEYUP || wParam == Win32.WM_SYSKEYUP;
+
+                    if (inst.ProcessKey(kb.vkCode, isDown, isUp, isInjected))
+                        return 1; // Swallow event so Windows default handler never runs
+                }
             }
         }
+        catch { }
         return Win32.CallNextHookEx(inst?._hookHandle ?? 0, nCode, wParam, lParam);
     }
 
@@ -312,17 +325,18 @@ internal sealed unsafe class KeyboardHookService : IDisposable
             {
                 var snap = _hotkeys;
                 HotkeyModifiers mods = GetCurrentModifiers();
+                long nowTick = Environment.TickCount64;
 
                 if (!snap.PlayPause.IsEmpty && snap.PlayPause.VkCode == vkCode && snap.PlayPause.Modifiers == mods)
                 {
-                    if (_heldCustomVks.Add(vkCode))
+                    if (TryMarkCustomKeyDown(vkCode, nowTick))
                         _ = Task.Run(() => _engine.DispatchMediaActionAsync(MediaActionKind.PlayPause, secondary: false));
                     return true;
                 }
 
                 if (!snap.PromotePlaying.IsEmpty && snap.PromotePlaying.VkCode == vkCode && snap.PromotePlaying.Modifiers == mods)
                 {
-                    if (_heldCustomVks.Add(vkCode))
+                    if (TryMarkCustomKeyDown(vkCode, nowTick))
                         _ = Task.Run(() => _engine.PromoteNowPlayingToTop());
                     return true;
                 }
@@ -331,22 +345,21 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                 {
                     if (!snap.ToggleWindow.IsEmpty && snap.ToggleWindow.VkCode == vkCode && snap.ToggleWindow.Modifiers == mods)
                     {
-                        if (_heldCustomVks.Add(vkCode))
+                        if (TryMarkCustomKeyDown(vkCode, nowTick))
                             ToggleWindowRequested?.Invoke();
                         return true;
                     }
 
                     if (!snap.ManualLock.IsEmpty && snap.ManualLock.VkCode == vkCode && snap.ManualLock.Modifiers == mods)
                     {
-                        if (_heldCustomVks.Add(vkCode))
+                        if (TryMarkCustomKeyDown(vkCode, nowTick))
                             _ = Task.Run(() => _engine.ToggleManualLockOnActiveOrSelected());
                         return true;
                     }
 
                     if (!snap.VolumeUp.IsEmpty && snap.VolumeUp.VkCode == vkCode && snap.VolumeUp.Modifiers == mods)
                     {
-                        bool firstPress = _heldCustomVks.Add(vkCode);
-                        long nowTick = Environment.TickCount64;
+                        bool firstPress = TryMarkCustomKeyDown(vkCode, nowTick);
                         if (firstPress || nowTick - _lastVolHotkeyTick >= 110)
                         {
                             _lastVolHotkeyTick = nowTick;
@@ -358,8 +371,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
 
                     if (!snap.VolumeDown.IsEmpty && snap.VolumeDown.VkCode == vkCode && snap.VolumeDown.Modifiers == mods)
                     {
-                        bool firstPress = _heldCustomVks.Add(vkCode);
-                        long nowTick = Environment.TickCount64;
+                        bool firstPress = TryMarkCustomKeyDown(vkCode, nowTick);
                         if (firstPress || nowTick - _lastVolHotkeyTick >= 110)
                         {
                             _lastVolHotkeyTick = nowTick;
@@ -371,14 +383,14 @@ internal sealed unsafe class KeyboardHookService : IDisposable
 
                     if (!snap.VolumeMute.IsEmpty && snap.VolumeMute.VkCode == vkCode && snap.VolumeMute.Modifiers == mods)
                     {
-                        if (_heldCustomVks.Add(vkCode))
+                        if (TryMarkCustomKeyDown(vkCode, nowTick))
                             _ = Task.Run(() => _engine.ToggleActiveTargetMute());
                         return true;
                     }
 
                     if (!snap.CycleAudioDevice.IsEmpty && snap.CycleAudioDevice.VkCode == vkCode && snap.CycleAudioDevice.Modifiers == mods)
                     {
-                        if (_heldCustomVks.Add(vkCode))
+                        if (TryMarkCustomKeyDown(vkCode, nowTick))
                             _ = Task.Run(() => _engine.CycleOutputDevice());
                         return true;
                     }
@@ -387,7 +399,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                     {
                         if (!entry.Binding.IsEmpty && entry.Binding.VkCode == vkCode && entry.Binding.Modifiers == mods)
                         {
-                            if (_heldCustomVks.Add(vkCode))
+                            if (TryMarkCustomKeyDown(vkCode, nowTick))
                             {
                                 string promotedKey = entry.AppKey;
                                 _ = Task.Run(() => _engine.PromoteAppToTop(promotedKey));
@@ -501,7 +513,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                 return true;
             }
 
-            if (isUp)
+            if (isUp && _heldMediaVk == vkCode)
             {
                 Win32.KillTimer(_hwndHost, TIMER_LONG_PRESS);
                 bool wasLong = _longPressTriggered;
@@ -520,7 +532,7 @@ internal sealed unsafe class KeyboardHookService : IDisposable
                         var seekAction = vkCode == Win32.VK_MEDIA_NEXT_TRACK
                             ? MediaActionKind.SeekForward
                             : MediaActionKind.SeekBackward;
-                        _ = _engine.DispatchMediaActionAsync(seekAction, secondary: false);
+                        _ = Task.Run(() => _engine.DispatchMediaActionAsync(seekAction, secondary: false));
                     }
                     else
                     {

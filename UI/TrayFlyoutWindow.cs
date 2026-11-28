@@ -19,6 +19,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     private const uint WM_APP_FLYOUT_REFRESH = Win32.WM_APP + 216;
     private const uint WM_APP_ANIM_FRAME = Win32.WM_APP + 217;
     private const nuint TIMER_UI_ANIM = 9002;
+    private const nuint TIMER_IDLE_RELEASE = 9003;
+    private const uint IDLE_RELEASE_MS = 90_000;
     private const uint UI_ANIM_FALLBACK_MS = 8;
 
     private const int FlyoutWidthPx = 392;
@@ -78,6 +80,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     private string? _hoverId;
     private string? _pressedHitId;
     private bool _trackingMouse;
+    private bool _hoverIsHand;
+    private int _wheelAccum;
     private string? _draggingSliderId;
     private string? _draggingSessionId;
     private int _dragTrackLeft;
@@ -106,8 +110,21 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     private double _lastFrameMs;
     private float _lastFrameDt = 0.016f;
     private bool _anySpringAnimating;
-    private bool _animFramePosted;
+    private int _vsyncPending;
     private bool _uiAnimTimerActive;
+    private static readonly WaitCallback VSyncWaitCallback = static state =>
+    {
+        var self = (TrayFlyoutWindow)state!;
+        int hr = Win32.DwmFlush();
+        nint targetHwnd = self._hwnd;
+        if (self._disposed || targetHwnd == 0)
+        {
+            Interlocked.Exchange(ref self._vsyncPending, 0);
+            return;
+        }
+        if (!Win32.PostMessageW(targetHwnd, WM_APP_ANIM_FRAME, hr == 0 ? (nuint)0 : (nuint)1, 0))
+            Interlocked.Exchange(ref self._vsyncPending, 0);
+    };
     private byte _lastAppliedAlpha = 255;
     private bool _disposed;
 
@@ -133,6 +150,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         _engine.StateChanged += OnStateChanged;
         _engine.SleepTimerChanged += OnSleepTimerChanged;
         _stateStore.StateChanged += OnStoreChanged;
+        _iconRenderer.IconsUpdated += OnIconsUpdated;
     }
 
     public bool IsVisible => _hwnd != 0 && Win32.IsWindowVisible(_hwnd);
@@ -242,6 +260,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     public void Show()
     {
         if (_disposed || _hwnd == 0) return;
+        Win32.KillTimer(_hwnd, TIMER_IDLE_RELEASE);
         _snapshot = _engine.GetSnapshot();
         _settings = _stateStore.GetSettingsSnapshot();
         if (!string.Equals(_lastLanguage, _settings.Language, StringComparison.OrdinalIgnoreCase))
@@ -252,26 +271,26 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
 
         _openDrawer = FlyoutDrawer.None;
         _drawerAnimStartMs = 0;
-        _outputDevices = _engine.GetOutputDevices();
+        _outputDevices = _engine.GetOutputDevicesCached();
         RebuildOutputDeviceColorCache();
         _scrollY = 0;
         _scrollYFloat = 0f;
         _scrollTargetY = 0;
         _hoverId = null;
+        _hoverIsHand = false;
+        _wheelAccum = 0;
         _pressedHitId = null;
         _hoverAnim.Clear();
         _volAnim.Clear();
         _anySpringAnimating = false;
-        _animFramePosted = false;
 
         ApplyDwmStyle();
         PositionAndResize();
 
         if (!_settings.ReducedAnimations)
         {
-            double now = NowMs();
-            _openAnimStartMs = now;
-            _lastFrameMs = now;
+            _openAnimStartMs = -1.0;
+            _lastFrameMs = 0;
             SetWindowAlpha(12);
         }
         else
@@ -282,7 +301,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         }
 
         Win32.ShowWindow(_hwnd, Win32.SW_SHOW);
-        Win32.SetForegroundWindow(_hwnd);
+        Win32.TryFocusWindow(_hwnd);
         KickAnimations();
     }
 
@@ -298,25 +317,29 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         }
 
         StopUiAnimTimer();
-        _animFramePosted = false;
         _anySpringAnimating = false;
         _openAnimStartMs = 0;
         _drawerAnimStartMs = 0;
         _lastFrameMs = 0;
         _openDrawer = FlyoutDrawer.None;
         _hoverId = null;
+        _hoverIsHand = false;
+        _wheelAccum = 0;
         _pressedHitId = null;
         _hoverAnim.Clear();
         _volAnim.Clear();
 
         Win32.ShowWindow(_hwnd, Win32.SW_HIDE);
-        _d2d.ReleaseDeviceResources();
-        _d2d.ClearTextFormatCache();
         _hitRegions.Clear();
         _hitRegions.TrimExcess();
         _sliderRegions.Clear();
         _sliderRegions.TrimExcess();
+        Win32.SetTimer(_hwnd, TIMER_IDLE_RELEASE, IDLE_RELEASE_MS, 0);
     }
+
+    public void InvalidateIconCache() => _d2d.ClearIconCache();
+
+    private void OnIconsUpdated() => NotifyVisualRefresh(clearIcons: true);
 
     public void RefreshVisuals()
     {
@@ -383,7 +406,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         else
         {
             _openDrawer = target;
-            _drawerAnimStartMs = _settings.ReducedAnimations ? 0 : NowMs();
+            _drawerAnimStartMs = _settings.ReducedAnimations ? 0 : -1.0;
         }
         PositionAndResize();
         KickAnimations();
@@ -397,7 +420,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
     {
         FlyoutDrawer.AudioDevices => Math.Max(1, Math.Min(_outputDevices.Count, 5)) * 34 + 14,
         FlyoutDrawer.SleepTimer => 50,
-        FlyoutDrawer.AppOutputDevice => 26 + Math.Min(_outputDevices.Count + 1, 6) * 32 + 14 + (ShouldShowBrowserOutputNotice() ? 66 : 0),
+        FlyoutDrawer.AppOutputDevice => 26 + Math.Min(_outputDevices.Count + 1, 6) * 32 + 14 + (ShouldShowBrowserOutputNotice() ? 72 : 0),
         _ => 0
     };
 
@@ -407,7 +430,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         int count = _snapshot.Sessions.Count;
         int padV = 12;
         if (count == 0)
-            return HeaderHeightPx + padV * 2 + 92 + extra;
+            return HeaderHeightPx + padV * 2 + 104 + extra;
 
         int visible = Math.Min(count, MaxVisibleCards);
         return HeaderHeightPx + padV * 2 + visible * CardHeightPx + Math.Max(0, visible - 1) * CardGapPx + extra;
@@ -433,6 +456,14 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         }
 
         nint hMon = Win32.MonitorFromPoint(anchorPt, Win32.MONITOR_DEFAULTTONEAREST);
+        uint monDpi = Win32.GetMonitorDpi(hMon, _dpi >= 96 ? _dpi : 96u);
+        if (monDpi >= 96 && monDpi != _dpi)
+        {
+            _dpi = monDpi;
+            _d2d.ClearTextFormatCache();
+            _d2d.ClearIconCache();
+        }
+
         var mi = new Win32.MONITORINFO { cbSize = (uint)sizeof(Win32.MONITORINFO) };
         Win32.GetMonitorInfoW(hMon, &mi);
 
@@ -488,12 +519,6 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         _clientW = w;
         _clientH = h;
         Win32.SetWindowPos(_hwnd, Win32.HWND_TOPMOST, x, y, w, h, Win32.SWP_NOACTIVATE);
-        uint updatedDpi = Win32.GetDpiForWindow(_hwnd);
-        if (updatedDpi >= 96 && updatedDpi != _dpi)
-        {
-            _dpi = updatedDpi;
-            _d2d.ClearTextFormatCache();
-        }
         _d2d.Resize(w, h);
         ClampScroll();
     }
@@ -649,8 +674,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
 
         int openWindow = OPEN_ANIM_MS + Math.Min(_snapshot.Sessions.Count, MaxVisibleCards) * CARD_STAGGER_STEP_MS;
         return _anySpringAnimating ||
-               (_openAnimStartMs > 0 && (nowMs - _openAnimStartMs) < openWindow) ||
-               (_drawerAnimStartMs > 0 && (nowMs - _drawerAnimStartMs) < DRAWER_ANIM_MS);
+               _openAnimStartMs < 0 || (_openAnimStartMs > 0 && (nowMs - _openAnimStartMs) < openWindow) ||
+               _drawerAnimStartMs < 0 || (_drawerAnimStartMs > 0 && (nowMs - _drawerAnimStartMs) < DRAWER_ANIM_MS);
     }
 
     private void StartUiAnimTimer()
@@ -671,12 +696,21 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         }
     }
 
+    private void ScheduleNextVSyncFrame()
+    {
+        nint hwnd = _hwnd;
+        if (_disposed || hwnd == 0)
+            return;
+        if (Interlocked.CompareExchange(ref _vsyncPending, 1, 0) != 0)
+            return;
+        ThreadPool.UnsafeQueueUserWorkItem(VSyncWaitCallback, this);
+    }
+
     private void HandleUiAnimTimer()
     {
         if (!Win32.IsWindowVisible(_hwnd) || !HasActiveUiAnimation(NowMs()))
         {
             StopUiAnimTimer();
-            _animFramePosted = false;
             return;
         }
         RequestRepaint();
@@ -689,110 +723,140 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         if (inst == null || hwnd != inst._hwnd)
             return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
 
-        switch (msg)
+        try
         {
-            case WM_APP_FLYOUT_REFRESH:
-                inst.HandleAsyncRefresh(wParam != 0);
-                return 0;
+            switch (msg)
+            {
+                case WM_APP_FLYOUT_REFRESH:
+                    inst.HandleAsyncRefresh(wParam != 0);
+                    return 0;
 
-            case WM_APP_ANIM_FRAME:
-                inst._animFramePosted = false;
-                if (Win32.IsWindowVisible(hwnd) && inst.HasActiveUiAnimation(NowMs()))
+                case WM_APP_ANIM_FRAME:
+                    Interlocked.Exchange(ref inst._vsyncPending, 0);
+                    if (wParam != 0)
+                    {
+                        inst.StartUiAnimTimer();
+                    }
+                    else if (Win32.IsWindowVisible(hwnd) && inst.HasActiveUiAnimation(NowMs()))
+                    {
+                        Win32.InvalidateRect(hwnd, null, false);
+                    }
+                    return 0;
+
+                case Win32.WM_TIMER:
+                    if (wParam == TIMER_UI_ANIM)
+                    {
+                        inst.HandleUiAnimTimer();
+                        return 0;
+                    }
+                    if (wParam == TIMER_IDLE_RELEASE)
+                    {
+                        Win32.KillTimer(hwnd, TIMER_IDLE_RELEASE);
+                        if (!Win32.IsWindowVisible(hwnd))
+                            inst._d2d.ReleaseDeviceResources();
+                        return 0;
+                    }
+                    break;
+
+                case Win32.WM_DPICHANGED:
+                    inst._dpi = (uint)(wParam & 0xFFFF);
+                    inst._d2d.ClearTextFormatCache();
+                    inst._d2d.ClearIconCache();
+                    inst.PositionAndResize();
                     Win32.InvalidateRect(hwnd, null, false);
-                return 0;
-
-            case Win32.WM_TIMER:
-                if (wParam == TIMER_UI_ANIM)
-                {
-                    inst.HandleUiAnimTimer();
                     return 0;
-                }
-                break;
 
-            case Win32.WM_DPICHANGED:
-                inst._dpi = (uint)(wParam & 0xFFFF);
-                inst._d2d.ClearTextFormatCache();
-                inst.PositionAndResize();
-                Win32.InvalidateRect(hwnd, null, false);
-                return 0;
-
-            case Win32.WM_SIZE:
-                inst._clientW = Math.Max(1, (int)(lParam & 0xFFFF));
-                inst._clientH = Math.Max(1, (int)((lParam >> 16) & 0xFFFF));
-                inst._d2d.Resize(inst._clientW, inst._clientH);
-                inst.ClampScroll();
-                Win32.InvalidateRect(hwnd, null, false);
-                return 0;
-
-            case Win32.WM_ERASEBKGND:
-                return 1;
-
-            case Win32.WM_PAINT:
-                inst.HandlePaint(hwnd);
-                return 0;
-
-            case Win32.WM_MOUSEMOVE:
-                inst.HandleMouseMove(lParam);
-                return 0;
-
-            case Win32.WM_MOUSELEAVE:
-                inst._trackingMouse = false;
-                if (inst._hoverId != null && inst._draggingSliderId == null)
-                {
-                    inst._hoverId = null;
-                    inst.KickAnimations();
-                }
-                return 0;
-
-            case Win32.WM_LBUTTONDOWN:
-                if (inst.HandleLeftButtonDown(lParam))
+                case Win32.WM_SIZE:
+                    inst._clientW = Math.Max(1, (int)(lParam & 0xFFFF));
+                    inst._clientH = Math.Max(1, (int)((lParam >> 16) & 0xFFFF));
+                    inst._d2d.Resize(inst._clientW, inst._clientH);
+                    inst.ClampScroll();
+                    Win32.InvalidateRect(hwnd, null, false);
                     return 0;
-                if (inst._pressedHitId != null)
-                    inst.RequestRepaint();
-                break;
 
-            case Win32.WM_CAPTURECHANGED:
-                inst._pressedHitId = null;
-                if (inst._draggingSliderId != null)
-                {
-                    inst._draggingSliderId = null;
-                    inst._draggingSessionId = null;
-                    inst.RequestRepaint();
-                }
-                return 0;
+                case Win32.WM_SETCURSOR:
+                    if ((lParam & 0xFFFF) == Win32.HTCLIENT)
+                    {
+                        Win32.SetCursor(inst._hoverIsHand && inst._cursorHand != 0 ? inst._cursorHand : inst._cursorArrow);
+                        return 1;
+                    }
+                    break;
 
-            case Win32.WM_LBUTTONUP:
-                inst.HandleLeftButtonUp(lParam);
-                return 0;
+                case Win32.WM_ERASEBKGND:
+                    return 1;
 
-            case Win32.WM_MOUSEWHEEL:
-                short delta = unchecked((short)((long)wParam >> 16));
-                inst.HandleMouseWheel(delta);
-                return 0;
-
-            case Win32.WM_KEYDOWN:
-                if (wParam == Win32.VK_ESCAPE)
-                {
-                    inst.Hide();
+                case Win32.WM_PAINT:
+                    inst.HandlePaint(hwnd);
                     return 0;
-                }
-                break;
 
-            case Win32.WM_ACTIVATE:
-                if ((wParam & 0xFFFF) == Win32.WA_INACTIVE)
-                {
+                case Win32.WM_MOUSEMOVE:
+                    inst.HandleMouseMove(lParam);
+                    return 0;
+
+                case Win32.WM_MOUSELEAVE:
+                    inst._trackingMouse = false;
+                    inst._hoverIsHand = false;
+                    if (inst._hoverId != null && inst._draggingSliderId == null)
+                    {
+                        inst._hoverId = null;
+                        inst.KickAnimations();
+                    }
+                    return 0;
+
+                case Win32.WM_LBUTTONDOWN:
+                    if (inst.HandleLeftButtonDown(lParam))
+                        return 0;
+                    if (inst._pressedHitId != null)
+                        inst.RequestRepaint();
+                    break;
+
+                case Win32.WM_CAPTURECHANGED:
                     inst._pressedHitId = null;
-                    inst._lastDeactivateTick = Environment.TickCount64;
+                    if (inst._draggingSliderId != null)
+                    {
+                        inst._draggingSliderId = null;
+                        inst._draggingSessionId = null;
+                        inst.RequestRepaint();
+                    }
+                    return 0;
+
+                case Win32.WM_LBUTTONUP:
+                    inst.HandleLeftButtonUp(lParam);
+                    return 0;
+
+                case Win32.WM_MOUSEWHEEL:
+                    short delta = unchecked((short)((long)wParam >> 16));
+                    inst.HandleMouseWheel(delta);
+                    return 0;
+
+                case Win32.WM_KEYDOWN:
+                    if (wParam == Win32.VK_ESCAPE)
+                    {
+                        inst.Hide();
+                        return 0;
+                    }
+                    break;
+
+                case Win32.WM_ACTIVATE:
+                    if ((wParam & 0xFFFF) == Win32.WA_INACTIVE)
+                    {
+                        inst._pressedHitId = null;
+                        inst._lastDeactivateTick = Environment.TickCount64;
+                        inst.Hide();
+                    }
+                    return 0;
+
+                case Win32.WM_CLOSE:
                     inst.Hide();
-                }
-                return 0;
+                    return 0;
+            }
 
-            case Win32.WM_CLOSE:
-                inst.Hide();
-                return 0;
+            return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
         }
-
-        return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+        catch
+        {
+            return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
     }
 
     private void HandleMouseMove(nint lParam)
@@ -816,6 +880,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         {
             float vol = Math.Clamp((float)(x - _dragTrackLeft) / Math.Max(1, _dragTrackWidth), 0f, 1f);
             _dragPreviewVolume = vol;
+            _hoverIsHand = true;
             Win32.SetCursor(_cursorHand != 0 ? _cursorHand : _cursorArrow);
 
             long nowTick = Environment.TickCount64;
@@ -832,6 +897,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         var topHit = FindHit(x, y);
         if (topHit != null && topHit.Id.EndsWith("_mute", StringComparison.Ordinal))
         {
+            _hoverIsHand = true;
             Win32.SetCursor(_cursorHand != 0 ? _cursorHand : _cursorArrow);
             if (!string.Equals(_hoverId, topHit.Id, StringComparison.Ordinal))
             {
@@ -844,6 +910,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         var slider = FindSliderHit(x, y);
         if (slider != null && (topHit == null || !topHit.IsButton))
         {
+            _hoverIsHand = true;
             Win32.SetCursor(_cursorHand != 0 ? _cursorHand : _cursorArrow);
             if (!string.Equals(_hoverId, slider.Id, StringComparison.Ordinal))
             {
@@ -854,7 +921,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         }
 
         string? nextHover = topHit?.Id;
-        Win32.SetCursor(topHit != null && topHit.IsButton && _cursorHand != 0 ? _cursorHand : _cursorArrow);
+        _hoverIsHand = topHit != null && topHit.IsButton;
+        Win32.SetCursor(_hoverIsHand && _cursorHand != 0 ? _cursorHand : _cursorArrow);
 
         if (!string.Equals(_hoverId, nextHover, StringComparison.Ordinal))
         {
@@ -919,15 +987,27 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         var hit = FindHit(x, y);
         if (hit != null && pressedId != null && string.Equals(pressedId, hit.Id, StringComparison.Ordinal))
         {
-            hit.OnClick();
+            try { hit.OnClick(); } catch { }
             RequestRepaint();
         }
     }
 
     private void HandleMouseWheel(short delta)
     {
+        _wheelAccum += delta;
         int step = S(36);
-        _scrollTargetY -= (delta / 120) * step;
+        int steps = _wheelAccum / 120;
+        if (steps != 0)
+        {
+            _wheelAccum -= steps * 120;
+            _scrollTargetY -= steps * step;
+        }
+        else if (Math.Abs(_wheelAccum) >= 24)
+        {
+            float frac = _wheelAccum / 120f;
+            _wheelAccum = 0;
+            _scrollTargetY -= (int)MathF.Round(frac * step);
+        }
         ClampScroll();
         if (_settings.ReducedAnimations)
         {
@@ -983,11 +1063,14 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         try
         {
             double nowMs = NowMs();
+            if (_openAnimStartMs < 0) _openAnimStartMs = nowMs;
+            if (_drawerAnimStartMs < 0) _drawerAnimStartMs = nowMs;
             float dt = _lastFrameMs > 0 ? Math.Clamp((float)((nowMs - _lastFrameMs) / 1000.0), 0.001f, 0.05f) : 0.016f;
             _lastFrameMs = nowMs;
             StepAnimations(dt, nowMs);
 
-            if (!_settings.ReducedAnimations && _openAnimStartMs > 0)
+            bool animatingOpen = !_settings.ReducedAnimations && _openAnimStartMs > 0;
+            if (animatingOpen)
             {
                 float openEase = EaseOutCubic(_openAnimStartMs, nowMs, OPEN_ANIM_MS);
                 SetWindowAlpha((byte)Math.Clamp((int)MathF.Round(255f * openEase), 16, 255));
@@ -1003,8 +1086,9 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                 _sliderRegions.Clear();
 
                 _d2d.Clear(Theme.BgWindow);
+                _d2d.SetTextAntialiasGrayscale(animatingOpen);
 
-                if (!_settings.ReducedAnimations && _openAnimStartMs > 0)
+                if (animatingOpen)
                 {
                     float openEase = EaseOutCubic(_openAnimStartMs, nowMs, OPEN_ANIM_MS);
                     if (openEase < 0.999f)
@@ -1034,8 +1118,14 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
 
                 _d2d.ResetTransform();
                 _d2d.DrawRoundedRect(0.5f, 0.5f, w - 1f, h - 1f, SF(10), Theme.BorderStrong, 1f, 0.72f);
+                _d2d.SetTextAntialiasGrayscale(false);
 
-                _d2d.EndFrame(out _);
+                _d2d.EndFrame(out bool deviceLost);
+                if (deviceLost)
+                {
+                    RequestRepaint();
+                    return;
+                }
             }
         }
         finally
@@ -1044,27 +1134,14 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         }
 
         double afterMs = NowMs();
-        if (HasActiveUiAnimation(afterMs))
+        if (Win32.IsWindowVisible(hwnd) && HasActiveUiAnimation(afterMs))
         {
-            double frameElapsedMs = afterMs - _lastFrameMs;
-            if (frameElapsedMs >= 2.5)
-            {
-                StopUiAnimTimer();
-                if (!_animFramePosted && _hwnd != 0)
-                {
-                    _animFramePosted = true;
-                    Win32.PostMessageW(_hwnd, WM_APP_ANIM_FRAME, 0, 0);
-                }
-            }
-            else
-            {
-                StartUiAnimTimer();
-            }
+            StopUiAnimTimer();
+            ScheduleNextVSyncFrame();
         }
         else
         {
             StopUiAnimTimer();
-            _animFramePosted = false;
             _lastFrameMs = 0;
         }
     }
@@ -1136,11 +1213,11 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         var sessions = _snapshot.Sessions;
         if (sessions.Count == 0)
         {
-            int emptyH = S(92);
+            int emptyH = S(104);
             _d2d.FillAndStrokeRoundedRect(padX, y, contentW, emptyH, SF(12), Theme.BgCard, 1f, Theme.BorderSubtle, 1f);
-            _d2d.DrawText(Strings.FlyoutEmptyTitle, padX + S(16), y + S(20), padX + contentW - S(16), y + S(44),
+            _d2d.DrawText(Strings.FlyoutEmptyTitle, padX + S(16), y + S(18), padX + contentW - S(16), y + S(42),
                 12, Win32.FW_SEMIBOLD, Theme.TextPrimary, _dpi);
-            _d2d.DrawText(Strings.FlyoutEmptySub, padX + S(16), y + S(48), padX + contentW - S(16), y + S(70),
+            _d2d.DrawWrappedText(Strings.FlyoutEmptySub, padX + S(16), y + S(46), padX + contentW - S(16), y + emptyH - S(12),
                 11, Win32.FW_NORMAL, Theme.TextSecondary, _dpi);
             _contentTotalH = emptyH + padV * 2;
             _d2d.PopClip();
@@ -1242,7 +1319,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         int dotSz = S(7);
         int dotReserve = dotSz + S(5);
         int titleMeasured = _d2d.MeasureTextWidth(s.DisplayName, 12, Win32.FW_SEMIBOLD, _dpi) + S(4);
-        int nameMaxRight = Math.Min(textRight - globeSz - globeGap - dotReserve, textX + titleMeasured);
+        int nameMaxRight = Math.Clamp(textX + titleMeasured, textX, Math.Max(textX, textRight - globeSz - globeGap - dotReserve));
 
         _d2d.DrawText(s.DisplayName, textX, drawY + S(9), textRight - globeSz - globeGap - dotReserve, drawY + S(27),
             12, Win32.FW_SEMIBOLD, Theme.BlendRgb(Theme.TextPrimary, Theme.Accent, focusHov), _dpi);
@@ -1392,7 +1469,8 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             Theme.BgControl, 0.88f,
             Theme.BlendRgb(Theme.BorderSubtle, deviceRgb, sliderHovT), 0.72f + 0.28f * sliderHovT, 1f);
 
-        float fillW = barW * dispVol;
+        int muteW = Math.Min(barW / 2, S(28));
+        float fillW = dispVol <= 0.003f ? 0f : muteW + Math.Max(0, barW - muteW) * dispVol;
         if (fillW > 2f)
         {
             uint fillStart = (session.IsMuted && !isDraggingThis) ? Theme.Red : Theme.BlendRgb(Theme.BgControl, deviceRgb, 0.65f);
@@ -1401,8 +1479,6 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             _d2d.FillLinearGradientRoundedRect(x, y, barW, h, radius, fillStart, 0.92f, fillEnd, 0.96f);
             _d2d.PopClip();
         }
-
-        int muteW = Math.Min(barW / 2, S(28));
         uint speakerColor = session.IsMuted && !isDraggingThis
             ? Theme.Red
             : (dispVol > 0.14f && !Theme.IsLight ? 0xFFFFFFu : Theme.TextPrimary);
@@ -1680,14 +1756,10 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
             if (ShouldShowBrowserOutputNotice() && _drawerTargetBrowserName != null)
             {
                 float noticeY = ry + S(2);
-                int noticeH = S(60);
+                int noticeH = S(66);
                 int noticeW = w - padX * 2;
                 _d2d.FillAndStrokeRoundedRect(padX, noticeY, noticeW, noticeH, SF(8),
                     Theme.AmberSoft, drawerEase, Theme.Amber, 0.55f * drawerEase);
-
-                string noticeText = Strings.BrowserOutputScopeNotice(_drawerTargetBrowserName);
-                _d2d.DrawWrappedText(noticeText, padX + S(10), noticeY + S(6), padX + noticeW - S(10), noticeY + S(36),
-                    9, Win32.FW_MEDIUM, Theme.TextPrimary, _dpi, alpha: drawerEase);
 
                 const string dismissId = "fly_appout_dismiss_notice";
                 string dismissText = Strings.BtnDontShowAgain;
@@ -1695,6 +1767,10 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
                 int dismissH = S(19);
                 int dismissX = padX + noticeW - S(8) - dismissW;
                 float dismissY = noticeY + noticeH - S(6) - dismissH;
+
+                string noticeText = Strings.BrowserOutputScopeNotice(_drawerTargetBrowserName);
+                _d2d.DrawWrappedText(noticeText, padX + S(10), noticeY + S(5), padX + noticeW - S(10), dismissY - S(4),
+                    9, Win32.FW_MEDIUM, Theme.TextPrimary, _dpi, alpha: drawerEase);
                 float dismissHov = GetHoverT(dismissId);
 
                 _d2d.FillRoundedRect(dismissX, dismissY, dismissW, dismissH, SF(5),
@@ -1804,7 +1880,7 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         string? appKey, string? exePath, string? displayName,
         float x, float y, float size, float radius)
     {
-        nint hIcon = _iconRenderer.GetIconForApp(appKey, exePath);
+        nint hIcon = _iconRenderer.GetIconForAppNonBlocking(appKey, exePath);
         if (hIcon != 0 && _d2d.DrawIcon(hIcon, x, y, size))
             return;
 
@@ -1834,10 +1910,12 @@ internal sealed unsafe class TrayFlyoutWindow : IDisposable
         _engine.StateChanged -= OnStateChanged;
         _engine.SleepTimerChanged -= OnSleepTimerChanged;
         _stateStore.StateChanged -= OnStoreChanged;
+        _iconRenderer.IconsUpdated -= OnIconsUpdated;
 
         if (_hwnd != 0)
         {
             StopUiAnimTimer();
+            Win32.KillTimer(_hwnd, TIMER_IDLE_RELEASE);
             Win32.DestroyWindow(_hwnd);
             _hwnd = 0;
         }

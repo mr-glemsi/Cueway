@@ -26,6 +26,8 @@ internal static unsafe partial class CoreAudio
     public static readonly Guid IID_ISimpleAudioVolume = new("87CE5498-68D6-44E5-9215-6DA47EF883D8");
     public static readonly Guid IID_IAudioMeterInformation = new("C02216F6-8C67-4B5B-9D00-D008E73E0064");
     public static readonly Guid IID_IMMNotificationClient = new("7991EEC9-7E89-4D85-8390-6C703CEC60C0");
+    public static readonly Guid IID_IMMEndpoint = new("1BE09788-6894-4089-8586-9A2A6C265AC5");
+    public static readonly Guid IID_IAgileObject = new("94EA2B94-E9CC-49E0-C0FF-EE64CA8F5B90");
     public static readonly Guid IID_IUnknown = new("00000000-0000-0000-C000-000000000046");
     public static readonly Guid CLSID_PolicyConfigClient = new("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9");
     public static readonly Guid IID_IPolicyConfig = new("F8679F50-850A-41CF-9C72-430F290290C8");
@@ -130,6 +132,44 @@ internal static unsafe partial class CoreAudio
         }
     }
 
+    public static bool? TryGetDeviceDataFlow(nint enumerator, string? deviceId, out int dataFlow)
+    {
+        dataFlow = eRender;
+        if (enumerator == 0 || string.IsNullOrWhiteSpace(deviceId))
+            return null;
+
+        nint dev = 0;
+        nint ep = 0;
+        try
+        {
+            nint* vtbl = *(nint**)enumerator;
+            int hr;
+            fixed (char* pId = deviceId)
+            {
+                hr = ((delegate* unmanaged[Stdcall]<nint, char*, nint*, int>)vtbl[5])(enumerator, pId, &dev);
+            }
+            if (hr != 0 || dev == 0)
+                return null;
+
+            if (QueryInterface(dev, in IID_IMMEndpoint, out ep) != 0 || ep == 0)
+                return null;
+
+            nint* epVtbl = *(nint**)ep;
+            int flow = 0;
+            if (((delegate* unmanaged[Stdcall]<nint, int*, int>)epVtbl[3])(ep, &flow) == 0)
+            {
+                dataFlow = flow;
+                return true;
+            }
+            return null;
+        }
+        finally
+        {
+            if (ep != 0) Release(ep);
+            if (dev != 0) Release(dev);
+        }
+    }
+
     public static int Enumerator_RegisterEndpointNotificationCallback(nint enumerator, nint pClient)
     {
         nint* vtbl = *(nint**)enumerator;
@@ -200,9 +240,11 @@ internal static unsafe partial class CoreAudio
 
         Guid clsid = CLSID_PolicyConfigClient;
         Guid iid = IID_IPolicyConfig;
+        bool isVista = false;
         int hr = Win32.CoCreateInstance(&clsid, 0, CLSCTX_ALL, &iid, out nint policy);
         if (hr != 0 || policy == 0)
         {
+            isVista = true;
             iid = IID_IPolicyConfigVista;
             hr = Win32.CoCreateInstance(&clsid, 0, CLSCTX_ALL, &iid, out policy);
             if (hr != 0 || policy == 0)
@@ -212,7 +254,8 @@ internal static unsafe partial class CoreAudio
         try
         {
             nint* vtbl = *(nint**)policy;
-            var setDefault = (delegate* unmanaged[Stdcall]<nint, char*, int, int>)vtbl[13];
+            // IPolicyConfig::SetDefaultEndpoint is slot 13; IPolicyConfigVista omits ResetDeviceFormat (slot 5), so it is slot 12
+            var setDefault = (delegate* unmanaged[Stdcall]<nint, char*, int, int>)vtbl[isVista ? 12 : 13];
             fixed (char* pId = deviceId)
             {
                 int hrConsole = setDefault(policy, pId, eConsole);
@@ -434,17 +477,19 @@ internal static unsafe partial class CoreAudio
         {
             public nint Vtbl;
             public int RefCount;
+            public int ActiveCallbacks;
             public nint ManagedHandle;
         }
 
-        private readonly NativeObject* _native;
+        private NativeObject* _native;
         private readonly nint* _vtbl;
         private GCHandle _selfHandle;
-        private readonly Action<string> _onDeviceChange;
+        private readonly Action<string, string?> _onDeviceChange;
+        private int _disposed;
 
         public nint ComPtr => (nint)_native;
 
-        public NotificationClientCcw(Action<string> onDeviceChange)
+        public NotificationClientCcw(Action<string, string?> onDeviceChange)
         {
             _onDeviceChange = onDeviceChange;
             _selfHandle = GCHandle.Alloc(this);
@@ -465,74 +510,102 @@ internal static unsafe partial class CoreAudio
             _native->ManagedHandle = GCHandle.ToIntPtr(_selfHandle);
         }
 
-        private void RaiseChange(string reason)
+        private void RaiseChange(string reason, string? deviceId)
         {
-            try { _onDeviceChange(reason); } catch { }
+            try { _onDeviceChange(reason, deviceId); } catch { }
+        }
+
+        private static void DispatchCallback(NativeObject* self, string reason, char* pwstrDeviceId)
+        {
+            if (self == null) return;
+            Interlocked.Increment(ref self->ActiveCallbacks);
+            try
+            {
+                nint handlePtr = Volatile.Read(ref self->ManagedHandle);
+                if (handlePtr != 0)
+                {
+                    var target = GCHandle.FromIntPtr(handlePtr).Target as NotificationClientCcw;
+                    if (target != null)
+                    {
+                        string? devId = pwstrDeviceId != null ? Marshal.PtrToStringUni((nint)pwstrDeviceId) : null;
+                        target.RaiseChange(reason, devId);
+                    }
+                }
+            }
+            catch { }
+            finally
+            {
+                Interlocked.Decrement(ref self->ActiveCallbacks);
+            }
         }
 
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
         private static int QueryInterfaceImpl(NativeObject* self, Guid* riid, nint* ppv)
         {
-            if (ppv == null || riid == null) return unchecked((int)0x80004003);
-            if (*riid == IID_IUnknown || *riid == IID_IMMNotificationClient)
+            try
             {
-                *ppv = (nint)self;
-                Interlocked.Increment(ref self->RefCount);
-                return 0;
+                if (self == null || ppv == null || riid == null) return unchecked((int)0x80004003);
+                if (*riid == IID_IUnknown || *riid == IID_IMMNotificationClient || *riid == IID_IAgileObject)
+                {
+                    *ppv = (nint)self;
+                    Interlocked.Increment(ref self->RefCount);
+                    return 0;
+                }
+                *ppv = 0;
+                return unchecked((int)0x80004002); // E_NOINTERFACE
             }
-            *ppv = 0;
-            return unchecked((int)0x80004002); // E_NOINTERFACE
+            catch
+            {
+                return unchecked((int)0x80004005);
+            }
         }
 
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
         private static uint AddRefImpl(NativeObject* self)
-            => (uint)Interlocked.Increment(ref self->RefCount);
+            => self != null ? (uint)Interlocked.Increment(ref self->RefCount) : 0;
 
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
         private static uint ReleaseImpl(NativeObject* self)
-            => (uint)Math.Max(0, Interlocked.Decrement(ref self->RefCount));
+        {
+            if (self == null) return 0;
+            int remaining = Interlocked.Decrement(ref self->RefCount);
+            if (remaining <= 0)
+            {
+                nint vtblPtr = self->Vtbl;
+                NativeMemory.Free(self);
+                if (vtblPtr != 0)
+                    NativeMemory.Free((void*)vtblPtr);
+                return 0;
+            }
+            return (uint)remaining;
+        }
 
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
         private static int OnDeviceStateChangedImpl(NativeObject* self, char* pwstrDeviceId, uint dwNewState)
         {
-            if (self->ManagedHandle != 0)
-            {
-                var target = GCHandle.FromIntPtr(self->ManagedHandle).Target as NotificationClientCcw;
-                target?.RaiseChange(dwNewState != DEVICE_STATE_ACTIVE ? "DeviceStateChanged" : "DeviceEnabled");
-            }
+            DispatchCallback(self, dwNewState != DEVICE_STATE_ACTIVE ? "DeviceStateChanged" : "DeviceEnabled", pwstrDeviceId);
             return 0;
         }
 
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
         private static int OnDeviceAddedImpl(NativeObject* self, char* pwstrDeviceId)
         {
-            if (self->ManagedHandle != 0)
-            {
-                var target = GCHandle.FromIntPtr(self->ManagedHandle).Target as NotificationClientCcw;
-                target?.RaiseChange("DeviceAdded");
-            }
+            DispatchCallback(self, "DeviceAdded", pwstrDeviceId);
             return 0;
         }
 
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
         private static int OnDeviceRemovedImpl(NativeObject* self, char* pwstrDeviceId)
         {
-            if (self->ManagedHandle != 0)
-            {
-                var target = GCHandle.FromIntPtr(self->ManagedHandle).Target as NotificationClientCcw;
-                target?.RaiseChange("DeviceRemoved");
-            }
+            DispatchCallback(self, "DeviceRemoved", pwstrDeviceId);
             return 0;
         }
 
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
         private static int OnDefaultDeviceChangedImpl(NativeObject* self, int flow, int role, char* pwstrDefaultDeviceId)
         {
-            if (flow == eRender && (role == eMultimedia || role == eConsole) && self->ManagedHandle != 0)
-            {
-                var target = GCHandle.FromIntPtr(self->ManagedHandle).Target as NotificationClientCcw;
-                target?.RaiseChange("DefaultOutputChanged");
-            }
+            if (flow == eRender && (role == eMultimedia || role == eConsole))
+                DispatchCallback(self, "DefaultOutputChanged", pwstrDefaultDeviceId);
             return 0;
         }
 
@@ -541,16 +614,24 @@ internal static unsafe partial class CoreAudio
 
         public void Dispose()
         {
-            if (_selfHandle.IsAllocated)
-                _selfHandle.Free();
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+
             if (_native != null)
             {
-                _native->ManagedHandle = 0;
-                NativeMemory.Free(_native);
+                Interlocked.Exchange(ref _native->ManagedHandle, 0);
+                long deadline = Environment.TickCount64 + 100;
+                while (Volatile.Read(ref _native->ActiveCallbacks) > 0 && Environment.TickCount64 < deadline)
+                    Thread.Sleep(1);
             }
-            if (_vtbl != null)
+
+            if (_selfHandle.IsAllocated)
+                _selfHandle.Free();
+
+            if (_native != null)
             {
-                NativeMemory.Free(_vtbl);
+                Release((nint)_native);
+                _native = null;
             }
         }
     }

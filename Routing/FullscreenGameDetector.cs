@@ -73,8 +73,10 @@ internal static unsafe class FullscreenGameDetector
         int style = Win32.GetWindowLongW(fg, Win32.GWL_STYLE);
         bool hasCaption = (style & (int)Win32.WS_CAPTION) == (int)Win32.WS_CAPTION;
         bool coversTaskbar =
-            mi.rcMonitor.Height > mi.rcWork.Height ||
-            mi.rcMonitor.Width > mi.rcWork.Width;
+            (mi.rcMonitor.Top < mi.rcWork.Top && rect.Top <= mi.rcMonitor.Top + 2) ||
+            (mi.rcMonitor.Bottom > mi.rcWork.Bottom && rect.Bottom >= mi.rcMonitor.Bottom - 2) ||
+            (mi.rcMonitor.Left < mi.rcWork.Left && rect.Left <= mi.rcMonitor.Left + 2) ||
+            (mi.rcMonitor.Right > mi.rcWork.Right && rect.Right >= mi.rcMonitor.Right - 2);
 
         if (hasCaption && !coversTaskbar)
             return false;

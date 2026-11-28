@@ -61,7 +61,7 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
         var mi = new Win32.MONITORINFO { cbSize = (uint)sizeof(Win32.MONITORINFO) };
         Win32.GetMonitorInfoW(hMon, &mi);
 
-        uint dpi = Win32.GetDpiForWindow(_hwnd);
+        uint dpi = Win32.GetMonitorDpi(hMon, 96);
         if (dpi == 0) dpi = 96;
 
         int width = Theme.Scale(340, dpi);
@@ -104,23 +104,43 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
 
         try
         {
+            int iconSize = Theme.Scale(32, dpi);
+            int iconX = Theme.Scale(16, dpi);
+            int iconY = (height - iconSize) / 2;
+            nint hIcon = _iconRenderer.GetIconForApp(msg.AppKey, msg.ExePath);
+            bool iconDrawnByGdip = false;
+
             if (GdiPlus.GdipCreateFromHDC(memDc, out nint graphics) == 0 && graphics != 0)
             {
                 try
                 {
                     GdiPlus.GdipSetSmoothingMode(graphics, GdiPlus.SmoothingModeAntiAlias);
+                    GdiPlus.GdipSetInterpolationMode(graphics, GdiPlus.InterpolationModeHighQualityBicubic);
                     GdiPlus.GdipGraphicsClear(graphics, 0x00000000);
 
                     float r = Theme.ScaleF(14f, dpi);
                     uint border = msg.IsWarning
-                        ? GdiPlus.Argb(Theme.Amber, 200)
-                        : GdiPlus.Argb(Theme.BorderStrong, 230);
+                        ? GdiPlus.Argb(Theme.Amber, 220)
+                        : GdiPlus.Argb(Theme.BorderStrong, 255);
                     GdiPlus.FillAndStrokeRoundedRect(
                         graphics,
                         1f, 1f, width - 2f, height - 2f, r,
-                        GdiPlus.Argb(Theme.BgOsd, 242),
+                        GdiPlus.Argb(Theme.BgOsd, 255),
                         border,
                         1.2f);
+
+                    if (hIcon != 0 && GdiPlus.GdipCreateBitmapFromHICON(hIcon, out nint iconBmp) == 0 && iconBmp != 0)
+                    {
+                        try
+                        {
+                            GdiPlus.GdipDrawImageRectI(graphics, iconBmp, iconX, iconY, iconSize, iconSize);
+                            iconDrawnByGdip = true;
+                        }
+                        finally
+                        {
+                            GdiPlus.GdipDisposeImage(iconBmp);
+                        }
+                    }
                 }
                 finally
                 {
@@ -128,12 +148,7 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
                 }
             }
 
-            // App icon
-            int iconSize = Theme.Scale(32, dpi);
-            int iconX = Theme.Scale(16, dpi);
-            int iconY = (height - iconSize) / 2;
-            nint hIcon = _iconRenderer.GetIconForApp(msg.AppKey, msg.ExePath);
-            if (hIcon != 0)
+            if (hIcon != 0 && !iconDrawnByGdip)
             {
                 Win32.DrawIconEx(memDc, iconX, iconY, hIcon, iconSize, iconSize, 0, 0, Win32.DI_NORMAL);
             }
@@ -142,6 +157,8 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
             Win32.SetBkMode(memDc, Win32.TRANSPARENT);
             int textLeft = hIcon != 0 ? iconX + iconSize + Theme.Scale(12, dpi) : Theme.Scale(18, dpi);
             int textRight = width - Theme.Scale(16, dpi);
+            int textTop = Theme.Scale(13, dpi);
+            int textBottom = Theme.Scale(56, dpi);
 
             EnsureFonts(dpi);
 
@@ -154,7 +171,7 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
                     var r1 = new Win32.RECT
                     {
                         Left = textLeft,
-                        Top = Theme.Scale(13, dpi),
+                        Top = textTop,
                         Right = textRight,
                         Bottom = Theme.Scale(34, dpi)
                     };
@@ -168,7 +185,7 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
                         Left = textLeft,
                         Top = Theme.Scale(34, dpi),
                         Right = textRight,
-                        Bottom = Theme.Scale(56, dpi)
+                        Bottom = textBottom
                     };
                     Win32.DrawTextW(memDc, msg.Subtitle, -1, &r2,
                         Win32.DT_LEFT | Win32.DT_VCENTER | Win32.DT_SINGLELINE | Win32.DT_END_ELLIPSIS | Win32.DT_NOPREFIX);
@@ -179,17 +196,38 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
                 }
             }
 
-            // Restore alpha channel for pixels written by GDI DrawTextW / DrawIconEx
+            // GDI DrawTextW zeroes the alpha byte of pixels it writes (including black light-theme text!).
+            // Restore full alpha across the text rect (and fallback icon rect if GDI+ failed).
             if (ppvBits != 0)
             {
                 uint* p = (uint*)ppvBits;
-                int total = width * height;
-                for (int i = 0; i < total; i++)
+                int x0 = Math.Clamp(textLeft, 0, width);
+                int x1 = Math.Clamp(textRight, 0, width);
+                int y0 = Math.Clamp(textTop, 0, height);
+                int y1 = Math.Clamp(textBottom, 0, height);
+                for (int py = y0; py < y1; py++)
                 {
-                    uint px = p[i];
-                    if ((px & 0xFF000000) == 0 && (px & 0x00FFFFFF) != 0)
+                    int row = py * width;
+                    for (int px = x0; px < x1; px++)
                     {
-                        p[i] = px | 0xFF000000;
+                        p[row + px] |= 0xFF000000u;
+                    }
+                }
+                if (hIcon != 0 && !iconDrawnByGdip)
+                {
+                    int ix0 = Math.Clamp(iconX, 0, width);
+                    int ix1 = Math.Clamp(iconX + iconSize, 0, width);
+                    int iy0 = Math.Clamp(iconY, 0, height);
+                    int iy1 = Math.Clamp(iconY + iconSize, 0, height);
+                    for (int py = iy0; py < iy1; py++)
+                    {
+                        int row = py * width;
+                        for (int px = ix0; px < ix1; px++)
+                        {
+                            uint val = p[row + px];
+                            if ((val & 0xFF000000u) == 0 && (val & 0x00FFFFFFu) != 0)
+                                p[row + px] = val | 0xFF000000u;
+                        }
                     }
                 }
             }
@@ -201,7 +239,7 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
             {
                 BlendOp = Win32.AC_SRC_OVER,
                 BlendFlags = 0,
-                SourceConstantAlpha = 255,
+                SourceConstantAlpha = 242,
                 AlphaFormat = Win32.AC_SRC_ALPHA
             };
             Win32.UpdateLayeredWindow(_hwnd, screenDc, &ptDst, &sz, memDc, &ptSrc, 0, &blend, Win32.ULW_ALPHA);
@@ -218,13 +256,20 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     private static nint WndProc(nint hwnd, uint msg, nuint wParam, nint lParam)
     {
-        if (msg == Win32.WM_TIMER && wParam == TIMER_HIDE)
+        try
         {
-            Win32.KillTimer(hwnd, TIMER_HIDE);
-            Win32.ShowWindow(hwnd, Win32.SW_HIDE);
-            return 0;
+            if (msg == Win32.WM_TIMER && wParam == TIMER_HIDE)
+            {
+                Win32.KillTimer(hwnd, TIMER_HIDE);
+                Win32.ShowWindow(hwnd, Win32.SW_HIDE);
+                return 0;
+            }
+            return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
         }
-        return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+        catch
+        {
+            return Win32.DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
     }
 
     private void EnsureFonts(uint dpi)
@@ -239,10 +284,10 @@ internal sealed unsafe class OsdOverlayWindow : IDisposable
 
         ReleaseFonts();
         _fontTitle = Win32.CreateFontW(
-            -Theme.Scale(14, dpi), 0, 0, 0, titleWeight, 0, 0, 0,
+            -(int)MathF.Round(10.5f * dpi / 72f), 0, 0, 0, titleWeight, 0, 0, 0,
             1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, titleFace);
         _fontSub = Win32.CreateFontW(
-            -Theme.Scale(12, dpi), 0, 0, 0, subWeight, 0, 0, 0,
+            -(int)MathF.Round(9f * dpi / 72f), 0, 0, 0, subWeight, 0, 0, 0,
             1, 0, 0, Win32.CLEARTYPE_QUALITY, 0, subFace);
         _fontDpi = dpi;
         _fontFace = titleFace;
